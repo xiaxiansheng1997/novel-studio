@@ -1,0 +1,200 @@
+"""内嵌实时浏览器路由：WebSocket 推帧 + 回传输入；页面里完成登录与接口录制。
+
+连接：ws://<host>/ws/live/<key>?url=<可选覆盖地址>&token=<W2A_API_KEY，若已设置>
+服务端下发：{t:'meta'|'frame'|'record_result'|'error'|'log', ...}
+客户端上行：{t:'mouse'|'wheel'|'key'|'text'|'navigate'|'reload'|'record'|'close', ...}
+
+安全：本机自用仍可能被任意网页跨站访问，故对 WS/REST 做 Origin 校验；
+若设了 W2A_API_KEY，则 WS 需带 ?token=、REST 需带 Authorization: Bearer；
+navigate / ?url= 仅允许 http(s)，硬拒 file://、chrome://、devtools:// 等。
+"""
+from __future__ import annotations
+
+import asyncio
+from urllib.parse import urlparse
+
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
+from loguru import logger
+
+from app.browser.live_browser import VIEWPORT_H, VIEWPORT_W, LiveBrowserManager, LiveSession
+
+router = APIRouter()
+
+_MOUSE_TYPE = {"down": "mousePressed", "up": "mouseReleased", "move": "mouseMoved"}
+
+
+# ---------- 安全校验 ----------
+def _allowed_origins(settings) -> set[str]:
+    hosts = {"127.0.0.1", "localhost"}
+    if settings.host and settings.host not in ("0.0.0.0", "::"):
+        hosts.add(settings.host)
+    out: set[str] = set()
+    for h in hosts:
+        out.add(f"http://{h}:{settings.port}")
+        out.add(f"https://{h}:{settings.port}")
+    return out
+
+
+def _origin_ok(origin: str | None, settings) -> bool:
+    # 浏览器发起的 WS/跨域 fetch 必带 Origin；无 Origin（curl/同源脚本）放行
+    return origin is None or origin in _allowed_origins(settings)
+
+
+def _key_ok(provided: str | None, settings) -> bool:
+    if not settings.api_key:
+        return True
+    return provided == settings.api_key
+
+
+def _bearer(request: Request) -> str | None:
+    h = request.headers.get("authorization", "")
+    return h[7:] if h.lower().startswith("bearer ") else None
+
+
+def _url_allowed(url: str) -> bool:
+    try:
+        u = urlparse(url)
+    except ValueError:
+        return False
+    return u.scheme in ("http", "https") and bool(u.netloc)
+
+
+# ---------- REST ----------
+@router.get("/live/loggedin/{key}")
+async def live_loggedin(request: Request, key: str):
+    """探测某 provider 当前是否已登录（仅当浏览器已打开时检查，不启动浏览器）。"""
+    settings = request.app.state.settings
+    if not _origin_ok(request.headers.get("origin"), settings) or not _key_ok(_bearer(request), settings):
+        return JSONResponse(status_code=403, content={"error": {"message": "forbidden", "type": "forbidden"}})
+    return await request.app.state.sessions.is_logged_in(key)
+
+
+@router.post("/live/close/{key}")
+async def live_close(request: Request, key: str, full: bool = False):
+    """关闭内嵌实时会话（停止推屏/录制）。
+
+    full=true 时额外关闭整个浏览器 context（连宿主窗口一起关）；
+    持久化 profile 仍保留，下次聊天会按需重新拉起。
+    """
+    settings = request.app.state.settings
+    if not _origin_ok(request.headers.get("origin"), settings) or not _key_ok(_bearer(request), settings):
+        return JSONResponse(status_code=403, content={"error": {"message": "forbidden", "type": "forbidden"}})
+    live: LiveBrowserManager = request.app.state.live
+    sess = live.get(key)
+    if sess and sess.recorder:
+        sess.record_stop()
+    await live.close(key)  # 走管理器：从注册表摘除 + 彻底回收（停屏/detach/落盘录制）
+    if full:
+        await live.pool.close(key)
+    return {"closed": True, "key": key, "browser_closed": full}
+
+
+# ---------- WebSocket 输入分发 ----------
+async def _handle(live: LiveBrowserManager, sess: LiveSession, ws: WebSocket, data: dict) -> None:
+    t = data.get("t")
+    if t == "mouse":
+        action = data.get("action", "move")
+        cc = data.get("clickCount")
+        await sess.mouse(
+            _MOUSE_TYPE.get(action, "mouseMoved"),
+            float(data.get("x", 0)),
+            float(data.get("y", 0)),
+            data.get("button"),
+            int(cc) if cc is not None else None,
+        )
+    elif t == "wheel":
+        await sess.wheel(float(data.get("x", 0)), float(data.get("y", 0)), float(data.get("dx", 0)), float(data.get("dy", 0)))
+    elif t == "key":
+        mods = data.get("mods") or {}
+        mask = (1 if mods.get("alt") else 0) | (2 if mods.get("ctrl") else 0) | (4 if mods.get("meta") else 0) | (8 if mods.get("shift") else 0)
+        await sess.press_key(
+            data.get("etype", "keyDown"),
+            data.get("key", ""),
+            data.get("code", ""),
+            data.get("text", ""),
+            mask,
+        )
+    elif t == "text":
+        await sess.insert_text(data.get("value", ""))
+    elif t == "navigate":
+        url = data.get("url", "")
+        if _url_allowed(url):
+            await sess.navigate(url)
+        else:
+            await ws.send_json({"t": "error", "message": "非法地址（仅允许 http/https）"})
+    elif t == "reload":
+        await sess.reload()
+    elif t == "record":
+        if data.get("on"):
+            sess.record_start()
+            await ws.send_json({"t": "log", "message": "已开始录制，请在页面里正常发一条对话（如：你好）"})
+        else:
+            res = sess.record_stop()
+            await ws.send_json({"t": "record_result", "result": res})
+    elif t == "close":
+        await live.close(sess.key)
+
+
+@router.websocket("/ws/live/{key}")
+async def ws_live(ws: WebSocket, key: str) -> None:
+    settings = ws.app.state.settings
+    # 握手前拒绝：不 accept，直接以 HTTP 错误回绝跨站/无口令连接
+    if not _origin_ok(ws.headers.get("origin"), settings):
+        await ws.close(code=4403)
+        return
+    if not _key_ok(ws.query_params.get("token"), settings):
+        await ws.close(code=4401)
+        return
+
+    await ws.accept()
+    live: LiveBrowserManager = ws.app.state.live
+    config = ws.app.state.config
+
+    pcfg = config.providers.get(key)
+    if pcfg is None:
+        await ws.send_json({"t": "error", "message": f"未知 provider: {key}"})
+        await ws.close()
+        return
+
+    raw_url = ws.query_params.get("url") or pcfg.home_url
+    url = raw_url if _url_allowed(raw_url) else pcfg.home_url
+    if url != raw_url:
+        await ws.send_json({"t": "log", "message": "已忽略非法地址，改用默认首页"})
+
+    try:
+        sess = await live.open(key, url)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"[live] 打开失败: {key}")
+        await ws.send_json({"t": "error", "message": f"打开浏览器失败: {exc}"})
+        await ws.close()
+        return
+
+    await ws.send_json({"t": "meta", "key": key, "url": url, "w": VIEWPORT_W, "h": VIEWPORT_H, "dsf": 1})
+
+    q = sess.subscribe()
+
+    async def _pump() -> None:
+        while True:
+            msg = await q.get()
+            await ws.send_json(msg)
+
+    pump_task = asyncio.create_task(_pump())
+    try:
+        while True:
+            data = await ws.receive_json()
+            try:
+                await _handle(live, sess, ws, data)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[live:{key}] 处理输入失败: {exc}")
+    except WebSocketDisconnect:
+        pass
+    except Exception:  # noqa: BLE001
+        logger.debug(f"[live:{key}] 连接异常结束")
+    finally:
+        pump_task.cancel()
+        try:
+            await pump_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        sess.unsubscribe(q)  # 无订阅者时会触发 stopScreencast，省 CPU

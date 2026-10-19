@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 环境与敏感数据
+.env
+storage/
+
+# recon 抓取的接口样本含真实结构与样例，默认不入库
+fixtures/*.json
+
+# 浏览器 profile / 票据 / 会话库
+storage/**
+*.sqlite
+*.db
+
+# IDE
+.idea/
+.vscode/

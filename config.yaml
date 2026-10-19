@@ -1,0 +1,51 @@
+# Web2API 反代主配置。敏感值请放 .env，本文件只放非敏感的运行参数。
+
+server:
+  # OpenAI 兼容接口前缀
+  title: "Web2API 对话反代"
+
+logging:
+  level: INFO
+
+# 全局限流（每分钟每 provider 接受的请求数），防止把账号刷到风控
+rate_limit_per_minute: 20
+
+providers:
+  qwen:
+    enabled: true
+    display_name: "通义千问"
+    model_prefix: "qwen-"
+    # 通义走 HTTP 快路径：用 Playwright 登录后取 login_tongyi_ticket，再用 httpx 直接打
+    home_url: "https://tongyi.aliyun.com/qianwen"
+    headless: true         # 千问反爬门槛低：无头运行→内嵌登录与聊天都不弹独立窗口（若登录被拦，改回 false）
+    # 抓取真实接口前，endpoint 留空 -> 运行时报错提示执行 recon；recon 会把结果写入 fixtures/qwen.json
+    endpoint: ""
+    models:
+      - qwen-plus
+      - qwen-max
+      - qwen-turbo
+    max_concurrency: 2
+
+  doubao:
+    enabled: true
+    display_name: "豆包"
+    model_prefix: "doubao-"
+    # 豆包依赖前端 X-Signature，走 Playwright 驱动真实页面 + 拦截响应
+    home_url: "https://www.doubao.com/chat/"
+    headless: false        # 豆包风控较严，建议有头运行以复用登录态
+    models:
+      - doubao-pro
+      - doubao-lite
+    max_concurrency: 1
+
+  deepseek:
+    enabled: true
+    display_name: "DeepSeek"
+    model_prefix: "deepseek-"
+    # DeepSeek 有 PoW + AWS WAF，走 Playwright 在真实页面内触发发送并拦截 SSE（页面自算 PoW）
+    home_url: "https://chat.deepseek.com/"
+    headless: false
+    models:
+      - deepseek-chat
+      - deepseek-reasoner
+    max_concurrency: 1     # 官方封号严，务必保持极低并发

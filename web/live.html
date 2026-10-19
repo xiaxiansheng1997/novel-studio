@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>内嵌浏览器 · 登录 / 录制</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, "Microsoft YaHei", sans-serif; background:#0f1117; color:#e6e6e6; }
+  header { padding:12px 18px; background:#171a23; border-bottom:1px solid #262b38; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header a { color:#7aa2ff; text-decoration:none; font-size:14px; }
+  select, input, button { background:#1c212c; color:#e6e6e6; border:1px solid #2c3444; border-radius:6px; padding:7px 10px; font-size:14px; }
+  button { cursor:pointer; }
+  button:hover { background:#232a37; }
+  button.rec { border-color:#7a2c2c; color:#ff9a9a; }
+  button.warn { border-color:#7a5a2c; color:#ffd59a; }
+  #url { flex:1; min-width:240px; }
+  #status { font-size:13px; color:#9aa4b2; padding:8px 18px; }
+  #status b { color:#e6e6e6; }
+  #typebar { max-width:1280px; margin:10px auto 6px; display:flex; gap:8px; }
+  #typecn { flex:1; }
+  #stage { position:relative; margin:0 auto; width:min(1280px, 96vw); border:1px solid #262b38; border-radius:8px; overflow:hidden; background:#000; }
+  #shot { display:block; width:100%; height:auto; outline:none; user-select:none; }
+  #ime-proxy { position:absolute; left:-9999px; width:1px; height:1px; top:0; outline:none; white-space:pre; overflow:hidden; }
+  #log { max-width:1280px; margin:12px auto; padding:0 4px; font-size:13px; color:#9aa4b2; white-space:pre-wrap; }
+  .hint { max-width:1280px; margin:6px auto; padding:10px 14px; background:#141821; border:1px solid #232a37; border-radius:8px; font-size:13px; color:#9aa4b2; line-height:1.6; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:#666; margin-right:4px; }
+  .dot.on { background:#4ade80; } .dot.off { background:#f87171; }
+  label.ck { display:flex;align-items:center;gap:5px;font-size:13px;color:#9aa4b2;cursor:pointer; }
+  label.ck input { width:auto;padding:0; }
+</style>
+</head>
+<body>
+<header>
+  <a href="/ui/admin.html">← 管理</a>
+  <a href="/ui/chat.html">聊天 →</a>
+  <select id="provider">
+    <option value="qwen">通义千问</option>
+    <option value="doubao">豆包</option>
+    <option value="deepseek">DeepSeek</option>
+  </select>
+  <input id="url" placeholder="地址（留空用默认首页）">
+  <button id="connect">连接</button>
+  <button id="reload">刷新页面</button>
+  <button id="check">检测登录</button>
+  <label class="ck"><input type="checkbox" id="autojump" checked> 登录成功后自动跳转聊天</label>
+  <label class="ck"><input type="checkbox" id="closewin"> 同时关闭浏览器窗口</label>
+  <button id="canceljump" class="warn" style="display:none;">取消跳转</button>
+  <button id="record" class="rec">● 开始录制接口</button>
+</header>
+
+<div id="status"><span id="conn" class="dot off"></span>状态：<b id="msg">未连接</b></div>
+
+<div class="hint">
+  用法：<b>连接</b>后，这里会实时显示真实站点画面 —— 你直接在<b>画面里</b>用鼠标/键盘完成登录（扫码/输密码/过滑块），无需命令行。
+  检测到登录成功会倒计时 3 秒自动跳转聊天（可点“取消跳转”中止）。粘贴密码/验证码用 Ctrl+V 可用。<br>
+  录制接口（可选）：点<b>开始录制接口</b> → 在画面里发一句“你好” → 点<b>停止录制</b>，写入 fixtures/&lt;provider&gt;.json（未抓到数据不会覆盖旧文件）。<br>
+  <span style="color:#6b7280">提示：点击画面后即可直接输入（支持中文输入法）；英文/数字/特殊键实时转发，中文通过合成后上屏。也可用上方文本框批量发送。</span>
+</div>
+
+<div id="typebar">
+  <input id="typecn" placeholder="①先点一下画面里的输入框聚焦　②在这里输入中文/长文本，回车发送（走 insertText，不受逐帧 IME 限制）">
+  <button id="typesend">发送到此框</button>
+</div>
+
+<div id="stage"><img id="shot" tabindex="0" alt="未连接"><div id="ime-proxy" contenteditable="true"></div></div>
+<div id="log"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let ws=null, logicalW=1280, logicalH=800, dsf=1, recording=false;
+let pollTimer=null, connectedKey=null, inFlight=false;
+let prevLoggedIn=false, baselineDone=false, mouseDown=false, lastMove=0;
+let cdTimer=null, cdLeft=0;
+
+function apiKey(){ return (localStorage.getItem('w2a_apikey')||'').trim(); }
+function authFetch(url, opts){ opts=opts||{}; opts.headers=Object.assign({}, opts.headers); const k=apiKey(); if(k) opts.headers['Authorization']='Bearer '+k; return fetch(url, opts); }
+function log(m){ $('log').textContent += (m?('\n'+m):''); }
+function setMsg(t,on){ $('msg').textContent=t; $('conn').className='dot '+(on?'on':'off'); }
+function showCancel(b){ $('canceljump').style.display=b?'':'none'; }
+
+function connect(){
+  if(ws){ try{ws.close();}catch(e){} ws=null; }
+  connectedKey=$('provider').value;
+  $('provider').disabled=true;
+  const params=new URLSearchParams();
+  const u=$('url').value.trim(); if(u) params.set('url', u);
+  const k=apiKey(); if(k) params.set('token', k);
+  const qs=params.toString()? ('?'+params.toString()):'';
+  const proto=location.protocol==='https:'?'wss':'ws';
+  prevLoggedIn=false; baselineDone=false;
+  setMsg('连接中…', false);
+  ws=new WebSocket(`${proto}://${location.host}/ws/live/${connectedKey}${qs}`);
+  ws.onopen=()=>{ setMsg('已连接，请在画面中操作', true); $('shot').focus(); startPoll(); };
+  ws.onclose=()=>{ setMsg('未连接', false); stopPoll(); cancelJump(); $('provider').disabled=false; connectedKey=null; };
+  ws.onerror=()=>{ setMsg('连接错误', false); };
+  ws.onmessage=ev=>{
+    const d=JSON.parse(ev.data);
+    if(d.t==='meta'){ logicalW=d.w||1280; logicalH=d.h||800; dsf=d.dsf||1; setMsg('已连接 · '+d.key, true); }
+    else if(d.t==='frame'){ $('shot').src='data:image/jpeg;base64,'+d.data; if(d.w)logicalW=d.w; if(d.h)logicalH=d.h; if(d.dsf)dsf=d.dsf; }
+    else if(d.t==='log'){ log(d.message); }
+    else if(d.t==='error'){ log('错误：'+d.message); }
+    else if(d.t==='record_result'){
+      const r=d.result;
+      if(r && r.skipped){ log('录制结束：未抓到对话请求，已保留原 fixtures'); }
+      else if(r){ log(`录制完成：识别到 ${r.count} 个请求，端点=${r.endpoint||'未识别'}，已写 ${r.file}`); }
+      else { log('未录制到数据'); }
+      recording=false; $('record').textContent='● 开始录制接口';
+    }
+  };
+}
+function send(o){ if(ws && ws.readyState===1) ws.send(JSON.stringify(o)); }
+
+// ---- 登录轮询（边沿触发）与倒计时跳转 ----
+async function checkLoggedIn(key){
+  try{ const r=await authFetch('/live/loggedin/'+key); return await r.json(); }
+  catch(e){ return {logged_in:false, error:String(e)}; }
+}
+function startPoll(){
+  stopPoll();
+  const tick=async ()=>{
+    if(!ws || !connectedKey){ return; }
+    if(inFlight){ pollTimer=setTimeout(tick, 1000); return; }
+    inFlight=true;
+    let j={logged_in:false};
+    try{ j=await checkLoggedIn(connectedKey); } finally { inFlight=false; }
+    if(!baselineDone){
+      baselineDone=true; prevLoggedIn=!!j.logged_in;
+      if(j.logged_in) log('已是登录态（本次不自动跳转，便于你继续操作）');
+    } else {
+      if(j.logged_in && !prevLoggedIn){
+        prevLoggedIn=true;
+        log('✅ 检测到登录成功'+(j.via?('（'+j.via+(j.name?':'+j.name:'')+'）'):''));
+        if($('autojump').checked){
+          if(recording){ log('录制进行中，停止录制后再自动跳转'); }
+          else { beginCountdown(); }
+        }
+      } else if(!j.logged_in){ prevLoggedIn=false; }
+    }
+    pollTimer=setTimeout(tick, 5000);
+  };
+  pollTimer=setTimeout(tick, 1500);
+}
+function stopPoll(){ if(pollTimer){ clearTimeout(pollTimer); pollTimer=null; } }
+function beginCountdown(){
+  cdLeft=3; showCancel(true); log('3 秒后自动跳转聊天（可点“取消跳转”中止）');
+  cdTimer=setInterval(()=>{
+    cdLeft--;
+    if(cdLeft<=0){ clearInterval(cdTimer); cdTimer=null; showCancel(false); autoLeaveAndJump(); }
+    else log(cdLeft+'…');
+  },1000);
+}
+function cancelJump(){ if(cdTimer){ clearInterval(cdTimer); cdTimer=null; } showCancel(false); }
+async function autoLeaveAndJump(){
+  stopPoll();
+  const key=connectedKey || $('provider').value;
+  const full=$('closewin').checked;
+  try{ if(ws){ send({t:'close'}); ws.close(); ws=null; } }catch(e){}
+  try{ await authFetch('/live/close/'+key+(full?'?full=true':''), {method:'POST'}); }catch(e){ log('关闭请求失败：'+e); }
+  log(full? '已关闭浏览器窗口，正在跳转聊天…' : '正在跳转聊天…');
+  setTimeout(()=>{ location.href='/ui/chat.html?provider='+encodeURIComponent(key); }, 400);
+}
+
+// ---- 输入回传（位图尺寸/dsf = CSS 像素，即 CDP 输入坐标系）----
+function toLogical(e){
+  const r=$('shot').getBoundingClientRect();
+  let fx=(e.clientX-r.left)/r.width, fy=(e.clientY-r.top)/r.height;
+  fx=Math.min(Math.max(fx,0),1); fy=Math.min(Math.max(fy,0),1);
+  return { x: fx*(logicalW/dsf), y: fy*(logicalH/dsf) };
+}
+const shot=$('shot');
+const ime=$('ime-proxy');
+// 鼠标事件
+shot.addEventListener('mousedown',e=>{e.preventDefault();mouseDown=true;const p=toLogical(e);send({t:'mouse',action:'down',x:p.x,y:p.y,button:'left',clickCount:e.detail||1});ime.focus();});
+window.addEventListener('mouseup',e=>{if(!mouseDown)return;mouseDown=false;const p=toLogical(e);send({t:'mouse',action:'up',x:p.x,y:p.y,button:'left',clickCount:e.detail||1});});
+shot.addEventListener('mousemove',e=>{const now=Date.now(); if(now-lastMove<40)return; lastMove=now; const p=toLogical(e); const m={t:'mouse',action:'move',x:p.x,y:p.y}; if(mouseDown){m.button='left';m.clickCount=1;} send(m);});
+shot.addEventListener('wheel',e=>{e.preventDefault();const p=toLogical(e);send({t:'wheel',x:p.x,y:p.y,dx:e.deltaX,dy:e.deltaY});},{passive:false});
+shot.addEventListener('contextmenu',e=>e.preventDefault());
+// 点击画面时也聚焦 IME 代理
+shot.addEventListener('click',()=>ime.focus());
+
+// 键盘事件：只转发特殊键（非打印）和组合键
+function mods(e){ return {ctrl:!!e.ctrlKey, alt:!!e.altKey, shift:!!e.shiftKey, meta:!!e.metaKey}; }
+const SPECIAL_KEYS = new Set(['Enter','Tab','Escape','Backspace','Delete','Insert',
+  'ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown',
+  'F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12']);
+ime.addEventListener('keydown',e=>{
+  if(!ws)return;
+  // 组合键（Ctrl/Alt/Meta + 其他）转发为 key 事件
+  if(e.ctrlKey||e.altKey||e.metaKey){
+    if(['F5','F12'].includes(e.key))return;
+    e.preventDefault();
+    send({t:'key',etype:'keyDown',key:e.key,code:e.code,text:'',mods:mods(e)});
+    return;
+  }
+  // 特殊键（Enter/Backspace/方向键等）转发
+  if(SPECIAL_KEYS.has(e.key)){
+    if(['F5','F12'].includes(e.key))return;
+    e.preventDefault();
+    send({t:'key',etype:'keyDown',key:e.key,code:e.code,text:'',mods:mods(e)});
+    return;
+  }
+  // 可打印字符：不转发，不 preventDefault（让 IME 正常工作，由 input/compositionend 事件捕获）
+});
+ime.addEventListener('keyup',e=>{
+  if(!ws)return;
+  if(e.ctrlKey||e.altKey||e.metaKey||SPECIAL_KEYS.has(e.key)){
+    if(['F5','F12'].includes(e.key))return;
+    e.preventDefault();
+    send({t:'key',etype:'keyUp',key:e.key,code:e.code,mods:mods(e)});
+  }
+});
+// IME 合成结束后发送文本
+ime.addEventListener('compositionend',e=>{
+  if(!ws||!e.data)return;
+  send({t:'text',value:e.data});
+  ime.textContent='';
+});
+// 非 IME 的直接输入（英文字母、数字等）
+let composing=false;
+ime.addEventListener('compositionstart',()=>{composing=true;});
+ime.addEventListener('compositionend',()=>{composing=false;});
+ime.addEventListener('input',e=>{
+  if(!ws||composing)return;
+  // inputType=insertText 表示直接输入（非 IME）
+  if(e.inputType==='insertText'&&e.data){
+    send({t:'text',value:e.data});
+  }
+  ime.textContent='';
+});
+// 粘贴
+ime.addEventListener('paste',e=>{ if(!ws)return; e.preventDefault(); const t=(e.clipboardData||window.clipboardData).getData('text'); if(t) send({t:'text',value:t}); });
+
+$('connect').onclick=connect;
+$('reload').onclick=()=>send({t:'reload'});
+function sendTypeText(){ const v=$('typecn').value; if(!v)return; send({t:'text',value:v}); $('typecn').value=''; $('shot').focus(); }
+$('typesend').onclick=sendTypeText;
+$('typecn').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); sendTypeText(); } });
+$('canceljump').onclick=()=>{ cancelJump(); log('已取消自动跳转'); };
+$('record').onclick=()=>{
+  if(!ws){alert('请先连接');return;}
+  recording=!recording;
+  send({t:'record',on:recording});
+  $('record').textContent = recording? '■ 停止录制并保存' : '● 开始录制接口';
+};
+$('check').onclick=async ()=>{
+  const key=connectedKey || $('provider').value;
+  const j=await checkLoggedIn(key);
+  if(j.logged_in){ log(`登录检测 ${key}: ✅ 已登录${j.via?('（'+j.via+(j.name?':'+j.name:'')+'）'):''}`); }
+  else if(j.browser_open===false){ log(`登录检测 ${key}: 浏览器未打开，请先点“连接”`); }
+  else { log(`登录检测 ${key}: 尚未检测到登录态，请在画面里完成登录`); }
+};
+</script>
+</body>
+</html>

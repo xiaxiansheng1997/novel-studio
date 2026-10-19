@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Web2API 管理面板</title>
+  <style>
+    :root { --bg:#0f1115; --panel:#171a21; --border:#262b36; --fg:#e6e8eb; --muted:#8b95a7; --accent:#4c8dff; --ok:#3fb96a; --warn:#e0a83b; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:14px/1.6 -apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif; background:var(--bg); color:var(--fg); padding:24px; }
+    h1 { font-size:18px; margin:0 0 4px; }
+    p.lead { color:var(--muted); margin:0 0 20px; }
+    .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:16px; max-width:920px; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); font-size:13px; }
+    th { color:var(--muted); font-weight:600; }
+    .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
+    .on { background:var(--ok); } .off { background:var(--warn); }
+    .tag { display:inline-block; background:#20242e; border:1px solid var(--border); border-radius:6px; padding:1px 7px; margin:2px 4px 2px 0; font-size:12px; }
+    code { background:#20242e; padding:1px 6px; border-radius:5px; font-size:12px; }
+    button, a.btn { background:var(--accent); color:#fff; border:none; border-radius:8px; padding:6px 12px; cursor:pointer; text-decoration:none; font-size:13px; }
+    .muted { color:var(--muted); }
+    ol { margin:6px 0 0 18px; padding:0; } li { margin:4px 0; }
+  </style>
+</head>
+<body>
+  <h1>Web2API 管理面板</h1>
+  <p class="lead">登录态与浏览器 profile 概览。三家均为逆向网页端，仅供个人学习、本机自用。</p>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+      <strong>Provider 状态</strong>
+      <span>
+        <button onclick="loadStatus()">刷新</button>
+        <a class="btn" href="/ui/live.html">内嵌浏览器(登录/录制)</a>
+        <a class="btn" href="/ui/chat.html">打开对话</a>
+      </span>
+    </div>
+    <table>
+      <thead><tr><th>Provider</th><th>已注册</th><th>Profile</th><th>浏览器</th><th>可用模型</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <strong>使用步骤</strong>
+    <ol>
+      <li>安装依赖：<code>pip install -r requirements.txt</code> 然后 <code>playwright install chromium</code></li>
+      <li>启动服务：<code>uvicorn app.main:app --host 127.0.0.1 --port 8000</code></li>
+      <li>打开<a href="/ui/live.html">内嵌浏览器页</a> → 选站点 → <b>连接</b> → 在画面里直接登录（扫码/密码/滑块），点<b>检测登录</b>确认。登录态会持久化，之后长期复用（无需命令行）。</li>
+      <li>（可选）在同一页点<b>开始录制接口</b>，在画面里发一句“你好”，再<b>停止录制</b>，写入 fixtures 以精修解析/启用通义 HTTP 快路径。</li>
+      <li>到<a href="/ui/chat.html">聊天界面</a>选模型开聊；或用任意 OpenAI 客户端指向 <code>http://127.0.0.1:8000/v1</code>（api_key 随意，除非设了 W2A_API_KEY）。</li>
+      <li>命令行兜底（不用 UI 时）：<code>python -m scripts.login &lt;provider&gt;</code>、<code>python -m scripts.recon &lt;provider&gt;</code>。</li>
+    </ol>
+    <p class="muted" style="margin-top:10px">
+      注意：DeepSeek 有 PoW+风控且封号严、豆包签名易失效——请保持极低并发、勿高频刷量。
+    </p>
+  </div>
+
+  <script>
+    async function loadStatus() {
+      const rows = document.getElementById('rows');
+      try {
+        const r = await fetch('/admin/status');
+        const j = await r.json();
+        rows.innerHTML = (j.providers || []).map(p => `
+          <tr>
+            <td>${p.display_name} <span class="muted">(${p.provider})</span></td>
+            <td>${dot(p.registered)}</td>
+            <td>${dot(p.has_profile)}</td>
+            <td>${dot(p.browser_open)}</td>
+            <td>${(p.models || []).map(m => `<span class="tag">${m}</span>`).join('')}</td>
+          </tr>`).join('') || '<tr><td colspan="5" class="muted">无 provider</td></tr>';
+      } catch (e) {
+        rows.innerHTML = `<tr><td colspan="5" class="muted">加载失败：${e}</td></tr>`;
+      }
+    }
+    function dot(b) { return `<span class="dot ${b ? 'on' : 'off'}"></span>${b ? '是' : '否'}`; }
+    loadStatus();
+  </script>
+</body>
+</html>
