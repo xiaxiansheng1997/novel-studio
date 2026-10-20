@@ -1,0 +1,435 @@
+<template>
+  <div class="app-shell">
+    <AppNav />
+    <Sidebar
+      :conversations="chatStore.conversations"
+      :active-id="chatStore.activeId"
+      :collapsed="sidebarCollapsed"
+      @new-chat="handleNewChat"
+      @select="handleSelect"
+      @delete="handleDelete"
+    />
+    <div v-if="!sidebarCollapsed" class="sidebar-backdrop" @click="sidebarCollapsed = true"></div>
+
+    <main id="main" class="chat-main">
+      <header class="topbar">
+        <button
+          class="icon-btn"
+          :aria-label="sidebarCollapsed ? '展开会话列表' : '收起会话列表'"
+          :aria-expanded="!sidebarCollapsed"
+          @click="sidebarCollapsed = !sidebarCollapsed"
+        >
+          <AppIcon name="panel" :size="18" />
+        </button>
+
+        <div class="topbar-title">
+          <h1>{{ activeTitle }}</h1>
+          <span class="topbar-sub">{{ chatStore.messages.length }} 条消息</span>
+        </div>
+
+        <div class="topbar-right">
+          <label class="model-field">
+            <span class="model-label">模型</span>
+            <select class="field model-select" :value="providerStore.selectedModel" @change="onModelChange">
+              <option v-for="m in providerStore.models" :key="m.id" :value="m.id">
+                {{ m.id }} · {{ m.owned_by }}
+              </option>
+            </select>
+          </label>
+          <span class="pill" :class="providerStatusPill">
+            <span class="status-dot" :class="providerStatusDot"></span>
+            {{ providerStatusText }}
+          </span>
+        </div>
+      </header>
+
+      <div ref="messagesEl" class="messages" @click="handleContentClick">
+        <div v-if="!chatStore.messages.length && !chatStore.streaming" class="empty">
+          <div class="empty-mark" aria-hidden="true">
+            <AppIcon name="terminal" :size="22" />
+          </div>
+          <h2>开始一段新对话</h2>
+          <p class="empty-sub">选择一个模型，直接输入问题。回复会实时流式返回。</p>
+
+          <div class="suggests">
+            <button v-for="s in suggestions" :key="s.text" class="suggest" @click="useSuggestion(s.text)">
+              <AppIcon :name="s.icon" :size="15" />
+              <span>{{ s.text }}</span>
+              <AppIcon name="chevronRight" :size="14" class="suggest-arrow" />
+            </button>
+          </div>
+        </div>
+
+        <MessageBubble
+          v-for="(msg, i) in chatStore.messages"
+          :key="i"
+          :message="msg"
+          :streaming="i === chatStore.messages.length - 1 && chatStore.streaming"
+        />
+      </div>
+
+      <InputArea
+        ref="inputRef"
+        :streaming="chatStore.streaming"
+        @send="handleSend"
+        @stop="chatStore.stopStreaming()"
+      />
+    </main>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { useChatStore } from '../stores/chat'
+import { useProviderStore } from '../stores/provider'
+import { streamChat } from '../utils/sse'
+import { getApiKey } from '../utils/storage'
+import AppNav from '../components/AppNav.vue'
+import AppIcon from '../components/AppIcon.vue'
+import Sidebar from '../components/Sidebar.vue'
+import MessageBubble from '../components/MessageBubble.vue'
+import InputArea from '../components/InputArea.vue'
+
+const chatStore = useChatStore()
+const providerStore = useProviderStore()
+const messagesEl = ref(null)
+const inputRef = ref(null)
+const sidebarCollapsed = ref(window.innerWidth <= 1024)
+
+const suggestions = [
+  { icon: 'spark', text: '用一句话解释什么是光合作用' },
+  { icon: 'terminal', text: '帮我写一个 Python 快速排序' },
+  { icon: 'activity', text: '把这段需求拆成开发任务清单' },
+]
+
+const activeTitle = computed(() => {
+  const conv = chatStore.conversations.find(c => c.id === chatStore.activeId)
+  return conv?.title || '新对话'
+})
+
+const providerStatusDot = computed(() => {
+  const s = providerStore.status
+  if (!s.length) return 'unknown'
+  return s.some(p => p.has_profile) ? 'on' : 'off'
+})
+const providerStatusPill = computed(() => {
+  const s = providerStore.status
+  if (!s.length) return 'pill--off'
+  return s.some(p => p.has_profile) ? 'pill--on' : 'pill--warn'
+})
+const providerStatusText = computed(() => {
+  const s = providerStore.status
+  if (!s.length) return '未检测'
+  const online = s.filter(p => p.has_profile).length
+  return `${online}/${s.length} 就绪`
+})
+
+onMounted(async () => {
+  await providerStore.fetchModels()
+  await providerStore.fetchStatus()
+  await chatStore.fetchConversations()
+  window.addEventListener('keydown', globalKeyHandler)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', globalKeyHandler)
+})
+
+function globalKeyHandler(e) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+    e.preventDefault()
+    handleNewChat()
+  }
+  if (e.key === 'Escape' && chatStore.streaming) {
+    chatStore.stopStreaming()
+  }
+}
+
+watch(() => chatStore.messages.length, () => {
+  nextTick(() => scrollToBottom())
+})
+
+function scrollToBottom() {
+  if (messagesEl.value) {
+    messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+  }
+}
+
+function onModelChange(e) {
+  providerStore.setModel(e.target.value)
+}
+
+function useSuggestion(text) {
+  inputRef.value?.setText(text)
+}
+
+async function handleNewChat() {
+  if (!providerStore.selectedModel) {
+    await providerStore.fetchModels()
+  }
+  chatStore.activeId = null
+  chatStore.messages = []
+  if (window.innerWidth <= 1024) sidebarCollapsed.value = true
+}
+
+async function handleSelect(id) {
+  await chatStore.selectConversation(id)
+  nextTick(() => scrollToBottom())
+  if (window.innerWidth <= 1024) sidebarCollapsed.value = true
+}
+
+async function handleDelete(id) {
+  await chatStore.deleteConversation(id)
+}
+
+async function handleSend(text) {
+  const model = providerStore.selectedModel
+  if (!model) return
+
+  // Create conversation on first message if none active
+  if (!chatStore.activeId) {
+    await chatStore.createConversation(model)
+  }
+  const convId = chatStore.activeId
+
+  chatStore.messages.push({ role: 'user', content: text, created_at: Date.now() / 1000 })
+
+  // Assistant placeholder: 保留索引，后续通过 chatStore.messages[idx] 访问响应式代理
+  chatStore.messages.push({ role: 'assistant', content: '', reasoning_content: '', created_at: Date.now() / 1000 })
+  const aIdx = chatStore.messages.length - 1
+
+  chatStore.streaming = true
+  const controller = new AbortController()
+  chatStore.abortController = controller
+
+  try {
+    const apiMessages = chatStore.messages
+      .slice(0, aIdx) // 排除刚插入的空占位
+      .filter(m => m.role !== 'system' || m.content)
+      .map(m => ({ role: m.role, content: m.content }))
+
+    for await (const ev of streamChat({
+      model,
+      messages: apiMessages,
+      signal: controller.signal,
+      apiKey: getApiKey(),
+      conversationId: convId,
+    })) {
+      const cur = chatStore.messages[aIdx] // 通过响应式数组取值，改动才会触发重渲染
+      if (ev.content) cur.content += ev.content
+      if (ev.reasoning_content) cur.reasoning_content += ev.reasoning_content
+      scrollToBottom()
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      const cur = chatStore.messages[aIdx]
+      cur.content = cur.content || `请求失败：${err.message}`
+    }
+  } finally {
+    chatStore.streaming = false
+    chatStore.abortController = null
+    await chatStore.fetchConversations()
+  }
+}
+
+// Event delegation for code copy buttons
+function handleContentClick(e) {
+  const btn = e.target.closest('.copy-btn')
+  if (!btn) return
+  const code = btn.closest('.code-block-wrap')?.querySelector('code')?.textContent
+  if (code) {
+    navigator.clipboard.writeText(code)
+    btn.textContent = '已复制'
+    setTimeout(() => (btn.textContent = '复制'), 1500)
+  }
+}
+</script>
+
+<style scoped>
+.app-shell {
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  background: radial-gradient(1200px 600px at 70% -10%, rgba(34, 197, 94, 0.06), transparent 60%),
+    #070a10;
+}
+.chat-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶栏 */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--line-soft);
+  background: rgba(10, 14, 22, 0.85);
+  backdrop-filter: blur(10px);
+}
+.topbar-title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.topbar-title h1 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.topbar-sub {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.model-field {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.model-label {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.model-select {
+  width: auto;
+  min-width: 180px;
+  max-width: 240px;
+  height: 32px;
+  font-family: theme('fontFamily.mono');
+  font-size: 12px;
+}
+
+/* 消息区 */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 26px 20px 8px;
+  scroll-behavior: smooth;
+}
+
+/* 空态 */
+.empty {
+  max-width: 640px;
+  margin: 6vh auto 0;
+  text-align: center;
+}
+.empty-mark {
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 13px;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.1);
+  color: #86efac;
+}
+.empty h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.empty-sub {
+  margin: 0 0 22px;
+  color: var(--text-faint);
+  font-size: 13px;
+  text-wrap: balance;
+}
+.suggests {
+  display: grid;
+  gap: 8px;
+  text-align: left;
+}
+.suggest {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line-soft);
+  background: #0b1018;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease), background-color 0.18s var(--ease), color 0.18s var(--ease);
+}
+.suggest:hover {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.06);
+  color: var(--text);
+}
+.suggest-arrow {
+  margin-left: auto;
+  opacity: 0.5;
+}
+
+/* 移动端抽屉遮罩 */
+.sidebar-backdrop {
+  display: none;
+}
+@media (max-width: 1024px) {
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: rgba(3, 6, 10, 0.6);
+    backdrop-filter: blur(2px);
+  }
+  .topbar {
+    padding: 9px 12px;
+  }
+  .model-field .model-label {
+    display: none;
+  }
+  .model-select {
+    min-width: 0;
+    max-width: 150px;
+  }
+  .messages {
+    padding: 18px 14px 6px;
+  }
+}
+@media (max-width: 560px) {
+  /* 窄屏把模型选择放到第二行，标题与状态各占一行，避免标题被挤成省略号 */
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .topbar-title {
+    flex: 1;
+  }
+  .topbar-right {
+    flex: 1 0 100%;
+    margin-left: 0;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .model-field {
+    flex: 1;
+    min-width: 0;
+  }
+  .model-select {
+    width: 100%;
+    max-width: none;
+  }
+}
+</style>

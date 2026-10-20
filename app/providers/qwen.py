@@ -17,7 +17,8 @@ import httpx
 from loguru import logger
 
 from app.api.schemas import ChatCompletionRequest
-from app.core.errors import AuthExpired, ProviderError
+from app.core.blocked import is_card_mime, looks_blocked
+from app.core.errors import AuthExpired, ProviderBlocked, ProviderError
 from app.core.sse import DeltaEvent
 from app.providers._browser_base import BrowserStreamProvider
 from app.providers._replay import (
@@ -62,9 +63,17 @@ class QwenAdapter(BrowserStreamProvider):
                         continue
                     content = msg.get("content") or msg.get("text")
                     if content:
+                        text = content if isinstance(content, str) else str(content)
+                        # 固定拒绝卡片：策略层兜底文案，不是模型输出
+                        if looks_blocked(text):
+                            logger.warning(
+                                f"[qwen] 命中固定拒绝卡片 mime={mime or '-'} "
+                                f"card={is_card_mime(mime)} text={text[:60]!r}"
+                            )
+                            raise ProviderBlocked("qwen", text, mime=mime)
                         status = msg.get("status", "")
                         finish = "stop" if status == "complete" else None
-                        return DeltaEvent(content=str(content), finish_reason=finish)
+                        return DeltaEvent(content=text, finish_reason=finish)
         # OpenAI 风格兆底
         choices = obj.get("choices")
         if isinstance(choices, list) and choices:

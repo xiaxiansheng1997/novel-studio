@@ -25,6 +25,9 @@ providers:
       - qwen-max
       - qwen-turbo
     max_concurrency: 2
+    # 相邻两次请求的最小间隔（秒，从上一次回复结束算起）。
+    # 刚答完就立刻发下一条最容易触发 RGV587 人机验证；0 表示不限制。
+    min_interval_sec: 3
 
   doubao:
     enabled: true

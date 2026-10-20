@@ -1,7 +1,9 @@
-"""管理/健康路由：会话状态、provider 概览、健康检查。"""
+"""管理/健康路由：会话状态、provider 概览、健康检查、日志、统计。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+
+from app.core.request_log import get_logs, get_stats
 
 router = APIRouter()
 
@@ -33,3 +35,15 @@ async def reload_config(request: Request):
     cfg = get_config()
     request.app.state.config = cfg
     return {"reloaded": True, "providers": list(cfg.providers.keys())}
+
+
+@router.get("/admin/logs")
+async def request_logs(limit: int = 50):
+    """返回最近的请求日志。"""
+    return get_logs(limit=limit)
+
+
+@router.get("/admin/stats")
+async def usage_stats():
+    """返回聚合统计。"""
+    return get_stats()

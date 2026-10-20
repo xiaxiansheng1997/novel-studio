@@ -55,3 +55,26 @@ class AuthExpired(ProviderError):
             f"登录态已失效（{provider} 会话过期或被风控）。请打开 /ui/live.html 重新登录（或运行 python -m scripts.login {provider}）",
             status=401,
         )
+
+
+class ProviderBlocked(ProviderError):
+    """上游返回固定拒绝卡片：内容审核 / 风控命中 / 浏览器处于未登录游客态。
+
+    这不是模型回答，必须显式暴露；否则调用方会把它当成“模型不想答”。
+    """
+
+    def __init__(self, provider: str, detail: str = "", *, mime: str = ""):
+        msg = (
+            "上游返回固定拒绝卡片（不是模型回答）：通常是内容审核/风控命中，"
+            f"或 {provider} 的浏览器 profile 处于未登录游客态。"
+            f"请先在 /live 打开 {provider}，确认 GET /live/loggedin/{provider} 返回 logged_in=true，"
+            "再检查该问题是否命中了站点内容策略"
+        )
+        if mime:
+            msg += f"（mime_type={mime}）"
+        if detail:
+            msg += f"；上游原文：{detail[:120]}"
+        super().__init__(provider, msg, status=403)
+        # 覆盖 ProviderError 的默认类型，便于客户端按内容审核分流
+        self.type = "content_filter"
+        self.code = "risk_control"

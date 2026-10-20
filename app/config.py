@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # 可选访问口令；None/空串表示不校验
     api_key: Optional[str] = None
     storage_dir: Path = Path("storage")
+    # CDP 真流式：CDP 不可用或异常时可在 .env 设 0，退回整段读取
+    cdp_stream: bool = True
+    # 流式空闲超时（秒）：超过该时间没有新数据则结束本次读取
+    stream_idle_timeout: float = 60.0
 
     def resolved_storage_dir(self) -> Path:
         d = self.storage_dir
@@ -52,6 +56,8 @@ class ProviderConfig(BaseModel):
     headless: bool = False
     models: list[str] = Field(default_factory=list)
     max_concurrency: int = 1
+    # 相邻两次请求的最小间隔（秒，从上一次回复结束算起）；0 表示不限制
+    min_interval_sec: float = 0.0
 
 
 class AppConfig(BaseModel):

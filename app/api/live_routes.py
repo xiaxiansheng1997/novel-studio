@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from app.browser.live_browser import VIEWPORT_H, VIEWPORT_W, LiveBrowserManager, LiveSession
+from app.browser.stream_capture import clear_risk, trigger_send
 
 router = APIRouter()
 
@@ -90,6 +91,43 @@ async def live_close(request: Request, key: str, full: bool = False):
     return {"closed": True, "key": key, "browser_closed": full}
 
 
+@router.post("/live/cooldown/clear/{key}")
+async def live_clear_cooldown(request: Request, key: str):
+    """用户已在 /live 完成人机验证后，手动清除该 provider 的风控冷却。"""
+    settings = request.app.state.settings
+    if not _origin_ok(request.headers.get("origin"), settings) or not _key_ok(_bearer(request), settings):
+        return JSONResponse(status_code=403, content={"error": {"message": "forbidden", "type": "forbidden"}})
+    clear_risk(key)
+    return {"cleared": True, "key": key}
+
+
+@router.get("/live/debug/{key}")
+async def live_debug(request: Request, key: str):
+    """登录/风控诊断：页面地址、登录判定、cookie 名与 localStorage 键名（均不含值）。"""
+    settings = request.app.state.settings
+    if not _origin_ok(request.headers.get("origin"), settings) or not _key_ok(_bearer(request), settings):
+        return JSONResponse(status_code=403, content={"error": {"message": "forbidden", "type": "forbidden"}})
+    sessions = request.app.state.sessions
+    live: LiveBrowserManager = request.app.state.live
+    sess = live.get(key)
+    info: dict = {"key": key, "live_open": sess is not None}
+    info["login"] = await sessions.is_logged_in(key)
+    if sess is not None:
+        page = sess.page
+        info["url"] = page.url
+        try:
+            info["title"] = await page.title()
+        except Exception as exc:  # noqa: BLE001
+            info["title_error"] = str(exc)
+        try:
+            info["localstorage_keys"] = await page.evaluate(
+                "() => Object.keys(window.localStorage || {})"
+            )
+        except Exception as exc:  # noqa: BLE001
+            info["localstorage_error"] = str(exc)
+    return info
+
+
 # ---------- WebSocket 输入分发 ----------
 async def _handle(live: LiveBrowserManager, sess: LiveSession, ws: WebSocket, data: dict) -> None:
     t = data.get("t")
@@ -117,6 +155,40 @@ async def _handle(live: LiveBrowserManager, sess: LiveSession, ws: WebSocket, da
         )
     elif t == "text":
         await sess.insert_text(data.get("value", ""))
+    elif t == "send":
+        # 辅助输入“输入 + 发送”一体：复用后台抓包的 trigger_send，
+        # 它知道各站输入框/发送按钮，且会在回车不生效时点按钮兜底。
+        value = str(data.get("value") or "").strip()
+        if not value:
+            await ws.send_json({"t": "log", "message": "辅助输入为空，未发送"})
+            return
+        reg = getattr(ws.app.state, "registry", None)
+        adapter = reg.get(sess.key) if reg else None
+        in_sel = adapter.input_selectors() if adapter else None
+        send_sel = adapter.send_selectors() if adapter else None
+        page = sess.page
+
+        async def _run_send() -> None:
+            try:
+                await trigger_send(
+                    page,
+                    value,
+                    input_selectors=in_sel or None,
+                    send_selectors=send_sel or None,
+                    wait_timeout=10.0,
+                    clear_first=True,
+                )
+                msg = f"✓ 已发送：{value[:40]}"
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[live:{sess.key}] 辅助输入发送失败: {exc}")
+                msg = f"发送失败：{exc}"
+            try:
+                await ws.send_json({"t": "log", "message": msg})
+            except Exception:  # noqa: BLE001 - 前端可能已断开
+                pass
+
+        # 发送要等输入框渲染 + 回车生效，放后台跑，避免阻塞推帧和其他输入
+        asyncio.create_task(_run_send())
     elif t == "navigate":
         url = data.get("url", "")
         if _url_allowed(url):
@@ -132,6 +204,26 @@ async def _handle(live: LiveBrowserManager, sess: LiveSession, ws: WebSocket, da
         else:
             res = sess.record_stop()
             await ws.send_json({"t": "record_result", "result": res})
+    elif t == "autoslide":
+        # 连点会并发两个拖拽、轨迹互相污染；已有任务在跑时直接忽略
+        if sess._slide_task is not None and not sess._slide_task.done():
+            await ws.send_json({"t": "log", "message": "自动过滑块正在进行中，请稍候"})
+            return
+        # 拖动耗时约 2-3 秒 + 结果轮询，放后台跑，避免阻塞其他输入
+        async def _run_slide() -> None:
+            try:
+                res = await sess.auto_slide()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[live:{sess.key}] 自动过滑块失败: {exc}")
+                res = {"ok": False, "message": f"自动过滑块失败: {exc}"}
+            if res.get("ok"):
+                clear_risk(sess.key)  # 验证通过，自动解除风控冷却
+            try:
+                await ws.send_json({"t": "autoslide_result", "result": res})
+            except Exception:  # noqa: BLE001
+                pass
+        await ws.send_json({"t": "log", "message": "正在自动拖动滑块…"})
+        sess._slide_task = asyncio.create_task(_run_slide())
     elif t == "close":
         await live.close(sess.key)
 

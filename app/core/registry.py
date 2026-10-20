@@ -34,7 +34,10 @@ class Registry:
                 continue
             self.adapters[key] = cls(pcfg, ctx)
             self.throttles[key] = ProviderThrottle(
-                key, config.rate_limit_per_minute, pcfg.max_concurrency
+                key,
+                config.rate_limit_per_minute,
+                pcfg.max_concurrency,
+                pcfg.min_interval_sec,
             )
 
     def route(self, model: str) -> ProviderAdapter:

@@ -43,12 +43,28 @@ class SlidingWindowLimiter:
 
 
 class ProviderThrottle:
-    """组合：每分钟限流 + 并发信号量。每个 provider 一个实例。"""
+    """组合：每分钟限流 + 并发信号量 + 最小请求间隔。每个 provider 一个实例。
 
-    def __init__(self, key: str, per_minute: int, max_concurrency: int):
+    min_interval_sec：相邻两次请求的最小间隔，**从上一次回复结束算起**。
+    上游风控（如千问 RGV587）对"刚答完就立刻发下一条"最敏感，所以用结束
+    时刻而非开始时刻计时；0 表示不限制。
+    """
+
+    def __init__(
+        self,
+        key: str,
+        per_minute: int,
+        max_concurrency: int,
+        min_interval_sec: float = 0.0,
+    ):
         self.key = key
         self._limiter = SlidingWindowLimiter(per_minute)
         self._sem = asyncio.Semaphore(max(1, max_concurrency))
+        self.min_interval = max(0.0, float(min_interval_sec))
+        # 下一次允许开始请求的时间点（monotonic）
+        self._next_start = 0.0
+        # 多个请求同时到达时按顺序放行，避免它们一起冲破间隔
+        self._turn = asyncio.Lock()
 
     def check_rate(self) -> None:
         try:
@@ -56,9 +72,23 @@ class ProviderThrottle:
         except RateLimited:
             raise RateLimited(self.key, 60)
 
+    async def wait_turn(self) -> float:
+        """等到允许开始请求；返回实际等待秒数。"""
+        if self.min_interval <= 0:
+            return 0.0
+        async with self._turn:
+            wait = self._next_start - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._next_start = time.monotonic() + self.min_interval
+            return max(0.0, wait)
+
     async def __aenter__(self) -> "ProviderThrottle":
         await self._sem.acquire()
         return self
 
     async def __aexit__(self, *exc) -> None:
         self._sem.release()
+        if self.min_interval > 0:
+            # 间隔从上一次回复结束重新计时
+            self._next_start = max(self._next_start, time.monotonic() + self.min_interval)

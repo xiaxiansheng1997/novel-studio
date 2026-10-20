@@ -5,6 +5,7 @@ import json
 from typing import Any, Optional
 
 from app.api.schemas import ChatCompletionRequest
+from app.browser.playwright_pool import REAL_UA
 from app.config import BASE_DIR
 
 FIXTURES_DIR = BASE_DIR / "fixtures"
@@ -119,6 +120,15 @@ def inject_headers(headers: dict[str, str], runtime: dict[str, str]) -> dict[str
             rv = runtime.get(k.lower())
             if rv:
                 out[k] = rv
+            continue
+        if isinstance(v, str) and "HeadlessChrome" in v:
+            # 早期 recon 是无头浏览器录的，UA/客户端提示里会留下 HeadlessChrome（baxia 直接判机器）
+            if k.lower() == "user-agent":
+                out[k] = REAL_UA
+            elif k.lower().startswith("sec-ch-ua"):
+                continue  # 由 UA 字符串重算更安全，旧的客户端提示直接不发
+            else:
+                out[k] = v.replace("HeadlessChrome", "Google Chrome")
             continue
         out[k] = v
     return out

@@ -6,6 +6,7 @@ from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from loguru import logger
 
 from app.api.schemas import (
     ChatCompletionRequest,
@@ -55,16 +56,31 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     reg = _registry(request)
     adapter = reg.route(req.model)
     throttle = reg.throttle(adapter.key)
+    store = request.app.state.store
 
     # 限流（每分钟）+ 会话预校验，失败以标准 HTTP 错误返回，不进入流
     throttle.check_rate()
+    # 会话 id 必须真实存在，否则消息会写成孤儿；放在 ensure_session 前，避免白等一次浏览器启动
+    if req.conversation_id and req.messages and await store.get_conversation(req.conversation_id) is None:
+        raise HTTPException(status_code=404, detail=f"会话不存在: {req.conversation_id}")
     await adapter.ensure_session()
+    # 最小请求间隔（从上一次回复结束算起）：降低上游风控触发率
+    waited = await throttle.wait_turn()
+    if waited >= 0.5:
+        logger.info(f"[{adapter.key}] 最小间隔限速，已等待 {waited:.1f}s")
 
     chat_id = gen_id()
 
+    # 持久化用户消息
+    if req.conversation_id and req.messages:
+        last_user = next((m.content for m in reversed(req.messages) if m.role == "user"), None)
+        if last_user:
+            await store.add_message(req.conversation_id, "user", str(last_user))
+            await store.auto_title(req.conversation_id, str(last_user))
+
     if req.stream:
         return StreamingResponse(
-            _stream(reg, adapter, throttle, req, chat_id),
+            _stream_with_persist(reg, adapter, throttle, req, chat_id, store),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -76,19 +92,39 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             raise
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"[{adapter.key}] 对话失败: {exc}") from exc
+    # 持久化助手回复
+    if req.conversation_id:
+        content = resp.choices[0].message.content or ""
+        await store.add_message(req.conversation_id, "assistant", content)
     return resp
 
 
-async def _stream(reg: Registry, adapter, throttle, req: ChatCompletionRequest, chat_id: str) -> AsyncIterator[str]:
+async def _stream_with_persist(reg, adapter, throttle, req, chat_id, store) -> AsyncIterator[str]:
+    """Streaming with message persistence."""
+    accumulated_content = []
     first = True
     try:
         async with throttle:
             async for ev in adapter.stream(req):
                 chunk = make_chunk(chat_id, req.model, ev, first=first)
                 first = False
+                if ev.content:
+                    accumulated_content.append(ev.content)
                 yield _sse(chunk.sse_data())
         yield "data: [DONE]\n\n"
-    except Exception as exc:  # noqa: BLE001 - 流已开始，无法改状态码，以 error 事件下发
-        err = {"error": {"message": str(exc), "type": "stream_error"}}
+    except Exception as exc:  # noqa: BLE001
+        # 保留内部错误类型（如 content_filter/risk_control），否则客户端只能看到笼统的 stream_error
+        if isinstance(exc, W2AError):
+            err = {"error": {"message": exc.message, "type": exc.type, "code": exc.code}}
+        else:
+            err = {"error": {"message": str(exc), "type": "stream_error"}}
         yield _sse(json.dumps(err, ensure_ascii=False))
         yield "data: [DONE]\n\n"
+    finally:
+        # Persist assistant message
+        if req.conversation_id and accumulated_content:
+            full_text = "".join(accumulated_content)
+            try:
+                await store.add_message(req.conversation_id, "assistant", full_text)
+            except Exception:  # noqa: BLE001
+                pass
