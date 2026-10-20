@@ -18,6 +18,7 @@ from loguru import logger
 
 from app.api.schemas import ChatCompletionRequest
 from app.core.blocked import is_card_mime, looks_blocked
+from app.core.control_tokens import strip_control_tokens
 from app.core.errors import AuthExpired, ProviderBlocked, ProviderError
 from app.core.sse import DeltaEvent
 from app.providers._browser_base import BrowserStreamProvider
@@ -89,7 +90,7 @@ class QwenAdapter(BrowserStreamProvider):
     async def stream(self, req: ChatCompletionRequest) -> AsyncIterator[DeltaEvent]:
         if os.getenv("W2A_QWEN_HTTP", "0") == "1":
             try:
-                async for ev in self._stream_http(req):
+                async for ev in strip_control_tokens(self._stream_http(req)):
                     yield ev
                 return
             except AuthExpired:

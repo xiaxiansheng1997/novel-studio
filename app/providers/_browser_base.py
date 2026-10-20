@@ -22,6 +22,7 @@ from app.browser.stream_capture import (
 )
 from app.config import get_settings
 from app.core.base import ProviderAdapter
+from app.core.control_tokens import strip_control_tokens
 from app.core.errors import NeedsLogin, ProviderBlocked, W2AError
 from app.core.sse import DeltaEvent
 from app.providers._replay import SSEBuffer, is_done, last_user_text
@@ -55,6 +56,11 @@ class BrowserStreamProvider(ProviderAdapter):
 
     # ---- 核心：浏览器捕获增量流 ----
     async def stream(self, req: ChatCompletionRequest) -> AsyncIterator[DeltaEvent]:
+        # 统一剔除上游夹带的站点 UI 占位标记（如千问 [[inline_action_reply_1]]）
+        async for ev in strip_control_tokens(self._stream_raw(req)):
+            yield ev
+
+    async def _stream_raw(self, req: ChatCompletionRequest) -> AsyncIterator[DeltaEvent]:
         # 风控冷却：刚触发过人机验证时直接快速失败，不碰浏览器，避免加深风控
         remain = risk_cooldown_remaining(self.key)
         if remain > 0:

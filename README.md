@@ -80,7 +80,7 @@ resp = client.chat.completions.create(
 app/
   main.py runtime.py config.py
   api/      openai_routes.py  admin_routes.py  live_routes.py  schemas.py
-  core/     base.py registry.py sse.py store.py ratelimit.py errors.py
+  core/     base.py registry.py sse.py store.py ratelimit.py errors.py blocked.py control_tokens.py
   browser/  playwright_pool.py session_manager.py stream_capture.py cdp_stream.py live_browser.py network_recorder.py
   providers/ _replay.py _browser_base.py  qwen.py doubao.py deepseek.py
 scripts/    login.py  recon.py
@@ -112,6 +112,10 @@ storage/    <浏览器 profile / 票据 / 会话库，已 gitignore>
 ### 页面刚打开就发送会被判机器
 
 抓包页如果每次请求都重新加载、并在 1 秒内按 Enter，前端安全 SDK（阿里 baxia 等）还没来得及计算请求签名，上游会直接回固定拒绝卡片——这和账号无关，真人手打有自然停顿所以正常。现在默认复用已打开的抓包页，只在冷启动时预热 2.5 秒（`W2A_WARMUP_MS`，设 0 关闭）。
+
+### 回答末尾出现 `[[inline_action_reply_1]]` 之类的方括号垃圾
+
+这是站点给网页前端渲染「追问建议 / 内联按钮」用的占位标记，不是模型正文。后端 `app/core/control_tokens.py` 会在下发前剔除（能处理标记被流式分块截断的情况），剔除数量会记一条 `已剔除上游控制标记 N 处` 日志；前端 `MessageBubble.vue` 再做一道兜底，用于显示历史消息。
 
 ## 已知限制
 

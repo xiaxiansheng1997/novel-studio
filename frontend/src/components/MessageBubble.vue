@@ -70,12 +70,21 @@ function renderMarkdown(text) {
   return marked(text, { breaks: true, gfm: true })
 }
 
-const renderedContent = computed(() => renderMarkdown(props.message.content))
-const renderedReasoning = computed(() => renderMarkdown(props.message.reasoning_content))
+// 上游偶尔把站点 UI 占位符（如千问 [[inline_action_reply_1]]）混进正文。
+// 后端流式管道已经会剔除，这里兜底处理历史消息与旧数据。
+const CONTROL_TOKEN_RE = /\[\[[A-Za-z0-9_.-]{1,64}\]\]/g
+
+function stripTokens(text) {
+  if (!text) return ''
+  return text.replace(CONTROL_TOKEN_RE, '').replace(/\s+$/, '')
+}
+
+const renderedContent = computed(() => renderMarkdown(stripTokens(props.message.content)))
+const renderedReasoning = computed(() => renderMarkdown(stripTokens(props.message.reasoning_content)))
 
 async function copyText() {
   try {
-    await navigator.clipboard.writeText(props.message.content)
+    await navigator.clipboard.writeText(stripTokens(props.message.content))
     copied.value = true
     setTimeout(() => (copied.value = false), 2000)
   } catch (_) {
