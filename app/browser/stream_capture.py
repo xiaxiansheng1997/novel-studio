@@ -28,6 +28,11 @@ from app.core.blocked import looks_blocked
 # 触发 RGV587 时是否尝试自动过滑块（默认开）
 AUTO_SLIDE = os.getenv("W2A_AUTO_SLIDE", "1").lower() not in ("0", "false", "no")
 
+# 遇到只能人工完成的验证码（图片点选/拖拽）时，在**有头**浏览器里最多等这么久，
+# 让人直接在弹出来的 Chrome 窗口里做完，然后自动重发一次；0 表示不等、直接返回指引。
+# 无头模式没人能操作那个页面，一律不等。
+HUMAN_WAIT_SEC = float(os.getenv("W2A_HUMAN_WAIT_SEC", "60"))
+
 # 冷启动预热：页面刚加载就发送时，前端安全 SDK（阿里 baxia 等）还没算好请求签名，
 # 上游会把请求判成机器，直接回固定拒绝卡片（表现为“无法回答这个问题”）。
 WARMUP_MS = int(os.getenv("W2A_WARMUP_MS", "2500"))
@@ -36,6 +41,68 @@ WARMUP_MS = int(os.getenv("W2A_WARMUP_MS", "2500"))
 # 避免客户端自动重试在验证期间继续请求、不断加深风控。
 RISK_COOLDOWN_SEC = float(os.getenv("W2A_RISK_COOLDOWN", "60"))
 _risk_until: dict[str, float] = {}
+
+# 站点自己弹的营销/引导对话框（实测豆包会弹「下载豆包电脑版 解锁本地任务能力」）会盖住
+# 整个页面，让 Playwright 的 click 一直等到超时（表现为「intercepts pointer events」）。
+# 人机验证弹窗不能关（关掉了就没法验证），只关这类营销/引导弹窗。
+# 注意：图片点选验证码的题面里没有 “验证/滑块” 这种字眼（如“请选择所有符合上述描述的
+# 图片”），必须把它的题面特征也加进白名单，否则会被当成营销弹窗关掉。
+_DISMISS_DIALOG_JS = """
+() => {
+  const CAPTCHA_RE = /captcha|verify|验证|滑块|punish|baxia|nocaptcha|secsdk|请选择所有符合|拖拽到下方|拖拽到这里/i;
+  const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 40 && r.height > 40; };
+  const roots = new Set();
+  for (const el of document.querySelectorAll(
+      "[role='dialog'], [class*='dialogMask'], [class*='Modal'], [class*='modal']")) {
+    if (!vis(el)) continue;
+    roots.add(el.closest("[role='dialog']") || el);
+  }
+  let n = 0;
+  for (const root of roots) {
+    const sig = (root.innerText || '') + ' ' + (root.className || '') + ' ' + (root.id || '');
+    if (CAPTCHA_RE.test(sig)) continue;  // 验证码弹窗留给过滑块逻辑处理
+    const btn = root.querySelector(
+      "[data-slot*='close'], [aria-label*='关闭'], [aria-label*='close' i], [class*='close' i]");
+    if (btn && vis(btn)) { btn.click(); n++; continue; }
+    // 没有明显关闭按钮：把整屏遮罩藏掉，至少别挡住输入框
+    const r = root.getBoundingClientRect();
+    if (r.width >= window.innerWidth * 0.8 && r.height >= window.innerHeight * 0.6) {
+      root.style.setProperty('display', 'none', 'important');
+      n++;
+    }
+  }
+  return n;
+}
+"""
+
+
+async def dismiss_blocking_dialogs(page, key: str = "") -> int:
+    """关掉盖住页面的营销/引导弹窗，返回处理掉的个数（验证码弹窗不动）。"""
+    try:
+        n = await page.evaluate(_DISMISS_DIALOG_JS)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[{key}] 尝试关闭遮挡弹窗失败: {exc}")
+        return 0
+    if n:
+        logger.info(f"[{key}] 检测到 {n} 个遮挡弹窗（营销/引导类），已尝试关闭")
+        await page.wait_for_timeout(600)
+    return int(n or 0)
+
+
+def rearm_capture(state: dict, queue: asyncio.Queue, url_hint: str, on_fallback=None) -> None:
+    """重发消息前重新启用捕获。
+
+    CDP tee 的 `_armed` 与 Playwright 侧的 `capturing` 都是一次性的：
+    命中一个流后立刻置 False。人机验证完成要重发时若不重新武装，
+    第二次的 SSE 不会被捕获，调用方只能干等到 STREAM_IDLE_TIMEOUT 后
+    报“未捕获到任何回复内容”。
+    """
+    state["capturing"] = True
+    state["matched_response"] = None
+    state["fallback_started"] = False
+    tee = state.get("cdp")
+    if tee is not None:
+        tee.arm(queue, url_hint, on_fallback=on_fallback)
 
 
 def mark_risk(key: str, reason: str = "") -> None:
@@ -111,6 +178,7 @@ async def start_capture(pool, key: str, *, home_url: str, headless: bool, url_hi
 
     page = await pool.get_page(key, "capture")
     page._w2a_state = state  # 挂到 page 对象上供外部访问
+    page._w2a_key = key      # 日志/弹窗处理用，避免各处透传
 
     # 移除上一次的监听器（避免累积）—— 用 context 级别以覆盖 SPA/SW/iframe
     old_handler = getattr(ctx, "_w2a_resp_handler", None)
@@ -176,7 +244,11 @@ async def start_capture(pool, key: str, *, home_url: str, headless: bool, url_hi
                 if res.get("ok"):
                     logger.info(f"[{key}] 自动过滑块成功，重发消息: {res.get('message')}")
                     clear_risk(key)
-                    state["capturing"] = True
+                    # 一次发送只捕一个响应，重发前必须重新武装，否则收不到第二段流
+                    rearm_capture(
+                        state, queue, url_hint,
+                        on_fallback=lambda reason: _fallback_to_legacy(reason),
+                    )
                     try:
                         await trigger_send(
                             page,
@@ -194,7 +266,8 @@ async def start_capture(pool, key: str, *, home_url: str, headless: bool, url_hi
             mark_risk(key, "触发 RGV587 人机验证")
             state["capturing"] = False
             await queue.put(
-                f"{ERR_PREFIX}千问触发了人机验证(RGV587)，自动过滑块未成功，请打开 /live 页面手动完成验证后再重试"
+                f"{ERR_PREFIX}{key} 触发了人机验证(RGV587)，自动处理未成功，"
+                f"请手动完成验证后再重试（页面有头时直接在弹出的 Chrome 窗口里做，否则打开 /live）"
                 f"（{int(RISK_COOLDOWN_SEC)}s 风控冷却期内请求会被直接拒绝）"
             )
             await queue.put(DONE)
@@ -286,6 +359,11 @@ async def start_capture(pool, key: str, *, home_url: str, headless: bool, url_hi
     ctx._w2a_resp_handler = _on_response
     ctx.on("response", _on_response)
 
+    def _rearm() -> None:
+        rearm_capture(state, queue, url_hint, on_fallback=lambda reason: _fallback_to_legacy(reason))
+
+    state["rearm"] = _rearm
+
     # 导航到首页（SPA 加载）。
     # 关键：已在目标站点时直接复用页面，不要每次请求都重新 goto——
     # 重新加载后 1 秒内就发送，前端安全 SDK 还没就绪，上游会直接回固定拒绝卡片。
@@ -309,8 +387,8 @@ async def start_capture(pool, key: str, *, home_url: str, headless: bool, url_hi
     if CDP_STREAM:
         try:
             tee = await CdpSseTee.for_page(page)
-            tee.arm(queue, url_hint, on_fallback=lambda reason: _fallback_to_legacy(reason))
             state["cdp"] = tee
+            state["rearm"]()  # 统一走 _rearm，避免两处 arm 参数不一致
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[{key}] CDP 真流式不可用，使用整段读取: {exc}")
     else:
@@ -373,7 +451,34 @@ async def trigger_send(
     if ta is None:
         raise RuntimeError("未找到对话输入框：页面结构可能已变化或加载超时，请核对选择器或重跑 recon")
 
-    await ta.click(timeout=8000)
+    # 先主动扫一遍遮挡弹窗（等 click 超时再处理要白等 8 秒）
+    await dismiss_blocking_dialogs(page, getattr(page, "_w2a_key", ""))
+
+    clicked = False
+    click_err: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            await ta.click(timeout=8000 if attempt == 0 else 4000)
+            clicked = True
+            break
+        except Exception as exc:  # noqa: BLE001
+            click_err = click_err or exc
+            if attempt == 0:
+                logger.warning(f"[trigger_send] 点击输入框失败（多半被弹窗遮挡），关掉弹窗后重试: {str(exc)[:120]}")
+                await dismiss_blocking_dialogs(page, getattr(page, "_w2a_key", ""))
+                try:
+                    await page.keyboard.press("Escape")
+                except Exception:  # noqa: BLE001
+                    pass
+    if not clicked:
+        # 键盘事件走的是焦点元素，不受遮罩层级影响：最后退化成 JS 直接聚焦
+        try:
+            await ta.evaluate("el => { el.scrollIntoView({block: 'center'}); el.focus(); }")
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"无法聚焦对话输入框：页面可能被弹窗/人机验证盖住。{str(click_err)[:160]}"
+            ) from exc
+        logger.info("[trigger_send] 输入框仍被遮挡，已改用 JS 聚焦继续输入发送")
     # SPA 输入框早于应用水合完成就可见，立即输入可能被框架状态重置导致“空提交”
     await page.wait_for_timeout(400)
 

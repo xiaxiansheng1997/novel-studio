@@ -249,13 +249,15 @@ async def ws_live(ws: WebSocket, key: str) -> None:
         await ws.close()
         return
 
-    raw_url = ws.query_params.get("url") or pcfg.home_url
-    url = raw_url if _url_allowed(raw_url) else pcfg.home_url
-    if url != raw_url:
+    raw_url = ws.query_params.get("url") or ""
+    if raw_url and not _url_allowed(raw_url):
         await ws.send_json({"t": "log", "message": "已忽略非法地址，改用默认首页"})
+    url = raw_url if _url_allowed(raw_url) else pcfg.home_url
 
     try:
-        sess = await live.open(key, url)
+        # 只有显式传了 url 才强制导航：否则复用已停在站点上的标签页，
+        # 避免用户切回 /live 时把正在进行的对话/验证码冲掉
+        sess = await live.open(key, url, force_navigate=bool(raw_url))
     except Exception as exc:  # noqa: BLE001
         logger.exception(f"[live] 打开失败: {key}")
         await ws.send_json({"t": "error", "message": f"打开浏览器失败: {exc}"})

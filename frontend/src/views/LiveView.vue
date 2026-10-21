@@ -29,8 +29,21 @@
             连接
           </button>
           <button class="btn" :disabled="!connected" @click="disconnect">断开</button>
+          <button
+            class="btn"
+            title="连同后台浏览器一起关掉（管理页的「浏览器」会熄灭）；下次聊天会重新拉起"
+            @click="closeBrowser"
+          >
+            <AppIcon name="x" :size="13" />
+            关闭浏览器
+          </button>
         </div>
       </header>
+
+      <p class="live-note">
+        画面就是后台聊天用的<b>同一个标签页</b>：/v1 请求过程中打出的字、弹出的验证码都会直接出现在这里，
+        在画面上完成验证后，后端会自动把那条消息重发一次。
+      </p>
 
       <!-- 操作条 -->
       <div class="actionbar">
@@ -141,7 +154,13 @@ import AppNav from '../components/AppNav.vue'
 import AppIcon from '../components/AppIcon.vue'
 
 const route = useRoute()
-const provider = ref(route.query.provider || 'qwen')
+// 记住上次用的 provider 与“是否想保持连接”：SPA 路由切到聊天页会卸载本组件，
+// 回来时自动恢复连接，不用再手点「连接」
+const PROVIDER_KEY = 'w2a_live_provider'
+const WANT_KEY = 'w2a_live_want'
+function savedProvider() { try { return localStorage.getItem(PROVIDER_KEY) || '' } catch (_) { return '' } }
+function wantReconnect() { try { return localStorage.getItem(WANT_KEY) === '1' } catch (_) { return false } }
+const provider = ref(route.query.provider || savedProvider() || 'qwen')
 const url = ref(route.query.url || '')
 const connected = ref(false)
 const statusText = ref('未连接')
@@ -195,6 +214,11 @@ function toggleRecord() {
 
 function connect() {
   if (ws) { ws.close(); ws = null }
+  // 记录“用户想保持连接”：即使这次开浏览器失败，下次回到 /live 也自动重试
+  try {
+    localStorage.setItem(PROVIDER_KEY, provider.value)
+    localStorage.setItem(WANT_KEY, '1')
+  } catch (_) { /* 隐私模式下不可用，忽略 */ }
   const params = new URLSearchParams()
   if (url.value.trim()) params.set('url', url.value.trim())
   const apiKey = getApiKey()
@@ -202,7 +226,11 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const qs = params.toString() ? '?' + params.toString() : ''
   ws = new WebSocket(`${proto}://${location.host}/ws/live/${provider.value}${qs}`)
-  ws.onopen = () => { connected.value = true; statusText.value = '已连接'; appendLog('连接成功') }
+  ws.onopen = () => {
+    connected.value = true
+    statusText.value = '已连接'
+    appendLog('连接成功')
+  }
   ws.onclose = () => { connected.value = false; statusText.value = '未连接'; frameSrc.value = ''; appendLog('连接已断开') }
   ws.onerror = () => { statusText.value = '连接错误'; appendLog('WebSocket 连接错误') }
   ws.onmessage = (ev) => {
@@ -225,11 +253,37 @@ function connect() {
   }
 }
 
-function disconnect() {
+function closeSocket() {
   if (ws) { ws.close(); ws = null }
   connected.value = false
+  statusText.value = '未连接'
   frameSrc.value = ''
   recording.value = false
+}
+
+function disconnect() {
+  // 用户主动断开：下次进来不要再自动连
+  try { localStorage.setItem(WANT_KEY, '0') } catch (_) { /* 忽略 */ }
+  closeSocket()
+  appendLog('已断开画面：浏览器仍在后台运行（管理页的「浏览器」仍亮），下次连接会秒开；要彻底关掉请点「关闭浏览器」')
+}
+
+async function closeBrowser() {
+  // 断开只停推屏，后台浏览器/标签页还在（后台聊天要复用，也能避免反复重启）。
+  // 要彻底关掉走 full=1：管理页的「浏览器」状态才会变灰。
+  try { localStorage.setItem(WANT_KEY, '0') } catch (_) { /* 忽略 */ }
+  closeSocket()
+  const headers = {}
+  const apiKey = getApiKey()
+  if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey
+  try {
+    const r = await fetch(`/live/close/${provider.value}?full=true`, { method: 'POST', headers })
+    appendLog(r.ok
+      ? '已关闭浏览器进程（管理页的「浏览器」会熄灭），下次聊天会重新拉起'
+      : '关闭浏览器失败：HTTP ' + r.status)
+  } catch (e) {
+    appendLog('关闭浏览器失败：' + e)
+  }
 }
 
 function sendBulk() {
@@ -364,8 +418,15 @@ function onKeyDown(e) {
   e.preventDefault()
 }
 
-onMounted(() => window.addEventListener('mouseup', onMouseUp))
-onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); disconnect() })
+onMounted(() => {
+  window.addEventListener('mouseup', onMouseUp)
+  // 带 ?provider= 进来（管理页跳转）或上次会话还开着：直接恢复连接
+  if (route.query.provider || wantReconnect()) {
+    appendLog('自动恢复上次连接：' + provider.value)
+    connect()
+  }
+})
+onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocket() })
 </script>
 
 <style scoped>
@@ -381,6 +442,19 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); disconnect
   min-width: 0;
   display: flex;
   flex-direction: column;
+}
+.live-note {
+  margin: 0;
+  padding: 7px 20px;
+  border-bottom: 1px solid var(--line-soft);
+  background: #070b12;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-faint);
+}
+.live-note b {
+  color: var(--text-muted);
+  font-weight: 600;
 }
 
 /* 顶栏 */

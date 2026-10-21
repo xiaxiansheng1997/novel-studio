@@ -33,17 +33,23 @@ _SLIDER_STRONG = (
     ".nc_iconfont.btn_slide",
 )
 # 泛化命名：页面上的普通滑块控件也可能命中，必须再校验它处在验证码容器内
+# （字节/豆包的验证控件类名带 hash，只能靠 captcha 容器 + 语义关键字去认）
 _SLIDER_WEAK = (
     "[id*='n1z']",
     ".verify-move-block",
     ".slider-btn",
+    "[class*='move-block']",
+    "[class*='drag']",
+    "[class*='knob']",
+    "[class*='slider']",
 )
-# 验证码滑块/轨道的常见选择器（阿里 nc、腾讯、通用命名），按优先级尝试
+# 验证码滑块/轨道的常见选择器（阿里 nc、腾讯、字节、通用命名），按优先级尝试
 _SLIDER_SELECTORS = _SLIDER_STRONG + _SLIDER_WEAK
-# 泛化滑块必须位于这些容器之一（阿里 nc / 腾讯 / 通用 captcha）
+# 泛化滑块必须位于这些容器之一（阿里 nc / 腾讯 / 字节 / 通用 captcha）
 _CAPTCHA_CONTAINER = (
     ".nc_scale,[id*='nocaptcha'],.baxia-dialog,[id*='punish'],"
-    ".verify-bar-area,.slider-track,.verify-wrap,[class*='captcha'],[id*='captcha']"
+    ".verify-bar-area,.slider-track,.verify-wrap,[class*='captcha'],[id*='captcha'],"
+    "[class*='verify']"
 )
 _TRACK_SELECTORS = (
     ".nc_scale",
@@ -51,6 +57,8 @@ _TRACK_SELECTORS = (
     "[id*='scale_text']",
     ".verify-bar-area",
     ".slider-track",
+    "[class*='track']",
+    "[class*='slider']",
 )
 # 验证失败后“点击刷新/重试”的控件（必须限定在验证码容器内，裸 [id*='refresh'] 会误点页面其他刷新按钮）
 _REFRESH_SELECTORS = (
@@ -59,6 +67,64 @@ _REFRESH_SELECTORS = (
     ".baxia-dialog [id*='refresh']",
     "[id*='nocaptcha'] [id*='refresh']",
 )
+# 图片点选/拖拽类验证码（字节 secsdk，豆包实测题面：“体育运动常用的物品 /
+# 请选择所有符合上述描述的图片，并拖拽到下方”）：要看着图做语义判断，机器代做不可靠，
+# 只能请人在浏览器里完成。这里只负责认出来，别拿滑块那套去拖。
+_IMAGE_CAPTCHA_MARKERS = (
+    "请选择所有符合",
+    "拖拽到下方",
+    "拖拽到这里",
+    "请选出",
+    "依次点击",
+    "点击选择",
+    "请选择下方",
+)
+_SLIDER_CAPTCHA_MARKERS = ("拖动滑块", "拖动到最右边", "完成拼图", "按住左边滑块", "向右拖动")
+
+# 读页面上可见弹层/验证码容器的文字与图片数，用来判断验证码题型
+_OVERLAY_PROBE_JS = """
+() => {
+  const out = [];
+  const seen = new Set();
+  const vis = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 120 || r.height < 80) return false;
+    const st = getComputedStyle(el);
+    return st.visibility !== 'hidden' && st.display !== 'none'
+      && parseFloat(st.opacity || '1') > 0.05;
+  };
+  const push = (el) => {
+    if (!el || seen.has(el)) return;
+    seen.add(el);
+    if (!vis(el)) return;
+    const t = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+    const n = el.querySelectorAll('img').length;
+    if (t || n >= 4) out.push({ text: t.slice(0, 300), imgs: n });
+  };
+  for (const el of document.querySelectorAll(
+      "[role='dialog'],[class*='captcha'],[id*='captcha'],[class*='verify'],[id*='verify'],"
+      + "[class*='dialogMask'],[class*='Modal'],[class*='modal'],"
+      + "iframe[src*='captcha'],iframe[src*='verify'],iframe[src*='secsdk']")) {
+    push(el.closest("[role='dialog']") || el);
+  }
+  // 兜底：浮层里挤着 6 张以上大图，基本就是图片点选验证码
+  const boxes = new Set();
+  for (const img of document.querySelectorAll('img')) {
+    const r = img.getBoundingClientRect();
+    if (r.width < 60 || r.height < 60) continue;
+    let p = img.parentElement;
+    for (let i = 0; p && i < 5; i++, p = p.parentElement) {
+      // 图片网格本身可能是 static，真正的浮层在更上层，所以不能 break，逐层收集
+      if (p.querySelectorAll('img').length >= 6) boxes.add(p);
+    }
+  }
+  for (const b of boxes) {
+    const st = getComputedStyle(b);
+    if (st.position === 'fixed' || st.position === 'absolute') push(b);
+  }
+  return out;
+}
+"""
 
 # 常用功能键的 Windows 虚拟键码（CDP Input.dispatchKeyEvent 依赖它识别编辑类按键）
 _VKEY = {
@@ -106,13 +172,15 @@ class LiveSession:
         )
         self.started = True
 
-    async def start(self, url: str = "") -> None:
+    async def start(self, url: str = "", *, force_navigate: bool = False) -> None:
         async with self._lock:
             if self.cdp is None:
                 raise RuntimeError("会话已关闭")
             await self._ensure_enabled()
             await self._start_cast()
-        if url:
+        # 与后台聊天共用标签页时，页面通常已停在站点上：这时再 goto 一次会
+        # 把正在进行的对话/验证码冲掉。只有空白页或显式指定地址才导航。
+        if url and (force_navigate or not (self.page.url or "").startswith("http")):
             await self.navigate(url)
 
     async def close(self) -> None:
@@ -280,6 +348,15 @@ class LiveSession:
         """自动拖动当前 live 页面的验证码滑块；返回 {ok, message}。"""
         if self.cdp is None:
             return {"ok": False, "message": "会话已关闭"}
+        cap = await detect_captcha(self.page)
+        if cap["kind"] == "image":
+            # 图片点选/拖拽：机器代做不可靠，直接告诉人要手动做
+            return {
+                "ok": False,
+                "message": "这是图片点选验证码（"
+                + (cap["text"][:40] or "看题勾选图片并拖到下方")
+                + "），需要手动勾选图片，自动过滑块帮不上",
+            }
         return await auto_slide_page(self.page, key=self.key)
 
     # ---- 录制 ----
@@ -321,15 +398,18 @@ class LiveBrowserManager:
             pcfg = self.config.providers.get(key)
             headless = bool(pcfg.headless) if pcfg else False
             ctx = await self.pool.context(key, headless=headless)
-            page = await self.pool.get_page(key, "live")
+            # 关键：与后台聊天用**同一个标签页**。以前 live 独占一个 tab，
+            # 验证码/弹窗出现在 capture tab 上，用户在 /live 画面里根本看不到，
+            # 只能去 Chrome 窗口里找另一个标签，极易误以为“没弹验证码”。
+            page = await self.pool.get_page(key, "capture")
             cdp = await ctx.new_cdp_session(page)
             sess = LiveSession(key, page, cdp)
             self.sessions[key] = sess
             return sess
 
-    async def open(self, key: str, url: str = "") -> LiveSession:
+    async def open(self, key: str, url: str = "", *, force_navigate: bool = False) -> LiveSession:
         sess = await self.get_or_create(key)
-        await sess.start(url)
+        await sess.start(url, force_navigate=force_navigate)
         return sess
 
     async def close(self, key: str) -> None:
@@ -456,6 +536,63 @@ async def _mask_visible(page) -> bool:
         except Exception:  # noqa: BLE001
             continue
     return False
+
+
+async def captcha_overlay_visible(page) -> bool:
+    """页面上是否真的摆着一个验证码/人机验证容器（用于区分“真验证”和“纯限流”）。"""
+    for fr in page.frames:
+        try:
+            loc = fr.locator(_CAPTCHA_CONTAINER).first
+            if await loc.count() and await loc.is_visible():
+                box = await loc.bounding_box()
+                if box and box["width"] > 60 and box["height"] > 30:
+                    return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+def _clip_text(text: str, limit: int = 80) -> str:
+    """把弹层文字压成一行（日志/错误信息里只留最关键的一句）。"""
+    return " ".join((text or "").split())[:limit]
+
+
+async def detect_captcha(page) -> dict:
+    """识别页面上的验证码题型，返回 {"kind", "text"}。
+
+    - image：图片点选/拖拽类（字节 secsdk 等），只能人工完成；
+    - slider：滑块类，可以交给 auto_slide_page 试；
+    - unknown：确实摆着验证码容器，但认不出题型；
+    - none：页面上没有验证码（多半是纯限流）。
+    """
+    texts: list[str] = []
+    img_count = 0
+    for fr in page.frames:
+        try:
+            got = await fr.evaluate(_OVERLAY_PROBE_JS)
+        except Exception:  # noqa: BLE001 - 跨域 iframe / frame 已销毁
+            continue
+        for item in got or []:
+            if not isinstance(item, dict):
+                continue
+            texts.append(item.get("text") or "")
+            img_count = max(img_count, int(item.get("imgs") or 0))
+    blob = "\n".join(t for t in texts if t)
+    is_image = any(m in blob for m in _IMAGE_CAPTCHA_MARKERS)
+    # 结构化兜底：浮层里一排图片 + “提交/拖拽”，即使措辞变了也能认出来
+    if not is_image and img_count >= 6 and ("提交" in blob or "拖拽" in blob):
+        is_image = True
+    if is_image:
+        return {"kind": "image", "text": _clip_text(blob)}
+    try:
+        slider = await _slider_visible(page)
+    except Exception:  # noqa: BLE001
+        slider = False
+    if slider or any(m in blob for m in _SLIDER_CAPTCHA_MARKERS):
+        return {"kind": "slider", "text": _clip_text(blob)}
+    if await captcha_overlay_visible(page):
+        return {"kind": "unknown", "text": _clip_text(blob)}
+    return {"kind": "none", "text": _clip_text(blob)}
 
 
 async def _try_refresh(page) -> bool:

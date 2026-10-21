@@ -34,7 +34,7 @@
 <body>
 <header>
   <a href="/ui/admin.html">← 管理</a>
-  <a href="/ui/chat.html">聊天 →</a>
+  <a href="/ui/chat.html" target="_blank" rel="noopener">聊天 ↗</a>
   <select id="provider">
     <option value="qwen">通义千问</option>
     <option value="doubao">豆包</option>
@@ -54,6 +54,7 @@
 
 <div class="hint">
   用法：<b>连接</b>后，这里会实时显示真实站点画面 —— 你直接在<b>画面里</b>用鼠标/键盘完成登录（扫码/输密码/过滑块），无需命令行。
+  这里显示的就是后台发消息用的<b>同一个标签页</b>，所以聊天时弹出的验证码/人机验证也会出现在这个画面里，直接在画面上完成即可（后端会自动重发那条消息）。
   检测到登录成功会倒计时 3 秒自动跳转聊天（可点“取消跳转”中止）。粘贴密码/验证码用 Ctrl+V 可用。<br>
   录制接口（可选）：点<b>开始录制接口</b> → 在画面里发一句“你好” → 点<b>停止录制</b>，写入 fixtures/&lt;provider&gt;.json（未抓到数据不会覆盖旧文件）。<br>
   <span style="color:#6b7280">提示：点击画面后即可直接输入（支持中文输入法）；英文/数字/特殊键实时转发，中文通过合成后上屏。也可用上方文本框批量发送。</span>
@@ -75,6 +76,10 @@ let prevLoggedIn=false, baselineDone=false, mouseDown=false, lastMove=0;
 let cdTimer=null, cdLeft=0;
 
 function apiKey(){ return (localStorage.getItem('w2a_apikey')||'').trim(); }
+// 记住上次连接的 provider：从聊天页切回来（页面重新加载）时自动恢复连接
+const LAST_KEY='w2a_live_key';
+function rememberKey(k){ try{ if(k) localStorage.setItem(LAST_KEY,k); }catch(e){} }
+function lastKey(){ try{ return localStorage.getItem(LAST_KEY)||''; }catch(e){ return ''; } }
 function authFetch(url, opts){ opts=opts||{}; opts.headers=Object.assign({}, opts.headers); const k=apiKey(); if(k) opts.headers['Authorization']='Bearer '+k; return fetch(url, opts); }
 function log(m){ $('log').textContent += (m?('\n'+m):''); }
 function setMsg(t,on){ $('msg').textContent=t; $('conn').className='dot '+(on?'on':'off'); }
@@ -90,6 +95,7 @@ function connect(){
   const qs=params.toString()? ('?'+params.toString()):'';
   const proto=location.protocol==='https:'?'wss':'ws';
   prevLoggedIn=false; baselineDone=false;
+  rememberKey(connectedKey);
   setMsg('连接中…', false);
   ws=new WebSocket(`${proto}://${location.host}/ws/live/${connectedKey}${qs}`);
   ws.onopen=()=>{ setMsg('已连接，请在画面中操作', true); $('shot').focus(); startPoll(); };
@@ -233,6 +239,16 @@ ime.addEventListener('input',e=>{
 ime.addEventListener('paste',e=>{ if(!ws)return; e.preventDefault(); const t=(e.clipboardData||window.clipboardData).getData('text'); if(t) send({t:'text',value:t}); });
 
 $('connect').onclick=connect;
+// 页面加载后恢复上次连接（切到聊天再切回来不用再手点“连接”）
+(function restore(){
+  const k=lastKey();
+  if(!k) return;
+  const opt=[...$('provider').options].some(o=>o.value===k);
+  if(!opt) return;
+  $('provider').value=k;
+  log('自动恢复上次连接：'+k);
+  setTimeout(connect, 300);
+})();
 $('reload').onclick=()=>send({t:'reload'});
 function sendTypeText(){ const v=$('typecn').value; if(!v)return; send({t:'text',value:v}); $('typecn').value=''; $('shot').focus(); }
 $('typesend').onclick=sendTypeText;

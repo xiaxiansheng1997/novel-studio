@@ -3,10 +3,11 @@
 每家一个持久化 profile（storage/browser-profiles/<key>），登录一次后长期复用；
 context 懒加载、进程内复用，并按 provider 提供串行锁（DS/豆包必须低并发）。
 
-页面按"用途槽位(slot)"管理，避免相互干扰：
-- slot="capture"：聊天适配器驱动发送、旁路捕获响应用的页面。
-- slot="live"   ：内嵌实时浏览器（登录/录制）用的页面。
-- slot="recon"  ：命令行 recon 兜底用的页面（与 live 隔离，避免抢同一页）。
+页面按"用途槽位(slot)"管理：
+- slot="capture"：聊天适配器驱动发送、旁路捕获响应用的页面；
+  内嵌实时浏览器（/live，登录/录制）也直接用这个页面 —— 同一个标签页，
+  用户在画面里才能看到后台发消息时弹出的验证码。
+- slot="recon"  ：命令行 recon 兜底用的页面（与 capture 隔离，避免抢同一页）。
 """
 from __future__ import annotations
 
@@ -105,6 +106,21 @@ _UA_METADATA = {
 }
 
 
+def _is_dead_error(exc: Exception) -> bool:
+    """异常是否表示“浏览器/context/页面已关闭”（可靠重启恢复）。"""
+    text = str(exc).lower()
+    return any(
+        hint in text
+        for hint in (
+            "has been closed",
+            "target page, context or browser has been closed",
+            "target closed",
+            "browser has been closed",
+            "connection closed",
+        )
+    )
+
+
 class BrowserPool:
     def __init__(self, storage_dir: Path, default_headless: bool = False):
         self._storage_dir = storage_dir / "browser-profiles"
@@ -137,12 +153,18 @@ class BrowserPool:
     async def context(self, key: str, *, headless: Optional[bool] = None):
         """获取（必要时创建）某 provider 的持久化 BrowserContext。"""
         if key in self._contexts:
-            if headless is not None and headless != self._ctx_headless.get(key):
-                # context 已按另一种 headless 打开，此处请求不一致：不重建，仅告警
-                logger.warning(
-                    f"context 已存在，headless 请求不一致(已开={self._ctx_headless.get(key)} 请求={headless})：provider={key}"
-                )
-            return self._contexts[key]
+            ctx = self._contexts[key]
+            if not self._alive(ctx):
+                # 用户手动关掉窗口 / 浏览器崩溃：缓存里的 context 已死，必须重启
+                logger.warning(f"检测到 {key} 的浏览器已关闭，丢弃缓存重新启动")
+                self._purge(key)
+            else:
+                if headless is not None and headless != self._ctx_headless.get(key):
+                    # context 已按另一种 headless 打开，此处请求不一致：不重建，仅告警
+                    logger.warning(
+                        f"context 已存在，headless 请求不一致(已开={self._ctx_headless.get(key)} 请求={headless})：provider={key}"
+                    )
+                return ctx
         async with self._global_lock:
             if key in self._contexts:
                 return self._contexts[key]
@@ -165,8 +187,36 @@ class BrowserPool:
             await ctx.add_init_script(_STEALTH_JS)
             self._contexts[key] = ctx
             self._ctx_headless[key] = hl
+            # 窗口被手动关掉时要主动从缓存里除名，否则后续请求会一直撞
+            # “Target page, context or browser has been closed”，直到重启后端
+            ctx.on("close", lambda _ctx=None: self._purge(key))
             logger.info(f"浏览器 context 已启动: provider={key} headless={hl}")
             return ctx
+
+    @staticmethod
+    def _alive(ctx) -> bool:
+        """非持久化 context 可以用 browser.is_connected() 探活。
+
+        注意：launch_persistent_context 返回的 context 其 browser 为 None，探不
+        出死活；那种情况靠上面的 close 事件除名 + get_page 失败重试兜底。
+        """
+        try:
+            browser = ctx.browser
+        except Exception:  # noqa: BLE001
+            return False
+        if browser is None:
+            return True
+        try:
+            return bool(browser.is_connected())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _purge(self, key: str) -> None:
+        """丢掉已死的 context 与其页面缓存（不 await close，它已经关了）。"""
+        self._contexts.pop(key, None)
+        self._ctx_headless.pop(key, None)
+        for kk in [k for k in self._pages if k[0] == key]:
+            self._pages.pop(kk, None)
 
     async def get_page(self, key: str, slot: str = "capture"):
         """取某 provider 某用途槽位的页面；不存在或已关闭则新建（按槽位加锁防并发重复创建）。"""
@@ -176,8 +226,19 @@ class BrowserPool:
         async with lock:
             ctx = await self.context(key)
             page = self._pages.get((key, slot))
-            if page is None or page.is_closed():
-                page = await ctx.new_page()
+            if page is not None and page.is_closed():
+                page = None
+            if page is None:
+                try:
+                    page = await ctx.new_page()
+                except Exception as exc:  # noqa: BLE001
+                    # 可能窗口刚被关掉但 close 事件还没送达：重试一次而不是直接失败
+                    if not _is_dead_error(exc):
+                        raise
+                    logger.warning(f"{key} 的 context 已失效（{exc}），重新启动一次")
+                    self._purge(key)
+                    ctx = await self.context(key)
+                    page = await ctx.new_page()
                 await self.prepare_page(page)
                 self._pages[(key, slot)] = page
             return page

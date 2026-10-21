@@ -41,6 +41,10 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 然后打开 **内嵌浏览器页** <http://127.0.0.1:8000/ui/live.html>：选站点 → **连接** → 在实时画面里直接登录（扫码/密码/滑块）→ **检测登录**。登录态持久化后长期复用，**全程无需命令行**。需要精修解析时，在同一页点**开始录制接口**、在画面里发一句“你好”、再**停止录制**即可写入 fixtures。
 
+> `/live` 画面显示的**就是后台发消息用的那个标签页**（不再是单独的标签），所以 `/v1` 请求过程中打出的字、弹出的验证码都能在画面里直接看到并操作。切到聊天页再切回来会自动恢复上次的连接（不用再点“连接”）。
+>
+> 「断开」只停推屏、不关浏览器进程：后台聊天还要复用这个标签页，反复重启也慢。所以断开后管理页的「浏览器」仍然是亮的，这是正常的；要连进程一起关掉、让那个点变灰，点「关闭浏览器」（`POST /live/close/<key>?full=true`），下次聊天会重新拉起。
+
 命令行兜底（不用 UI 时）：
 ```powershell
 python -m scripts.login qwen      # 弹出浏览器登录
@@ -72,6 +76,7 @@ resp = client.chat.completions.create(
 - 千问 HTTP 快路径开关：环境变量 `W2A_QWEN_HTTP=1`（需已 recon 出 `fixtures/qwen.json`）。
 - 真流式开关：`W2A_CDP_STREAM=1`（默认开）；异常时可设 `0` 退回整段读取。
 - 流式空闲超时：`W2A_STREAM_IDLE_TIMEOUT=60`（秒）。
+- 人机验证：`W2A_AUTO_SLIDE=1` 自动处理（滑块直接拖）；`W2A_HUMAN_WAIT_SEC=60` 遇到只能人工做的图片点选验证码时，在有头浏览器里等人做完的最长秒数（`0` 不等）；`W2A_RISK_COOLDOWN=60` 验证失败后的风控冷却秒数。
 - 最小请求间隔：`config.yaml` 里每个 provider 的 `min_interval_sec`（秒，从上一次回复结束算起）。千问默认 3 秒，用于降低 RGV587 人机验证触发率；`0` 关闭。
 
 ## 目录结构
@@ -101,7 +106,7 @@ storage/    <浏览器 profile / 票据 / 会话库，已 gitignore>
 
 排查顺序：`GET /live/debug/<key>` 看登录判定与 cookie 名 → `GET /live/loggedin/<key>` 应为 `logged_in: true` → 在 `/live` 里问一句 `1+1` → 仍被拒就备份并删除 `storage/browser-profiles/<key>` 与 `storage/session/<key>.json`，把该 provider 的 `headless` 改成 `false` 后重新登录。
 
-> `/live` 与 `/v1` 共用同一份 profile：在 `/live` 里退出登录，`/v1` 也会同时变成游客态。
+> `/live` 与 `/v1` 共用同一份 profile，而且共用**同一个标签页**：在 `/live` 里退出登录，`/v1` 也会同时变成游客态；反过来，`/v1` 触发的人机验证也会直接摆在 `/live` 画面里。
 
 ### `/live/loggedin/<key>` 显示 false，但页面里明明登录了
 
@@ -112,6 +117,47 @@ storage/    <浏览器 profile / 票据 / 会话库，已 gitignore>
 ### 页面刚打开就发送会被判机器
 
 抓包页如果每次请求都重新加载、并在 1 秒内按 Enter，前端安全 SDK（阿里 baxia 等）还没来得及计算请求签名，上游会直接回固定拒绝卡片——这和账号无关，真人手打有自然停顿所以正常。现在默认复用已打开的抓包页，只在冷启动时预热 2.5 秒（`W2A_WARMUP_MS`，设 0 关闭）。
+
+### 豆包报“系统繁忙”或拿到一条空回答
+
+豆包的风控不返 HTTP 错误码，而是在 `200` 的 SSE 里回一条 `event: STREAM_ERROR`，实测两种：
+
+| error_code | error_msg | 含义 |
+| --- | --- | --- |
+| `710022002` | 当前服务访问频繁，请稍后重试 | 游客态（全新 profile）发不出对话，页面同时弹登录框 |
+| `710022004` | `rate limited`（extra 里 `type=verify`） | 该 profile/设备被风控，要求人机验证 |
+
+以前这些载荷解析不出文本就被当成“没有增量”，最后返回一条 `content: ""` 的 200 响应，调用方什
+么线索都拿不到。现在 `app/core/blocked.py:find_upstream_error()` 会认出业务错误，报 `type=upstream_error`
+并把 `error_code` 和上游原文带在 `message` 里。另外：
+
+- 豆包网页端**不登录不能聊**（已用全新 profile 验证：输入后立刻回 `710022002`，页面随后被踢回 `https://www.doubao.com/chat/?from_logout=1`），请先在 `/live` 里登录；
+- `710022004` 且 `extra` 里带 `type=verify` 时，后端会先认题型再处理（`W2A_AUTO_SLIDE=0` 关掉整套自动处理）：
+  - **滑块类**（阿里 baxia 等）：自动拖过去并重发一次；
+  - **图片点选/拖拽类**（豆包实测就是这种：“体育运动常用的物品 / 请选择所有符合上述描述的图片，并拖拽到下方”）：要看着图做语义判断，机器代做不可靠，所以不再盲目拖。豆包默认 `headless: false`，后端会在那个 Chrome 窗口（也就是 `/live` 画面里的同一个标签页）里**等你手动勾选图片**，最多 `W2A_HUMAN_WAIT_SEC` 秒（默认 60，设 0 关闭），检测到验证码消失就自动把同一句话重发一次，回答照常返回；
+  - 等不到人做完、或过完仍然被拒，才返回 `type=human_verify`（HTTP 503）并进入风控冷却。无头模式没人能操作页面，会直接给指引：去 `/live` 里做，过完点「已验证·清除风控冷却」。
+- 还有一种「发不出去」和人机验证无关：豆包会随机弹「下载豆包电脑版 解锁本地任务能力」这类营销弹窗，它的遮罩盖住整个页面，点击输入框会一直等到超时（日志里是 `intercepts pointer events`）。现在发送前会自动关掉这类弹窗（带 captcha/验证/滑块 特征的弹窗不会被误关），实在关不掉就退化成 JS 聚焦 + 键盘输入继续发送；
+- 流式回答讲到一半才冒出验证信号时，正文已经下发给用户，不再截断改判错误，只记一条冷却；
+- 持续不行就备份并删除 `storage/browser-profiles/doubao` 后重新登录；
+- 上游自己抽风（详情里带 5xx/timeout）会回 `503` 并提示“隔一会儿重试”，不会误引导你去查登录态。
+
+### DeepSeek 只回了一个会话标题，或回答只到一半
+
+DeepSeek 网页端 `/api/v0/chat/completion` 的 SSE 既不是 OpenAI 格式，也不是单一形态，而是三种混着发：
+
+```
+data: {"v":{"response":{"fragments":[{"type":"RESPONSE","content":"光合"}]}}}   # 快照
+data: {"p":"response/fragments/-1/content","o":"APPEND","v":"作用是"}            # 打补丁
+data: {"v":"植物"}                                                              # 逐字增量（主流）
+```
+
+另外标题事件的 data 是 `{"content":"会话标题"}`。旧版只认 OpenAI 风格 + 泛用取文（找 `content/text/delta` 键），结果：标题被当成回答、`{"v":"…"}` 的逐字增量全部丢掉（表现为只回几个字）。现在 `app/providers/deepseek.py` 分别处理快照 / 补丁 / 逐字增量，并显式丢弃标题与状态事件；`fixtures/deepseek.json` 里的 `response_sample` 可直接回放验证。
+
+### 手动关掉浏览器窗口后，所有请求都报 `Target page, context or browser has been closed`
+
+以前会一直坏到重启后端：`BrowserPool` 缓存了那个已死的 context，每次都拿去 `new_page()`。现
+在会监听 context 的 `close` 事件即时除名（`is_open` 与 `/live/loggedin` 也会跟着变 `false`），`get_page()`
+里再兜底一层：`new_page()` 失败就重启 context 重试一次。自己把窗口关了也不用再重启服务。
 
 ### 回答末尾出现 `[[inline_action_reply_1]]` 之类的方括号垃圾
 
