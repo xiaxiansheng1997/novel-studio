@@ -49,6 +49,52 @@ class Registry:
     def throttle(self, key: str) -> ProviderThrottle:
         return self.throttles[key]
 
+    def apply_config(self, config: AppConfig) -> dict[str, list[str]]:
+        """就地把新配置应用到已运行的适配器上（供 /admin/reload）。
+
+        适配器的 cfg 是引用替换：正在跑的流继续用旧配置，下一轮生效，不会被打断。
+        限流参数（每分钟/并发/最小间隔）变化时重建 throttle，窗口计数会归零。
+        返回新增/更新/移除的 provider，便于日志与接口回显。
+        """
+        self.config = config
+        self.ctx.config = config
+        classes = _adapter_classes()
+        desired = {
+            key: pcfg for key, pcfg in config.providers.items() if pcfg.enabled and key in classes
+        }
+        added: list[str] = []
+        updated: list[str] = []
+        removed: list[str] = []
+
+        for key, pcfg in desired.items():
+            adapter = self.adapters.get(key)
+            if adapter is None:
+                self.adapters[key] = classes[key](pcfg, self.ctx)
+                added.append(key)
+            else:
+                adapter.cfg = pcfg
+                updated.append(key)
+            old = self.throttles.get(key)
+            limit = config.rate_limit_per_minute
+            if (
+                old is None
+                or old.per_minute != max(1, limit)
+                or old.max_concurrency != max(1, pcfg.max_concurrency)
+            ):
+                self.throttles[key] = ProviderThrottle(
+                    key, limit, pcfg.max_concurrency, pcfg.min_interval_sec
+                )
+            else:
+                old.min_interval = max(0.0, float(pcfg.min_interval_sec))
+
+        for key in list(self.adapters):
+            if key not in desired:
+                self.adapters.pop(key, None)
+                self.throttles.pop(key, None)
+                removed.append(key)
+
+        return {"added": added, "updated": updated, "removed": removed}
+
     def all_models(self) -> list[ModelInfo]:
         """合并三家模型，并补上「模型名即模式」的别名，便于客户端发现。"""
         from app.core.modes import alias_ids

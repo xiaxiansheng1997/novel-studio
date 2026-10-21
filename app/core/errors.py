@@ -23,6 +23,13 @@ class ProviderError(W2AError):
         super().__init__(f"[{provider}] {message}", type_="provider_error", status=status)
 
 
+class InvalidRequest(W2AError):
+    """请求参数不受支持（如 n>1）：必须显式报错，不能被静默忽略后当成正常回答。"""
+
+    def __init__(self, message: str, *, code: str = "invalid_request"):
+        super().__init__(message, type_="invalid_request_error", code=code, status=400)
+
+
 class NeedsRecon(ProviderError):
     """尚未抓取真实接口（fixtures 缺失）。提示用户运行 recon。"""
 

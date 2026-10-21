@@ -13,7 +13,8 @@ from loguru import logger
 
 from app import __version__
 from app.api import admin_routes, conversation_routes, live_routes, openai_routes
-from app.config import BASE_DIR
+from app.config import BASE_DIR, get_settings
+from app.core.auth import allowed_origins
 from app.core.errors import W2AError
 from app.core.request_log import RequestLogMiddleware
 from app.runtime import build_runtime, setup, teardown
@@ -52,10 +53,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Web2API 对话反代", version=__version__, lifespan=lifespan)
 
-# 本机自用，允许本地客户端跨域
+# 浏览器跨域只放行本机来源（含 Vite dev 端口）；需要时用 W2A_ALLOW_ORIGINS 追加，
+# 设为 * 则完全放开。判断逻辑与 live_routes 的来源校验共用 app.core.auth。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=sorted(allowed_origins(get_settings())),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -66,9 +68,15 @@ app.add_middleware(RequestLogMiddleware)
 @app.exception_handler(W2AError)
 async def w2a_error_handler(request: Request, exc: W2AError):
     """把内部错误转成 OpenAI 风格的 JSON 错误响应。"""
+    headers: dict[str, str] = {}
+    # 限流类错误带上 Retry-After，客户端（含 OpenAI SDK）能据此退避
+    retry_after = getattr(exc, "retry_after", None)
+    if isinstance(retry_after, (int, float)) and retry_after > 0:
+        headers["Retry-After"] = str(int(retry_after + 0.999))
     return JSONResponse(
         status_code=exc.status,
         content={"error": {"message": exc.message, "type": exc.type, "code": exc.code}},
+        headers=headers or None,
     )
 
 

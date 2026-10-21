@@ -27,6 +27,12 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
     stop: Optional[Union[str, list[str]]] = None
+    # 显式声明，避免「传了却静默丢弃」；具体处理见 openai_routes.handlers
+    # n>1 直接 400；stop/max_tokens 本地软截断；tools 本轮只告警不执行
+    n: Optional[int] = None
+    tools: Optional[list[dict[str, Any]]] = None
+    tool_choice: Optional[Union[str, dict[str, Any]]] = None
+    stream_options: Optional[dict[str, Any]] = None
     # 自定义：延续同一会话（可选），以及 DeepSeek/豆包的思考/联网开关
     conversation_id: Optional[str] = Field(default=None, alias="conversation_id")
     thinking: Optional[bool] = None

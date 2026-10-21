@@ -164,6 +164,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', globalKeyHandler)
+  if (scrollFrame) cancelAnimationFrame(scrollFrame)
 })
 
 function globalKeyHandler(e) {
@@ -180,10 +181,15 @@ watch(() => chatStore.messages.length, () => {
   nextTick(() => scrollToBottom())
 })
 
+// 流式时每个 token 都会调一次滚动；用 rAF 合并成每帧最多一次，
+// 避免同步读取 scrollHeight 强制重排导致掉帧。
+let scrollFrame = 0
 function scrollToBottom() {
-  if (messagesEl.value) {
-    messagesEl.value.scrollTop = messagesEl.value.scrollHeight
-  }
+  if (scrollFrame) return
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = 0
+    if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+  })
 }
 
 function onModelChange(e) {

@@ -124,9 +124,12 @@ client.chat.completions.create(
 ## 配置
 
 - `config.yaml`：provider 开关、首页地址、模型列表、并发上限、全局每分钟限流（非敏感）。
-- `.env`（由 `.env.example` 复制）：`W2A_HOST/PORT`、可选 `W2A_API_KEY`、`W2A_STORAGE_DIR`。
+- `.env`（由 `.env.example` 复制）：`W2A_HOST/PORT`、可选 `W2A_API_KEY`（同时保护 `/v1` 与 `/admin/*`）、`W2A_STORAGE_DIR`。
+- 浏览器跨域/WS 来源：默认只放行本机与 `5173` 开发端口，需要时用 `W2A_ALLOW_ORIGINS` 追加（逗号分隔，`*` 全放开）。
+- 热加载：改完 `config.yaml` 后 `POST /admin/reload` 就地生效（模型/模式/并发/限流都会重建，无需重启；`GET` 会返回 405 提示）。
 - 千问 HTTP 快路径开关：环境变量 `W2A_QWEN_HTTP=1`（需已 recon 出 `fixtures/qwen.json`）。
 - 真流式开关：`W2A_CDP_STREAM=1`（默认开）；异常时可设 `0` 退回整段读取。
+- SSE 心跳：`W2A_HEARTBEAT_SEC=15`（秒），思考阶段长期无增量时发注释行 `: ping`，防反代超时。
 - 流式空闲超时：`W2A_STREAM_IDLE_TIMEOUT=60`（秒）。
 - 人机验证：`W2A_AUTO_SLIDE=1` 自动处理（滑块直接拖）；`W2A_HUMAN_WAIT_SEC=60` 遇到只能人工做的图片点选验证码时，在有头浏览器里等人做完的最长秒数（`0` 不等）；`W2A_RISK_COOLDOWN=60` 验证失败后的风控冷却秒数。
 - 最小请求间隔：`config.yaml` 里每个 provider 的 `min_interval_sec`（秒，从上一次回复结束算起）。千问默认 3 秒，用于降低 RGV587 人机验证触发率；`0` 关闭。
@@ -227,7 +230,10 @@ data: {"v":"植物"}                                                            
 
 - `stream:false` 请求仍会缓冲全部增量后合成一条完整响应；`stream:true` 走 CDP 逐块下发。
 - 用量 `usage` 为粗略字符估算（约 4 字符 = 1 token），非真实计数。
-- 各家 `temperature/top_p/max_tokens` 等多被接受但忽略。
+- `max_tokens` / `stop` 是“尽力而为”的本地软截断（站点侧仍在生成）；`n>1` 直接 400；`tools/tool_choice` 暂不执行，只在响应头回 `X-W2A-Warning: tools-not-supported`。
+- 限流拒绝（429）会带 `Retry-After` 头；客户端按它退避即可。
+- 客户端中途断开时，已生成的部分内容仍会落库并标注「客户端中断生成」；刷新页面不会丢问题。
+- `temperature/top_p` 仍只是接受但不透传。
 - 页面结构/接口会变：失效时先重跑 `recon`，必要时微调 provider 的选择器与 `parse_payload`
   （对照 `fixtures/<key>.json` 里的 `response_sample`）。
 - 切换模型/模式可能让站点新开一个会话（豆包换模型最明显），上游上下文会重置，`conversation_id` 映射不会自动迁移。

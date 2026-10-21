@@ -2,24 +2,16 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional
+
+from app.core.auth import verify_key
 
 router = APIRouter()
 
 
 def _store(request: Request):
     return request.app.state.store
-
-
-async def verify_key(request: Request) -> None:
-    expected = getattr(request.app.state.settings, "api_key", None)
-    if not expected:
-        return
-    auth = request.headers.get("authorization", "")
-    token = auth[7:] if auth.lower().startswith("bearer ") else auth
-    if token != expected:
-        raise HTTPException(status_code=401, detail="无效的 API Key")
 
 
 class CreateConversationRequest(BaseModel):

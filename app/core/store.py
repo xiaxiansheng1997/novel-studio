@@ -194,15 +194,21 @@ class ConversationStore:
         return {"id": msg_id, "conversation_id": conv_id, "role": role, "content": content, "reasoning_content": reasoning_content, "created_at": now}
 
     async def get_messages(self, conv_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """取**最近** limit 条消息，按时间正序返回。
+
+        先用 `ORDER BY created_at DESC, rowid DESC` 抓尾巴（长会话首屏直接是最新消息），
+        再在 Python 侧翻转成时间正序，避免外层 SQL 排序在时间戳相同时丢顺序。
+        """
         assert self._db is not None
         async with self._lock:
             cur = await self._db.execute(
                 "SELECT id, role, content, reasoning_content, created_at "
-                "FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ?",
+                "FROM messages WHERE conversation_id = ? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (conv_id, limit),
             )
             rows = await cur.fetchall()
-        return [dict(r) for r in rows]
+        return [dict(r) for r in reversed(rows)]
 
     async def auto_title(self, conv_id: str, first_message: str) -> None:
         """用第一条用户消息的前 20 字自动生成标题。"""

@@ -58,6 +58,8 @@ class ProviderThrottle:
         min_interval_sec: float = 0.0,
     ):
         self.key = key
+        self.per_minute = max(1, per_minute)
+        self.max_concurrency = max(1, max_concurrency)
         self._limiter = SlidingWindowLimiter(per_minute)
         self._sem = asyncio.Semaphore(max(1, max_concurrency))
         self.min_interval = max(0.0, float(min_interval_sec))

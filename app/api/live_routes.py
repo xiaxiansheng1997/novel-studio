@@ -21,6 +21,7 @@ from loguru import logger
 from app.browser.live_browser import VIEWPORT_H, VIEWPORT_W, LiveBrowserManager, LiveSession
 from app.browser.stream_capture import clear_risk, trigger_send
 from app.browser.ui_modes import apply_mode, probe_ui
+from app.core.auth import bearer_token, key_matches, origin_ok
 from app.core.modes import resolve_mode
 
 router = APIRouter()
@@ -29,31 +30,18 @@ _MOUSE_TYPE = {"down": "mousePressed", "up": "mouseReleased", "move": "mouseMove
 
 
 # ---------- 安全校验 ----------
-def _allowed_origins(settings) -> set[str]:
-    hosts = {"127.0.0.1", "localhost"}
-    if settings.host and settings.host not in ("0.0.0.0", "::"):
-        hosts.add(settings.host)
-    out: set[str] = set()
-    for h in hosts:
-        out.add(f"http://{h}:{settings.port}")
-        out.add(f"https://{h}:{settings.port}")
-    return out
-
-
+# 具体规则统一在 app.core.auth：与 /v1、/admin 的鉴权、main.py 的 CORS 同一套口令/来源判断。
 def _origin_ok(origin: str | None, settings) -> bool:
     # 浏览器发起的 WS/跨域 fetch 必带 Origin；无 Origin（curl/同源脚本）放行
-    return origin is None or origin in _allowed_origins(settings)
+    return origin_ok(origin, settings)
 
 
 def _key_ok(provided: str | None, settings) -> bool:
-    if not settings.api_key:
-        return True
-    return provided == settings.api_key
+    return key_matches(provided, getattr(settings, "api_key", None))
 
 
 def _bearer(request: Request) -> str | None:
-    h = request.headers.get("authorization", "")
-    return h[7:] if h.lower().startswith("bearer ") else None
+    return bearer_token(request)
 
 
 def _url_allowed(url: str) -> bool:

@@ -40,7 +40,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { marked } from 'marked'
 import AppIcon from './AppIcon.vue'
 
@@ -84,8 +84,48 @@ function stripTokens(text) {
   return tidy.replace(/\s+$/, '')
 }
 
-const renderedContent = computed(() => renderMarkdown(stripTokens(props.message.content)))
-const renderedReasoning = computed(() => renderMarkdown(stripTokens(props.message.reasoning_content)))
+// 流式时每个 token 都会触发重算；markdown 是 O(n) 且要重建 DOM，
+// 这里把「取最新文本」节流到 80ms 一次，流结束后立即同步一次，长回答不再掉帧。
+const RENDER_INTERVAL_MS = 80
+const contentSource = ref('')
+const reasoningSource = ref('')
+let renderTimer = 0
+let lastRenderAt = 0
+
+function syncSource() {
+  renderTimer = 0
+  lastRenderAt = performance.now()
+  contentSource.value = stripTokens(props.message.content)
+  reasoningSource.value = stripTokens(props.message.reasoning_content)
+}
+
+function scheduleRender() {
+  // 非流式（历史消息、刚结束）直接同步，保证收尾不被延后
+  if (!props.streaming) {
+    if (renderTimer) {
+      clearTimeout(renderTimer)
+      renderTimer = 0
+    }
+    syncSource()
+    return
+  }
+  if (renderTimer) return
+  const wait = Math.max(0, RENDER_INTERVAL_MS - (performance.now() - lastRenderAt))
+  renderTimer = setTimeout(syncSource, wait)
+}
+
+watch(
+  () => [props.message.content, props.message.reasoning_content, props.streaming],
+  scheduleRender,
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  if (renderTimer) clearTimeout(renderTimer)
+})
+
+const renderedContent = computed(() => renderMarkdown(contentSource.value))
+const renderedReasoning = computed(() => renderMarkdown(reasoningSource.value))
 
 async function copyText() {
   try {
