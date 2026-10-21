@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional
 
 from app.api.schemas import ChatCompletionRequest, ModelInfo
 from app.config import AppConfig, ProviderConfig
@@ -33,6 +33,10 @@ class ProviderAdapter(abc.ABC):
     def __init__(self, cfg: ProviderConfig, ctx: AppContext):
         self.cfg = cfg
         self.ctx = ctx
+        # 最近一次「把页面切到目标模式」的结果（供 /v1/capabilities 与管理页展示）
+        self._last_mode_status: Optional[dict] = None
+        # 本次请求解析出的模式计划（重发前需要再对齐一次）
+        self._mode_plan: Optional[Any] = None
 
     # ------- 元信息 -------
     @property
@@ -43,7 +47,31 @@ class ProviderAdapter(abc.ABC):
         return model.startswith(self.cfg.model_prefix) or model == self.cfg.key
 
     def default_models(self) -> list[ModelInfo]:
-        return [ModelInfo(id=m, owned_by=self.cfg.display_name or self.key) for m in self.cfg.models]
+        return [ModelInfo(id=m.id, owned_by=self.cfg.display_name or self.key) for m in self.cfg.models]
+
+    @property
+    def last_mode_status(self) -> Optional[dict]:
+        return self._last_mode_status
+
+    def capability_payload(self) -> dict:
+        """给 /v1/capabilities 与管理页用的能力描述（模型/模式/别名）。"""
+        from app.core.modes import alias_ids, capability_features
+
+        return {
+            "key": self.key,
+            "display_name": self.cfg.display_name or self.key,
+            "models": [
+                {"id": m.id, "label": m.label or m.id, "features": m.features}
+                for m in self.cfg.models
+            ],
+            "aliases": alias_ids(self.cfg),
+            "modes": [
+                {"id": k, "label": v.label or k, "features": v.features}
+                for k, v in self.cfg.modes.items()
+            ],
+            "features": capability_features(self.cfg),
+            "last_mode_status": self._last_mode_status,
+        }
 
     # ------- 生命周期 -------
     async def start(self) -> None:

@@ -33,12 +33,16 @@ export async function* parseSSE(response) {
  * Send a streaming chat completion request.
  * Returns an async generator yielding { content, reasoning_content, finish_reason }.
  */
-export async function* streamChat({ model, messages, signal, apiKey, conversationId }) {
+export async function* streamChat({ model, messages, signal, apiKey, conversationId, thinking, search, mode }) {
   const headers = { 'Content-Type': 'application/json' }
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
 
   const body = { model, messages, stream: true }
   if (conversationId) body.conversation_id = conversationId
+  // 模式开关：网页端对应「深度思考 / 联网 / 专家模式」，后端会去点页面按钮
+  if (thinking !== null && thinking !== undefined) body.thinking = Boolean(thinking)
+  if (search !== null && search !== undefined) body.search = Boolean(search)
+  if (mode) body.mode = mode
 
   const resp = await fetch('/v1/chat/completions', {
     method: 'POST',

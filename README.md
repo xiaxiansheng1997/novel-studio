@@ -39,7 +39,7 @@ copy .env.example .env
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-然后打开 **内嵌浏览器页** <http://127.0.0.1:8000/ui/live.html>：选站点 → **连接** → 在实时画面里直接登录（扫码/密码/滑块）→ **检测登录**。登录态持久化后长期复用，**全程无需命令行**。需要精修解析时，在同一页点**开始录制接口**、在画面里发一句“你好”、再**停止录制**即可写入 fixtures。
+然后打开 **内嵌浏览器页** <http://127.0.0.1:8000/live>：选站点 → **连接** → 在实时画面里直接登录（扫码/密码/滑块）→ **检测登录**。登录态持久化后长期复用，**全程无需命令行**。需要精修解析时，在同一页点**开始录制接口**、在画面里发一句“你好”、再**停止录制**即可写入 fixtures。
 
 > `/live` 画面显示的**就是后台发消息用的那个标签页**（不再是单独的标签），所以 `/v1` 请求过程中打出的字、弹出的验证码都能在画面里直接看到并操作。切到聊天页再切回来会自动恢复上次的连接（不用再点“连接”）。
 >
@@ -52,8 +52,8 @@ python -m scripts.recon qwen      # 抓取真实对话接口
 ```
 
 其他界面：
-- 对话：<http://127.0.0.1:8000/ui/chat.html>
-- 管理面板（登录态/模型概览）：<http://127.0.0.1:8000/ui/admin.html>
+- 对话：<http://127.0.0.1:8000/chat>
+- 管理面板（登录态/模型/模式概览）：<http://127.0.0.1:8000/admin>
 
 ## 接入 OpenAI 兼容客户端
 
@@ -68,6 +68,58 @@ resp = client.chat.completions.create(
 ```
 
 `model` 前缀路由：`qwen-*` / `doubao-*` / `deepseek-*`。`GET /v1/models` 返回三家合并的模型列表。
+
+## 模型与模式（快速 / 深度思考 / 联网 / 专家）
+
+三家网页端的能力（模型下拉、深度思考、联网、专家模式）已经对齐到接口，两种用法可混用。
+
+**一、模型名自带模式**（适合只会传 `model` 的客户端）
+
+| 写法 | 实际请求 |
+| --- | --- |
+| `qwen-max` / `doubao-pro` / `deepseek-chat` | 快速模式（思考、联网关） |
+| `deepseek-chat-think` | 深度思考 |
+| `deepseek-chat-search` | 联网搜索 |
+| `deepseek-chat-expert` | 思考 + 联网 |
+| `deepseek-reasoner` | 等价 `deepseek-chat-think`（模型自带思考） |
+| `deepseek-reasoner-search` | 后缀可叠加 |
+
+后缀是 `<基础模型>-quick/-think/-search/-expert`，`GET /v1/models` 会把别名一起列出来。
+
+**二、请求参数**（`/v1/chat/completions` body 的额外字段）
+
+| 字段 | 取值 | 含义 |
+| --- | --- | --- |
+| `mode` | `quick` `think` `search` `expert` | 直接选预设 |
+| `thinking` | bool | 网页端「深度思考」 |
+| `search` | bool | 「联网搜索」 |
+| `reasoning_effort` | `low` `medium` `high` | 豆包对应档位；DeepSeek 的 `medium/high` 视为开思考 |
+| `web_search_options` | 对象 | 只要出现就视为开联网（兼容 OpenAI 写法） |
+
+优先级：`mode` 选预设，`thinking`/`search`/`reasoning_effort` 再覆盖具体开关；两者都高于模型名后缀与模型自带特性，未指定时按快速模式兜底。每轮都会先把页面拉到确定状态（没指定的开关显式关掉），避免上一轮的「深度思考/联网」残留影响本轮。
+
+```python
+client.chat.completions.create(
+    model="deepseek-chat",
+    messages=[{"role": "user", "content": "帮我查下今天的汇率"}],
+    extra_body={"search": True},   # OpenAI SDK 的额外字段放这里
+)
+```
+
+**三、能力发现**
+
+`GET /v1/capabilities` 每个 provider 返回 `models[]`（id + 网页端文案）、`modes[]`、`features[]`、`aliases[]`，以及最近一次页面模式对齐结果 `last_mode_status`。前端聊天页的模型下拉按 provider 分组，「深度思考 / 联网 / 专家模式」三枚按钮按这份能力表启用。
+
+**四、文案校准（站点改版时）**
+
+1. 打开 `/live?provider=qwen`（或 doubao / deepseek）并点「连接」；
+2. 点「探测页面模式」，面板会列出页面上的可点控件与 `开/关` 状态，悬停可看 `aria-pressed`/`class`；`config.yaml` 里已声明的模型名与开关文案排在最前（模型下拉常在页面顶部，不只探输入框一带）；
+3. 没命中就把网页上的实际文字补进 `config.yaml` 对应 provider 的 `ui` 段（例如 `thinking: {labels: ["深度思考 (R1)"]}`）；状态读不出来时补 `active_class: "active"`，或设 `blind: true` 允许盲点；
+4. 点「应用模式」（即 `POST /live/mode/<key>`）当场验证，成功后管理页的「最近对齐」显示绿色。
+
+模式对齐失败不会中断回答，只降级成告警并记 `missing`；设 `W2A_STRICT_MODE=1` 才会把未对齐当错误抛出。
+
+> 千问的 HTTP 快路径（`W2A_QWEN_HTTP=1`）目前只确认了 `chat_mode=quick`（录制值）；`deep_search` 与非快速模式的取值是推断的，未实测前建议先不开启快路径，用浏览器路径对比一次。需深度思考/专家模式时，未校准的字段不会下发。
 
 ## 配置
 
@@ -85,11 +137,12 @@ resp = client.chat.completions.create(
 app/
   main.py runtime.py config.py
   api/      openai_routes.py  admin_routes.py  live_routes.py  schemas.py
-  core/     base.py registry.py sse.py store.py ratelimit.py errors.py blocked.py control_tokens.py
-  browser/  playwright_pool.py session_manager.py stream_capture.py cdp_stream.py live_browser.py network_recorder.py
+  core/     base.py modes.py registry.py sse.py store.py ratelimit.py errors.py blocked.py control_tokens.py
+  browser/  playwright_pool.py session_manager.py stream_capture.py cdp_stream.py live_browser.py network_recorder.py ui_modes.py
   providers/ _replay.py _browser_base.py  qwen.py doubao.py deepseek.py
+frontend/   Vue 3 + Vite（/chat /admin /live，构建产物 dist 由后端托管）
+web/        旧版静态页 chat.html admin.html live.html（前端未构建时兜底）
 scripts/    login.py  recon.py
-web/        chat.html  admin.html  live.html
 fixtures/   <由 recon 生成，已 gitignore>
 storage/    <浏览器 profile / 票据 / 会话库，已 gitignore>
 ```
@@ -159,9 +212,16 @@ data: {"v":"植物"}                                                            
 在会监听 context 的 `close` 事件即时除名（`is_open` 与 `/live/loggedin` 也会跟着变 `false`），`get_page()`
 里再兜底一层：`new_page()` 失败就重启 context 重试一次。自己把窗口关了也不用再重启服务。
 
-### 回答末尾出现 `[[inline_action_reply_1]]` 之类的方括号垃圾
+### 回答里出现 `[[inline_action_reply_1]]`、`[[doc_common_card_1]]` 之类的方括号垃圾
 
-这是站点给网页前端渲染「追问建议 / 内联按钮」用的占位标记，不是模型正文。后端 `app/core/control_tokens.py` 会在下发前剔除（能处理标记被流式分块截断的情况），剔除数量会记一条 `已剔除上游控制标记 N 处` 日志；前端 `MessageBubble.vue` 再做一道兜底，用于显示历史消息。
+这是站点给网页前端渲染「追问建议 / 内联按钮 / 文档下载卡片」用的占位标记，不是模型正文。后端 `app/core/control_tokens.py` 会在下发前剔除，处理范围包括：
+
+- 标记被流式分块截断（`[[doc_common_` + `card_1]]`）；
+- 全角括号、标记内空格与零宽字符（`［［doc_common_card_1］］`）；
+- **思考内容**（`reasoning_content`）里夹带的标记，与正文各用一个过滤器，互不干扰；
+- 删掉独占一行的标记后遗留的连续空行会压平。
+
+剔除数量会记一条 `已剔除上游控制标记 N 处` 日志；前端 `MessageBubble.vue` 再做一道同口径的兜底，用于显示历史消息。若仍然看到方括号，先用 `curl -N` 看原始 SSE 里到底是哪种形态（是否有不可见字符），再对照这条日志确认后端有没有命中。
 
 ## 已知限制
 
@@ -170,6 +230,9 @@ data: {"v":"植物"}                                                            
 - 各家 `temperature/top_p/max_tokens` 等多被接受但忽略。
 - 页面结构/接口会变：失效时先重跑 `recon`，必要时微调 provider 的选择器与 `parse_payload`
   （对照 `fixtures/<key>.json` 里的 `response_sample`）。
+- 切换模型/模式可能让站点新开一个会话（豆包换模型最明显），上游上下文会重置，`conversation_id` 映射不会自动迁移。
+- 模型是否已切换只看「按钮/下拉这类控件上的文字」，正文里提到某个模型名不算数（避免误判成已切换而一直用错模型）；代价是模型在下拉里显示的文案若与 `models[].label` 不一致，会多走一次「打开下拉再选一次」。
+- 模式切换本身有 0.3～1.5 秒开销；连续用同一模式不会重复点击。未校准的模式在千问 HTTP 快路径会回落到浏览器路径，速度更慢。
 - 参考项目 `LLM-Red-Team/qwen-free-api` 曾被曝供应链投毒，本项目未使用其代码，仅参考协议思路。
 
 ## 免责声明

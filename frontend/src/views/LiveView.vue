@@ -83,6 +83,43 @@
         </div>
       </div>
 
+      <!-- 页面模式：校准网页端的「深度思考 / 联网 / 模型下拉」文案 -->
+      <section class="mode-panel">
+        <div class="mode-head">
+          <span class="mode-title"><AppIcon name="sliders" :size="14" /> 页面模式</span>
+          <span class="mode-hint">
+            探测到的控件就是能命中的文案；没列出来的，把网页上的实际文字补进 config.yaml 的 ui 段
+          </span>
+          <span class="mode-spacer"></span>
+          <select v-model="modePreset" class="field mode-select" aria-label="模式预设" :disabled="!connected">
+            <option value="quick">快速模式</option>
+            <option value="think">深度思考</option>
+            <option value="search">联网搜索</option>
+            <option value="expert">专家模式（思考 + 联网）</option>
+          </select>
+          <button class="btn btn-sm" :disabled="!connected || probing" @click="probeModes">
+            <AppIcon name="search" :size="13" />
+            {{ probing ? '探测中…' : '探测页面模式' }}
+          </button>
+          <button class="btn btn-sm" :disabled="!connected || applying" @click="applyPreset">
+            <AppIcon name="check" :size="13" />
+            {{ applying ? '应用中…' : '应用模式' }}
+          </button>
+        </div>
+        <div v-if="probeItems.length" class="probe-strip">
+          <span
+            v-for="(it, i) in probeItems"
+            :key="i"
+            class="probe-chip"
+            :class="{ on: probeOn(it) }"
+            :title="probeTitle(it)"
+          >
+            {{ it.text }}
+            <b v-if="probeState(it)">{{ probeState(it) }}</b>
+          </span>
+        </div>
+      </section>
+
       <!-- 画面 -->
       <section class="stage-wrap">
         <div class="stage-chrome">
@@ -172,6 +209,10 @@ const recording = ref(false)
 const logs = ref([])
 const bulkText = ref('')
 const autoSend = ref(true)
+const modePreset = ref('quick')
+const probing = ref(false)
+const applying = ref(false)
+const probeItems = ref([])
 let ws = null
 let composing = false
 let logicalW = 1280, logicalH = 800, dsf = 1
@@ -214,6 +255,8 @@ function toggleRecord() {
 
 function connect() {
   if (ws) { ws.close(); ws = null }
+  // 换一个站点就是一个新页面，上次的探测结果留着会误导
+  probeItems.value = []
   // 记录“用户想保持连接”：即使这次开浏览器失败，下次回到 /live 也自动重试
   try {
     localStorage.setItem(PROVIDER_KEY, provider.value)
@@ -259,6 +302,9 @@ function closeSocket() {
   statusText.value = '未连接'
   frameSrc.value = ''
   recording.value = false
+  probing.value = false
+  applying.value = false
+  probeItems.value = []
 }
 
 function disconnect() {
@@ -308,6 +354,84 @@ function onPaste(e) {
 }
 
 function sendCtrl(action) { if (ws) ws.send(JSON.stringify({ t: action })) }
+
+// ---- 页面模式：探测文案 / 一键对齐 ----
+function apiHeaders(json) {
+  const headers = json ? { 'Content-Type': 'application/json' } : {}
+  const apiKey = getApiKey()
+  if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey
+  return headers
+}
+
+async function readError(r) {
+  // 409/403 正文里写着「live 未打开」这类原因，只报状态码用户没法排查
+  let msg = 'HTTP ' + r.status
+  try {
+    const j = await r.json()
+    msg = (j && j.error && j.error.message) || j?.detail || msg
+    if (j && j.hint) msg += '（' + j.hint + '）'
+  } catch (_) { /* 非 JSON 响应就只用状态码 */ }
+  return msg
+}
+
+function probeOn(it) {
+  return it.pressed === 'true' || it.checked === 'true'
+}
+
+function probeState(it) {
+  const v = it.pressed != null ? it.pressed : it.checked
+  if (v == null) return ''
+  return v === 'true' ? '开' : '关'
+}
+
+function probeTitle(it) {
+  const parts = []
+  if (it.role) parts.push('role=' + it.role)
+  if (it.pressed != null) parts.push('aria-pressed=' + it.pressed)
+  if (it.checked != null) parts.push('aria-checked=' + it.checked)
+  if (it.cls) parts.push(it.cls)
+  return parts.join(' · ')
+}
+
+async function probeModes() {
+  if (!connected.value) return
+  probing.value = true
+  try {
+    const r = await fetch(`/live/ui-probe/${provider.value}`, { headers: apiHeaders() })
+    if (!r.ok) throw new Error(await readError(r))
+    const j = await r.json()
+    probeItems.value = j.items || []
+    appendLog(`探测到 ${probeItems.value.length} 个可点控件（悬停可看 aria/class），未命中就改 config.yaml 的 ui 段后点「重载配置」`)
+  } catch (e) {
+    appendLog('探测失败：' + e.message, 'err')
+  } finally {
+    probing.value = false
+  }
+}
+
+async function applyPreset() {
+  if (!connected.value) return
+  applying.value = true
+  try {
+    const r = await fetch(`/live/mode/${provider.value}`, {
+      method: 'POST',
+      headers: apiHeaders(true),
+      body: JSON.stringify({ mode: modePreset.value }),
+    })
+    if (!r.ok) throw new Error(await readError(r))
+    const j = await r.json()
+    const label = j.mode || modePreset.value
+    if (j.ok) appendLog(`✓ 模式已对齐 ${label}，用时 ${j.ms}ms`)
+    else appendLog(`✗ 模式部分未对齐 ${label}，缺失=${(j.missing || []).join('/')}（先探测文案再校准）`, 'err')
+    for (const d of j.details || []) {
+      appendLog(`  · ${d.feature} want=${d.want} ${d.action || d.reason || ''}`)
+    }
+  } catch (e) {
+    appendLog('应用模式失败：' + e.message, 'err')
+  } finally {
+    applying.value = false
+  }
+}
 
 function autoSlide() {
   if (!connected.value || !ws) return
@@ -555,6 +679,73 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocke
 }
 .auto-send.on {
   color: var(--text-muted);
+}
+
+/* 页面模式 */
+.mode-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 20px;
+  border-bottom: 1px solid var(--line-soft);
+  background: #070b12;
+}
+.mode-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mode-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.mode-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.mode-spacer {
+  flex: 1;
+}
+.mode-select {
+  width: 176px;
+  height: 28px;
+}
+.probe-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 92px;
+  overflow-y: auto;
+}
+.probe-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+  background: #0c121b;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  cursor: default;
+}
+.probe-chip.on {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.08);
+  color: #86efac;
+}
+.probe-chip b {
+  font-weight: 500;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.probe-chip.on b {
+  color: inherit;
 }
 
 /* 画面 */

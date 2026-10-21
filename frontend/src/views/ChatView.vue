@@ -31,9 +31,9 @@
           <label class="model-field">
             <span class="model-label">模型</span>
             <select class="field model-select" :value="providerStore.selectedModel" @change="onModelChange">
-              <option v-for="m in providerStore.models" :key="m.id" :value="m.id">
-                {{ m.id }} · {{ m.owned_by }}
-              </option>
+              <optgroup v-for="g in providerStore.modelGroups" :key="g.key" :label="g.name">
+                <option v-for="m in g.models" :key="m.id" :value="m.id">{{ m.label }} · {{ m.id }}</option>
+              </optgroup>
             </select>
           </label>
           <span class="pill" :class="providerStatusPill">
@@ -73,7 +73,38 @@
         :streaming="chatStore.streaming"
         @send="handleSend"
         @stop="chatStore.stopStreaming()"
-      />
+      >
+        <template #toolbar>
+          <button
+            class="mode-chip"
+            :class="{ on: providerStore.modes.thinking }"
+            :disabled="!providerStore.supports.thinking || chatStore.streaming"
+            :title="providerStore.supports.thinking ? '发送前把网页端切到「深度思考」' : '当前 provider 没有深度思考开关'"
+            @click="toggleMode('thinking')"
+          >
+            <AppIcon name="spark" :size="12" /> 深度思考
+          </button>
+          <button
+            class="mode-chip"
+            :class="{ on: providerStore.modes.search }"
+            :disabled="!providerStore.supports.search || chatStore.streaming"
+            :title="providerStore.supports.search ? '发送前把网页端切到「联网搜索」' : '当前 provider 没有联网搜索开关'"
+            @click="toggleMode('search')"
+          >
+            <AppIcon name="activity" :size="12" /> 联网
+          </button>
+          <button
+            class="mode-chip"
+            :class="{ on: providerStore.modes.expert }"
+            :disabled="!providerStore.supports.thinking || !providerStore.supports.search || chatStore.streaming"
+            title="专家模式：深度思考 + 联网一起开"
+            @click="toggleMode('expert')"
+          >
+            <AppIcon name="terminal" :size="12" /> 专家模式
+          </button>
+          <span class="mode-note">{{ modeNote }}</span>
+        </template>
+      </InputArea>
     </main>
   </div>
 </template>
@@ -159,6 +190,20 @@ function onModelChange(e) {
   providerStore.setModel(e.target.value)
 }
 
+function toggleMode(key) {
+  providerStore.setMode(key, !providerStore.modes[key])
+}
+
+const modeNote = computed(() => {
+  const p = providerStore.currentProvider
+  if (!p) return ''
+  const on = []
+  if (providerStore.modes.thinking) on.push('思考')
+  if (providerStore.modes.search) on.push('联网')
+  const tail = on.length ? `· ${on.join(' + ')}` : '· 快速'
+  return `${p.display_name} ${tail}`
+})
+
 function useSuggestion(text) {
   inputRef.value?.setText(text)
 }
@@ -208,12 +253,16 @@ async function handleSend(text) {
       .filter(m => m.role !== 'system' || m.content)
       .map(m => ({ role: m.role, content: m.content }))
 
+    const modePayload = providerStore.modePayload()
     for await (const ev of streamChat({
       model,
       messages: apiMessages,
       signal: controller.signal,
       apiKey: getApiKey(),
       conversationId: convId,
+      thinking: modePayload.thinking,
+      search: modePayload.search,
+      mode: modePayload.mode,
     })) {
       const cur = chatStore.messages[aIdx] // 通过响应式数组取值，改动才会触发重渲染
       if (ev.content) cur.content += ev.content
@@ -315,6 +364,41 @@ function handleContentClick(e) {
   font-size: 12px;
 }
 
+/* 输入框下方的模式开关 */
+.mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+  background: #0b1018;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease), background-color 0.18s var(--ease), color 0.18s var(--ease);
+}
+.mode-chip:hover:not(:disabled) {
+  border-color: rgba(34, 197, 94, 0.4);
+  color: var(--text);
+}
+.mode-chip.on {
+  border-color: rgba(34, 197, 94, 0.55);
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
+}
+.mode-chip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.mode-note {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
 /* 消息区 */
 .messages {
   flex: 1;
@@ -413,6 +497,9 @@ function handleContentClick(e) {
   .topbar {
     flex-wrap: wrap;
     row-gap: 8px;
+  }
+  .mode-note {
+    display: none;
   }
   .topbar-title {
     flex: 1;

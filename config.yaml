@@ -20,11 +20,25 @@ providers:
     headless: true         # 千问反爬门槛低：无头运行→内嵌登录与聊天都不弹独立窗口（若登录被拦，改回 false）
     # 抓取真实接口前，endpoint 留空 -> 运行时报错提示执行 recon；recon 会把结果写入 fixtures/qwen.json
     endpoint: ""
+    # label 是网页端模型下拉里的文案；留空 = 不驱动模型切换。
+    # 文案不对时用 /live 的「探测页面模式」看实际按钮文本，再回来改。
     models:
-      - qwen-plus
-      - qwen-max
-      - qwen-turbo
-    max_concurrency: 2
+      - {id: qwen-max, label: "Qwen3-Max"}
+      - {id: qwen-plus, label: "Qwen3.5-Plus"}
+      - {id: qwen-turbo, label: "Qwen3-Turbo"}
+    # 模式预设：模型名后缀（-think/-search/-expert）与请求参数 mode 都映射到这里。
+    # body_patch 只对 HTTP 快路径生效；没校准过的字段不要写（宁可不发也不发错）。
+    modes:
+      quick:  {label: "快速模式", features: {thinking: false}, body_patch: {chat_mode: "quick"}}
+      think:  {label: "深度思考", features: {thinking: true}}
+      search: {label: "联网搜索", features: {search: true}, body_patch: {deep_search: true}}
+      expert: {label: "专家模式", features: {thinking: true, search: true}}
+    ui:
+      thinking: {labels: ["深度思考", "思考"]}
+      search: {labels: ["联网搜索", "联网"]}
+      model: {labels: ["切换模型", "选择模型", "模型"]}
+    # 模式切换要点页面按钮，只能串行；并发 2 会让两条流互踩同一个输入框
+    max_concurrency: 1
     # 相邻两次请求的最小间隔（秒，从上一次回复结束算起）。
     # 刚答完就立刻发下一条最容易触发 RGV587 人机验证；0 表示不限制。
     min_interval_sec: 3
@@ -37,8 +51,19 @@ providers:
     home_url: "https://www.doubao.com/chat/"
     headless: false        # 豆包风控较严，建议有头运行以复用登录态
     models:
-      - doubao-pro
-      - doubao-lite
+      - {id: doubao-pro, label: ""}
+      - {id: doubao-lite, label: ""}
+    # 豆包的模式/模型在页面输入框一带：深度思考开关、模型/智能体下拉。
+    # 模型 label 先留空（换模型可能新开会话），探测到确切文案后再填。
+    modes:
+      quick:  {label: "快速模式", features: {thinking: false}}
+      think:  {label: "深度思考", features: {thinking: true}}
+      search: {label: "联网搜索", features: {search: true}}
+      expert: {label: "专家模式", features: {thinking: true, search: true}}
+    ui:
+      thinking: {labels: ["深度思考", "深度思考 (R1)"]}
+      search: {labels: ["联网搜索", "联网"]}
+      model: {labels: ["切换模型", "选择模型"]}
     max_concurrency: 1
 
   deepseek:
@@ -49,6 +74,16 @@ providers:
     home_url: "https://chat.deepseek.com/"
     headless: false
     models:
-      - deepseek-chat
-      - deepseek-reasoner
+      - {id: deepseek-chat, label: ""}
+      - {id: deepseek-reasoner, label: "", features: {thinking: true}}
+    # DeepSeek 网页端没有模型下拉，只有「深度思考」和「联网搜索」两个开关；
+    # 对应 body 的 thinking_enabled / search_enabled（见 fixtures/deepseek.json）。
+    modes:
+      quick:  {label: "快速模式", features: {thinking: false, search: false}}
+      think:  {label: "深度思考", features: {thinking: true}}
+      search: {label: "联网搜索", features: {search: true}}
+      expert: {label: "专家模式", features: {thinking: true, search: true}}
+    ui:
+      thinking: {labels: ["深度思考", "深度思考 (R1)", "R1"]}
+      search: {labels: ["联网搜索", "联网"]}
     max_concurrency: 1     # 官方封号严，务必保持极低并发

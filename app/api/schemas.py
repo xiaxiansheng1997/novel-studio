@@ -31,6 +31,12 @@ class ChatCompletionRequest(BaseModel):
     conversation_id: Optional[str] = Field(default=None, alias="conversation_id")
     thinking: Optional[bool] = None
     search: Optional[bool] = None
+    # 模式预设（quick/think/search/expert）：与模型名后缀是双轨，参数优先
+    mode: Optional[str] = None
+    # OpenAI o 系列风格：medium/high 视为要深度思考
+    reasoning_effort: Optional[str] = None
+    # OpenAI 联网搜索开关，等价 search=true
+    web_search_options: Optional[dict[str, Any]] = None
 
     model_config = {"extra": "allow"}
 

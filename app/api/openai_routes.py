@@ -45,6 +45,13 @@ async def list_models(request: Request):
     return ModelList(data=reg.all_models())
 
 
+@router.get("/v1/capabilities", dependencies=[Depends(verify_key)])
+async def capabilities(request: Request):
+    """模型/模式能力矩阵：前端据此渲染模型分组与思考/联网/专家开关。"""
+    reg = _registry(request)
+    return {"providers": [a.capability_payload() for a in reg.adapters.values()]}
+
+
 @router.post("/v1/models/refresh", dependencies=[Depends(verify_key)])
 async def refresh_models(request: Request):
     reg = _registry(request)

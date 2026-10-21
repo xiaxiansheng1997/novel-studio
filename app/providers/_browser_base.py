@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import AsyncIterator, Optional
 
@@ -28,6 +29,7 @@ from app.browser.stream_capture import (
     start_capture,
     trigger_send,
 )
+from app.browser.ui_modes import apply_mode
 from app.config import get_settings
 from app.core.base import ProviderAdapter
 from app.core.blocked import find_upstream_error, needs_human_verify
@@ -42,6 +44,7 @@ from app.core.errors import (
     W2AError,
 )
 from app.core.sse import DeltaEvent
+from app.core.modes import resolve_mode
 from app.providers._replay import SSEBuffer, is_done, last_user_text
 
 # 流式空闲超时：超过该时间没有新块就结束，避免上游中断后长时间挂起
@@ -130,16 +133,51 @@ class BrowserStreamProvider(ProviderAdapter):
         except Exception:  # noqa: BLE001
             hint = None
         logger.info(f"[{self.key}] capture 页 url={page.url[:100]} 已登录外观={hint}")
+        # 把页面切到请求要求的模型/模式（快速/专家、深度思考、联网）。
+        # 失败只告警：模式没切过去也照样把问题发出去，比直接失败更有用。
+        plan = resolve_mode(pcfg, req)
+        self._mode_plan = plan
+        url_before = page.url
+        try:
+            mode_status = await apply_mode(page, self.key, plan, pcfg)
+        except Exception as exc:  # noqa: BLE001 - 模式对齐是增强，不应阻断发送
+            logger.warning(f"[{self.key}] 模式对齐异常（继续发送）: {exc}")
+            # 必须写一条失败状态：否则严格模式会读到上一条请求的 ok=True 而静默放行
+            mode_status = {"ok": False, "missing": list(plan.changed_features), "preset": plan.preset_id, "error": str(exc)}
+        self._last_mode_status = mode_status
+        if os.getenv("W2A_STRICT_MODE", "0") == "1" and not mode_status.get("ok", True):
+            raise ProviderError(self.key, f"模式未对齐：{mode_status.get('missing')}")
+        try:
+            # 换模型/模式在部分站点会新 tab 开会话，上游上下文从此重置
+            if page.url != url_before:
+                logger.warning(
+                    f"[{self.key}] 模式切换后页面跳转 {url_before[:60]} -> {page.url[:60]}"
+                    "（站点可能新开了会话，上游上下文会被重置）"
+                )
+        except Exception:  # noqa: BLE001 - 读 url 失败不影响发送
+            pass
+        # 点按钮可能触发站点自己的杂项请求，先清掉残留并重新武装捕获，
+        # 否则可能把“切换模式”的响应当成这次对话的流。
+        _drain_queue(queue)
         # 先激活捕获，再驱动发送（SPA 可能在 Enter 后立刻发请求，trigger_send 返回前响应就到了）
         state = getattr(page, "_w2a_state", None)
         if state:
             state["capturing"] = True
             # 供 stream_capture 在触发 RGV587 时自动过滑块后重发
             state["prompt"] = prompt
+            # 重发前要用同一条请求的模式再对齐一次；挂在页面状态上而不是 self，
+            # 并发（max_concurrency>1）时 self._mode_plan 会被另一条请求覆盖
+            state["mode_plan"] = plan
             state["input_selectors"] = self.input_selectors() or None
             state["send_selectors"] = self.send_selectors() or None
             state["retried"] = False
             state["sliding"] = False
+            rearm = state.get("rearm")
+            if rearm:
+                try:
+                    rearm()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[{self.key}] 重新武装捕获失败: {exc}")
         try:
             await trigger_send(
                 page,
@@ -309,6 +347,13 @@ class BrowserStreamProvider(ProviderAdapter):
         clear_risk(self.key)
         # 上一段响应已经往队列里塞了残留块与 DONE，不清掉会让重发后的流立即结束
         _drain_queue(queue)
+        # 页面可能刚刷新过（验证/跳转），模式会回到默认，重发前再对齐一次
+        plan = (state or {}).get("mode_plan") or getattr(self, "_mode_plan", None)
+        if plan is not None:
+            try:
+                self._last_mode_status = await apply_mode(page, self.key, plan, self.cfg)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[{self.key}] 重发前模式对齐失败: {exc}")
         if state:
             state["capturing"] = True
             state["retried"] = True

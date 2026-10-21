@@ -1,31 +1,37 @@
 <template>
   <div class="composer-area">
     <div class="composer" :class="{ 'is-streaming': streaming }">
-      <textarea
-        ref="textareaEl"
-        v-model="text"
-        :placeholder="placeholder"
-        :disabled="disabled"
-        rows="1"
-        aria-label="消息输入框"
-        @keydown="handleKeydown"
-        @input="autoResize"
-      ></textarea>
+      <div class="composer-main">
+        <textarea
+          ref="textareaEl"
+          v-model="text"
+          :placeholder="placeholder"
+          :disabled="disabled"
+          rows="1"
+          aria-label="消息输入框"
+          @keydown="handleKeydown"
+          @input="autoResize"
+        ></textarea>
 
-      <div class="composer-actions">
-        <button
-          v-if="!streaming"
-          class="send-btn"
-          :disabled="!text.trim() || disabled"
-          aria-label="发送消息"
-          title="发送 (Enter)"
-          @click="doSend"
-        >
-          <AppIcon name="send" :size="15" />
-        </button>
-        <button v-else class="stop-btn" aria-label="停止生成" title="停止生成 (Esc)" @click="$emit('stop')">
-          <AppIcon name="stop" :size="14" />
-        </button>
+        <div class="composer-actions">
+          <button
+            v-if="!streaming"
+            class="send-btn"
+            :disabled="!text.trim() || disabled"
+            aria-label="发送消息"
+            title="发送 (Enter)"
+            @click="doSend"
+          >
+            <AppIcon name="send" :size="15" />
+          </button>
+          <button v-else class="stop-btn" aria-label="停止生成" title="停止生成 (Esc)" @click="$emit('stop')">
+            <AppIcon name="stop" :size="14" />
+          </button>
+        </div>
+      </div>
+
+      <div v-if="$slots.toolbar" class="composer-toolbar">
+        <slot name="toolbar" />
       </div>
     </div>
 
@@ -94,8 +100,9 @@ defineExpose({ setText, focus: () => textareaEl.value?.focus() })
 }
 .composer {
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
   max-width: 880px;
   margin: 0 auto;
   padding: 8px 8px 8px 14px;
@@ -104,6 +111,18 @@ defineExpose({ setText, focus: () => textareaEl.value?.focus() })
   background: #0c121b;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 18px 40px -28px rgba(0, 0, 0, 0.9);
   transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+.composer-main {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 0 2px 1px;
 }
 .composer:focus-within {
   border-color: rgba(34, 197, 94, 0.55);

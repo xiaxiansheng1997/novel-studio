@@ -11,6 +11,7 @@ navigate / ?url= 仅允许 http(s)，硬拒 file://、chrome://、devtools:// �
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
@@ -19,6 +20,8 @@ from loguru import logger
 
 from app.browser.live_browser import VIEWPORT_H, VIEWPORT_W, LiveBrowserManager, LiveSession
 from app.browser.stream_capture import clear_risk, trigger_send
+from app.browser.ui_modes import apply_mode, probe_ui
+from app.core.modes import resolve_mode
 
 router = APIRouter()
 
@@ -126,6 +129,84 @@ async def live_debug(request: Request, key: str):
         except Exception as exc:  # noqa: BLE001
             info["localstorage_error"] = str(exc)
     return info
+
+
+def _wanted_labels(pcfg) -> list[str]:
+    """配置里已声明的模型名与开关文案：探测时优先展示，免得在 60 个候选里翻。"""
+    if pcfg is None:
+        return []
+    out: list[str] = []
+    out += [m.label for m in pcfg.models if getattr(m, "label", "")]
+    out += [s.label for s in pcfg.modes.values() if getattr(s, "label", "")]
+    for ctl in pcfg.ui.values():
+        out += list(ctl.labels or [])
+    # 去重保序
+    return list(dict.fromkeys([x for x in out if x]))
+
+
+@router.get("/live/ui-probe/{key}")
+async def live_ui_probe(request: Request, key: str):
+    """列出页面上的可点控件与当前状态，供「页面模式」面板校准文案。"""
+    settings = request.app.state.settings
+    if not _origin_ok(request.headers.get("origin"), settings) or not _key_ok(_bearer(request), settings):
+        return JSONResponse(status_code=403, content={"error": {"message": "forbidden", "type": "forbidden"}})
+    live: LiveBrowserManager = request.app.state.live
+    sess = live.get(key)
+    if sess is None:
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"message": "live 未打开", "type": "not_open"}, "hint": "请先在 /live 打开该 provider"},
+        )
+    config = getattr(request.app.state, "config", None)
+    pcfg = config.providers.get(key) if config else None
+    items = await probe_ui(sess.page, _wanted_labels(pcfg))
+    return {"key": key, "url": sess.page.url, "items": items}
+
+
+@router.post("/live/mode/{key}")
+async def live_set_mode(request: Request, key: str):
+    """在 /live 页面上立即切到指定模式（校准与手动控制用）。"""
+    settings = request.app.state.settings
+    if not _origin_ok(request.headers.get("origin"), settings) or not _key_ok(_bearer(request), settings):
+        return JSONResponse(status_code=403, content={"error": {"message": "forbidden", "type": "forbidden"}})
+    live: LiveBrowserManager = request.app.state.live
+    sess = live.get(key)
+    if sess is None:
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"message": "live 未打开", "type": "not_open"}, "hint": "请先在 /live 打开该 provider"},
+        )
+    reg = getattr(request.app.state, "registry", None)
+    adapter = reg.get(key) if reg else None
+    if adapter is None:
+        return JSONResponse(status_code=404, content={"error": {"message": f"未知 provider: {key}", "type": "not_found"}})
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - 空 body 就用默认模型
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    model = str(body.get("model") or (adapter.cfg.model_ids() or [key])[0])
+    plan = resolve_mode(
+        adapter.cfg,
+        SimpleNamespace(
+            model=model,
+            mode=body.get("mode"),
+            thinking=body.get("thinking"),
+            search=body.get("search"),
+            reasoning_effort=body.get("reasoning_effort"),
+            web_search_options=body.get("web_search_options"),
+        ),
+    )
+    res = await apply_mode(sess.page, key, plan, adapter.cfg)
+    adapter._last_mode_status = res  # noqa: SLF001 - 与适配器共享状态，供管理页展示
+    return {
+        "key": key,
+        "model": model,
+        "mode": plan.preset_id,
+        "features": plan.features,
+        "model_label": plan.model_label,
+        **res,
+    }
 
 
 # ---------- WebSocket 输入分发 ----------

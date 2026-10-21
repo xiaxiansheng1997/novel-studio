@@ -50,9 +50,14 @@ class Registry:
         return self.throttles[key]
 
     def all_models(self) -> list[ModelInfo]:
+        """合并三家模型，并补上「模型名即模式」的别名，便于客户端发现。"""
+        from app.core.modes import alias_ids
+
         models: list[ModelInfo] = []
         for adapter in self.adapters.values():
             models.extend(adapter.default_models())
+            owner = adapter.cfg.display_name or adapter.key
+            models.extend(ModelInfo(id=alias, owned_by=owner) for alias in alias_ids(adapter.cfg))
         return models
 
     async def start_all(self) -> None:

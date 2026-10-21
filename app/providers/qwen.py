@@ -20,6 +20,7 @@ from app.api.schemas import ChatCompletionRequest
 from app.core.blocked import is_card_mime, looks_blocked
 from app.core.control_tokens import strip_control_tokens
 from app.core.errors import AuthExpired, ProviderBlocked, ProviderError
+from app.core.modes import resolve_mode
 from app.core.sse import DeltaEvent
 from app.providers._browser_base import BrowserStreamProvider
 from app.providers._replay import (
@@ -112,6 +113,19 @@ class QwenAdapter(BrowserStreamProvider):
         headers = inject_headers(fixture.get("headers", {}), {"authorization": f"Bearer {ticket}"})
         headers.setdefault("content-type", "application/json")
         body = fill_body(fixture["body_template"], render_prompt(req))
+        # 模式预设直接改录制出来的 body（model/chat_mode/deep_search）。
+        # 没校准的字段不能瞎填：拿不准就走浏览器路径点页面按钮。
+        plan = resolve_mode(self.cfg, req)
+        body.update(plan.body_patch)
+        want_think = bool(plan.features.get("thinking"))
+        want_search = bool(plan.features.get("search"))
+        if (want_think and "chat_mode" not in plan.body_patch) or (
+            want_search and "deep_search" not in plan.body_patch
+        ):
+            raise ProviderError(
+                "qwen",
+                f"HTTP 快路径未校准模式 {plan.preset_id}（需 chat_mode/deep_search），回落浏览器路径",
+            )
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
             async with client.stream("POST", fixture["endpoint"], headers=headers, json=body) as resp:

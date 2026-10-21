@@ -78,8 +78,19 @@
                 </div>
 
                 <div class="pc-models">
-                  <span v-for="m in p.models" :key="m" class="tag">{{ m }}</span>
-                  <span v-if="!p.models || !p.models.length" class="pc-no-model">暂无模型</span>
+                  <span v-for="m in modelTags(p)" :key="m.id" class="tag" :title="m.id">{{ m.label }}</span>
+                  <span v-if="!modelTags(p).length" class="pc-no-model">暂无模型</span>
+                </div>
+
+                <div class="pc-caps">
+                  <span class="pc-caps-key">模式</span>
+                  <span v-for="mo in capsOf(p).modes" :key="mo.id" class="tag tag--mode">{{ mo.label }}</span>
+                  <span v-if="!capsOf(p).modes.length" class="pc-no-model">—</span>
+                </div>
+
+                <div class="pc-align" :class="alignClass(p)">
+                  <span class="pc-caps-key">最近对齐</span>
+                  <span>{{ alignText(p) }}</span>
                 </div>
 
                 <router-link :to="{ path: '/live', query: { provider: p.provider } }" class="pc-link">
@@ -194,7 +205,7 @@ onMounted(() => refreshAll())
 async function refreshAll() {
   loading.value = true
   try {
-    await Promise.allSettled([loadStatus(), loadStats(), loadLogs()])
+    await Promise.allSettled([loadStatus(), loadStats(), loadLogs(), providerStore.fetchModels()])
   } finally {
     loading.value = false
   }
@@ -241,6 +252,31 @@ async function reloadConfig() {
 function fmtTime(ts) {
   if (!ts) return '—'
   return new Date(ts * 1000).toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+// ---- 能力行：模型文案 / 模式 / 最近一次页面模式对齐结果 ----
+function capsOf(p) {
+  return providerStore.providers.find(c => c.key === p.provider) || { models: [], modes: [], features: [] }
+}
+
+function modelTags(p) {
+  const caps = capsOf(p)
+  if (caps.models && caps.models.length) return caps.models
+  return (p.models || []).map(id => ({ id, label: id }))
+}
+
+function alignText(p) {
+  const st = capsOf(p).last_mode_status
+  if (!st) return '暂无（还没发过带模式的请求）'
+  if (st.ok) return `已对齐 ${st.preset || ''} ${st.ms != null ? st.ms + 'ms' : ''}`.trim()
+  const miss = (st.missing || []).join('/') || '未知'
+  return `未对齐：${miss}（去 /live 探测文案）`
+}
+
+function alignClass(p) {
+  const st = capsOf(p).last_mode_status
+  if (!st) return ''
+  return st.ok ? 'is-ok' : 'is-bad'
 }
 </script>
 
@@ -397,6 +433,35 @@ function fmtTime(ts) {
 .pc-no-model {
   font-size: 11px;
   color: var(--text-faint);
+}
+.pc-caps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+.pc-caps-key {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-right: 2px;
+}
+.tag--mode {
+  color: var(--text-muted);
+  border-style: dashed;
+}
+.pc-align {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+  min-height: 16px;
+}
+.pc-align.is-ok {
+  color: #86efac;
+}
+.pc-align.is-bad {
+  color: #fca5a5;
 }
 .pc-link {
   display: inline-flex;

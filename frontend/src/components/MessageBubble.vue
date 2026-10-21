@@ -70,13 +70,18 @@ function renderMarkdown(text) {
   return marked(text, { breaks: true, gfm: true })
 }
 
-// 上游偶尔把站点 UI 占位符（如千问 [[inline_action_reply_1]]）混进正文。
-// 后端流式管道已经会剔除，这里兜底处理历史消息与旧数据。
+// 上游偶尔把站点 UI 占位符（如千问 [[inline_action_reply_1]]、[[doc_common_card_1]]）
+// 混进正文。后端流式管道已经会剔除，这里兜底处理历史消息与旧数据。
 const CONTROL_TOKEN_RE = /\[\[[A-Za-z0-9_.-]{1,64}\]\]/g
+// 卡片/建议类标记：容忍全角括号、内部空白与零宽字符（名字里需带 card/reply/action/suggest）
+const CARD_TOKEN_RE = /[\[［]{2}[ \t\u200b-\u200f]*(?:[A-Za-z0-9_-]|[ \t\u200b-\u200f])*?(?:card|reply|action|suggest)(?:[A-Za-z0-9_-]|[ \t\u200b-\u200f])*?\d+[ \t\u200b-\u200f]*[\]］]{2}/gi
 
 function stripTokens(text) {
   if (!text) return ''
-  return text.replace(CONTROL_TOKEN_RE, '').replace(/\s+$/, '')
+  const out = text.replace(CONTROL_TOKEN_RE, '').replace(CARD_TOKEN_RE, '')
+  // 标记独占一行时，删完会剩三四个换行，压平成一段
+  const tidy = out === text ? out : out.replace(/\n{3,}/g, '\n\n')
+  return tidy.replace(/\s+$/, '')
 }
 
 const renderedContent = computed(() => renderMarkdown(stripTokens(props.message.content)))
