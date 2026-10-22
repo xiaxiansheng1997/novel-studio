@@ -242,6 +242,7 @@
 import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { getApiKey } from '../utils/storage'
+import { authHeaders } from '../utils/api'
 import AppNav from '../components/AppNav.vue'
 import AppIcon from '../components/AppIcon.vue'
 
@@ -395,7 +396,9 @@ function connect() {
     else if (d.t === 'error') { appendLog('错误：' + d.message, 'err') }
     else if (d.t === 'autoslide_result') {
       const r = d.result || {}
-      appendLog((r.ok ? '✓ ' : '✗ ') + (r.message || '未知结果'))
+      // 让位不算失败：是后端检测到人在画面里动手，主动停下了自动拖动
+      if (r.handoff) appendLog('已让位给手动操作：' + (r.message || ''))
+      else appendLog((r.ok ? '✓ ' : '✗ ') + (r.message || '未知结果'))
     }
     else if (d.t === 'record_result') {
       const r = d.result
@@ -430,9 +433,7 @@ async function closeBrowser() {
   // 要彻底关掉走 full=1：管理页的「浏览器」状态才会变灰。
   try { localStorage.setItem(WANT_KEY, '0') } catch (_) { /* 忽略 */ }
   closeSocket()
-  const headers = {}
-  const apiKey = getApiKey()
-  if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey
+  const headers = apiHeaders()
   try {
     const r = await fetch(`/live/close/${provider.value}?full=true`, { method: 'POST', headers })
     appendLog(r.ok
@@ -468,10 +469,8 @@ function sendCtrl(action) { if (ws) ws.send(JSON.stringify({ t: action })) }
 
 // ---- 页面模式：探测文案 / 一键对齐 ----
 function apiHeaders(json) {
-  const headers = json ? { 'Content-Type': 'application/json' } : {}
-  const apiKey = getApiKey()
-  if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey
-  return headers
+  // 口令统一从 utils/api 取，服务端没设 W2A_API_KEY 时不额外带头
+  return authHeaders(json ? { 'Content-Type': 'application/json' } : {})
 }
 
 async function readError(r) {
@@ -558,7 +557,7 @@ async function reloadConfig() {
     if (connected.value && touched.includes(provider.value)) await probeModes()
     else if (connected.value) appendLog('当前 provider 未被更新（可能已从配置移除），跳过重新探测')
   } catch (e) {
-    const tip = /HTTP 401/.test(e.message) ? '（先在设置里填 API Key）' : ''
+    const tip = /HTTP 401/.test(e.message) ? '（先在左下角钥匙里填访问口令）' : ''
     appendLog('重载配置失败：' + e.message + tip, 'err')
   } finally {
     reloading.value = false
@@ -697,11 +696,8 @@ function autoSlide() {
 }
 
 async function clearCooldown() {
-  const headers = {}
-  const apiKey = getApiKey()
-  if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey
   try {
-    const r = await fetch(`/live/cooldown/clear/${provider.value}`, { method: 'POST', headers })
+    const r = await fetch(`/live/cooldown/clear/${provider.value}`, { method: 'POST', headers: apiHeaders() })
     appendLog(r.ok ? '已清除风控冷却，可以立即重试聊天' : '清除冷却失败：HTTP ' + r.status)
   } catch (e) {
     appendLog('清除冷却失败：' + e)

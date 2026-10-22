@@ -19,16 +19,34 @@
     </div>
 
     <div class="rail-foot">
+      <button
+        type="button"
+        class="rail-key"
+        :class="{ 'is-set': hasKey }"
+        :title="hasKey ? '已配置访问口令（点击修改）' : '设置访问口令'"
+        @click="keyOpen = true"
+      >
+        <AppIcon name="key" :size="18" />
+        <span v-if="hasKey" class="key-dot"></span>
+      </button>
       <span class="rail-version">v0.1</span>
     </div>
   </nav>
+
+  <ApiKeyDialog v-model:open="keyOpen" />
 </template>
 
 <script setup>
+import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import AppIcon from './AppIcon.vue'
+import ApiKeyDialog from './ApiKeyDialog.vue'
+import { getApiKey } from '../utils/storage'
 
 const route = useRoute()
+const keyOpen = ref(false)
+const hasKey = ref(Boolean(getApiKey()))
+
 const items = [
   { to: '/chat', label: '对话', icon: 'chat' },
   { to: '/live', label: '浏览器', icon: 'monitor' },
@@ -39,6 +57,29 @@ function isActive(item) {
   if (item.to === '/chat') return route.path === '/' || route.path.startsWith('/chat')
   return route.path.startsWith(item.to)
 }
+
+// 服务端设了口令而本地还没填：所有受保护请求都会 401，不如进来就提醒一次。
+// AppNav 在每个视图里都会重新挂载，用 sessionStorage 标记保证一个会话只自动弹一次。
+const HINT_KEY = 'w2a_key_hinted'
+
+onMounted(async () => {
+  if (hasKey.value) return
+  try {
+    if (sessionStorage.getItem(HINT_KEY) === '1') return
+  } catch (_) {
+    /* 隐私模式下 sessionStorage 不可用，宁可多弹一次 */
+  }
+  try {
+    const r = await fetch('/health')
+    const j = await r.json()
+    if (j && j.auth_required) {
+      keyOpen.value = true
+      try { sessionStorage.setItem(HINT_KEY, '1') } catch (_) { /* 忽略 */ }
+    }
+  } catch (_) {
+    /* 后端没起来/拿不到健康检查就不弹 */
+  }
+})
 </script>
 
 <style scoped>
@@ -115,8 +156,44 @@ function isActive(item) {
   letter-spacing: 0.02em;
 }
 .rail-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
   margin-top: auto;
   color: var(--text-faint);
+}
+.rail-key {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color 0.18s var(--ease), border-color 0.18s var(--ease);
+}
+.rail-key:hover {
+  color: var(--text);
+  border-color: var(--line);
+  background: rgba(34, 197, 94, 0.06);
+}
+.rail-key.is-set {
+  color: var(--run);
+}
+.key-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--run);
+  box-shadow: 0 0 0 2px #080d14;
 }
 .rail-version {
   font-family: theme('fontFamily.mono');

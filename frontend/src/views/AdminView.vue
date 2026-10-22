@@ -9,6 +9,7 @@
         </div>
         <div class="header-actions">
           <span v-if="reloadMsg" class="reload-msg">{{ reloadMsg }}</span>
+          <span v-if="authHint" class="reload-msg is-bad">{{ authHint }}</span>
           <button class="btn btn-sm" :disabled="loading" @click="refreshAll">
             <AppIcon name="refresh" :size="14" />
             {{ loading ? '刷新中…' : '刷新' }}
@@ -186,6 +187,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useProviderStore } from '../stores/provider'
+import { apiFetch } from '../utils/api'
 import AppNav from '../components/AppNav.vue'
 import AppIcon from '../components/AppIcon.vue'
 
@@ -196,6 +198,7 @@ const logs = ref([])
 const logsError = ref('')
 const loading = ref(false)
 const reloadMsg = ref('')
+const authHint = ref('')
 
 const readyCount = computed(() => providers.value.filter(p => p.has_profile).length)
 const totalModels = computed(() => providers.value.reduce((n, p) => n + (p.models?.length || 0), 0))
@@ -218,8 +221,12 @@ async function loadStatus() {
 
 async function loadStats() {
   try {
-    const r = await fetch('/admin/stats')
-    if (r.ok) stats.value = await r.json()
+    const r = await apiFetch('/admin/stats')
+    if (r.status === 401) authHint.value = '服务端要求访问口令，点左下角钥匙设置（统计/日志拿不到数据）'
+    else if (r.ok) {
+      authHint.value = ''
+      stats.value = await r.json()
+    }
   } catch (_) {
     /* 统计不可用时保留旧值 */
   }
@@ -228,7 +235,8 @@ async function loadStats() {
 async function loadLogs() {
   logsError.value = ''
   try {
-    const r = await fetch('/admin/logs?limit=20')
+    const r = await apiFetch('/admin/logs?limit=20')
+    if (r.status === 401) throw new Error('需要访问口令，点左下角钥匙设置')
     if (!r.ok) throw new Error('HTTP ' + r.status)
     logs.value = await r.json()
   } catch (e) {
@@ -240,7 +248,10 @@ async function loadLogs() {
 async function reloadConfig() {
   reloadMsg.value = '正在重载…'
   try {
-    await fetch('/admin/reload')
+    // 重载会重建 provider 实例，只接受 POST（GET 返回 405）
+    const r = await apiFetch('/admin/reload', { method: 'POST' })
+    if (r.status === 401) throw new Error('需要访问口令，点左下角钥匙设置')
+    if (!r.ok) throw new Error('HTTP ' + r.status)
     await Promise.allSettled([loadStatus(), providerStore.fetchModels()])
     reloadMsg.value = '配置已重载'
   } catch (e) {
@@ -324,6 +335,9 @@ function alignClass(p) {
 .reload-msg {
   font-size: 12px;
   color: #86efac;
+}
+.reload-msg.is-bad {
+  color: #fca5a5;
 }
 
 /* KPI */

@@ -14,8 +14,10 @@ router = APIRouter()
 
 
 @router.get("/health")
-async def health():
-    return {"status": "ok"}
+async def health(request: Request):
+    """公开探活：顺带告诉前端服务端有没有设口令（要不要显示口令入口）。"""
+    key = getattr(request.app.state.settings, "api_key", None)
+    return {"status": "ok", "auth_required": bool(key)}
 
 
 @router.get("/admin/status", dependencies=[Depends(verify_key)])

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { getApiKey } from '../utils/storage'
+import { authHeaders, apiFetch } from '../utils/api'
 
 // 模式开关的默认值：模型名后缀 / 模型自带特性都会影响初始状态
 function deriveModes(modelId, model) {
@@ -104,8 +104,7 @@ export const useProviderStore = defineStore('provider', () => {
 
   async function fetchModels() {
     // 配置了 W2A_API_KEY 时需要带上令牌，否则模型列表会 401
-    const apiKey = getApiKey()
-    const headers = apiKey ? { Authorization: 'Bearer ' + apiKey } : {}
+    const headers = authHeaders()
     let loaded = false
     try {
       const r = await fetch('/v1/capabilities', { headers })
@@ -140,7 +139,7 @@ export const useProviderStore = defineStore('provider', () => {
   }
 
   async function fetchStatus() {
-    const r = await fetch('/admin/status')
+    const r = await apiFetch('/admin/status')
     if (r.ok) {
       const j = await r.json()
       status.value = j.providers || []

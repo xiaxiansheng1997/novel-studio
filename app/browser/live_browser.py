@@ -359,6 +359,21 @@ class LiveSession:
             }
         return await auto_slide_page(self.page, key=self.key)
 
+    async def handoff_slide(self, reason: str = "") -> bool:
+        """手动接管：让正在跑的自动过滑块立即收手（包括后台聊天触发的那次）。
+
+        合作式中止：不 cancel 任务，拖拽循环自己退出并松开按键，也不会把
+        正在等回答的聊天请求一带打崩。返回确实有自动拖动被叫停。
+        """
+        hit = request_slide_handoff(self.key)
+        if hit:
+            logger.info(f"[live:{self.key}] 已请求自动过滑块让位{('：' + reason) if reason else ''}")
+            # 调用方紧接着就要把用户的 mousePressed 发进去：先等自动拖动真的抬手，
+            # 否则它的 mouse.up 会落在用户按下之后，把这次手动拖拽直接抬掉
+            if not await wait_slide_release(self.key):
+                logger.warning(f"[live:{self.key}] 自动拖动未在时限内松开左键，手动接管可能不跟手")
+        return hit
+
     # ---- 录制 ----
     def record_start(self) -> None:
         if self.recorder:
@@ -624,71 +639,178 @@ async def _dump_dialog(page, key: str) -> None:
             continue
 
 
-async def _drag_human(page, sx: float, sy: float, dx: float) -> None:
+async def _drag_human(page, sx: float, sy: float, dx: float, key: str = "") -> None:
     """从 (sx, sy) 向右拖 dx 像素。
 
     人类拖拽的速度曲线是“慢起 → 加速 → 减速”，而不是匀速或快起；
     这里用 easeInOutCubic 位置曲线 + 横向抖动 + 纵向波动 + 偶发停顿 + 末尾微调。
+    中途发现人在 /live 里动手（handoff）就立即收手：不再做末端对准，
+    直接把当前进度停下并抬起按键 —— 拖到目标点再松手等于没让位。
     """
-    # 先悬停到滑块上再按下，部分验证码会统计 mouseenter 后的轨迹
-    await page.mouse.move(sx - 2, sy - 1)
-    await asyncio.sleep(random.uniform(0.04, 0.12))
-    await page.mouse.move(sx, sy)
-    await asyncio.sleep(random.uniform(0.08, 0.2))
-    await page.mouse.down()
-    await asyncio.sleep(random.uniform(0.12, 0.26))  # 按下后短暂停顿再启动
+    slot = key or ""
+    pressed = False
+    give_up = False
+    try:
+        # 先悬停到滑块上再按下，部分验证码会统计 mouseenter 后的轨迹
+        await page.mouse.move(sx - 2, sy - 1)
+        await asyncio.sleep(random.uniform(0.04, 0.12))
+        await page.mouse.move(sx, sy)
+        await asyncio.sleep(random.uniform(0.08, 0.2))
+        # 按下也放在 try 里：取消/异常落在 down 与循环之间时，finally 才能补上 up
+        _slide_dragging.add(slot)
+        pressed = True
+        await page.mouse.down()
+        await asyncio.sleep(random.uniform(0.12, 0.26))  # 按下后短暂停顿再启动
 
-    steps = random.randint(42, 64)
-    x = 0.0
-    for i in range(1, steps + 1):
-        t = i / steps
-        if t < 0.5:
-            eased = 4 * t ** 3                    # 慢起（前 10% 位移很小）
-        else:
-            eased = 1 - (-2 * t + 2) ** 3 / 2     # 减速收敛
-        pos = dx * eased + random.uniform(-1.2, 1.2)
-        # 大体单调，允许偶尔回退 0.5px（人手抖动）
-        pos = min(max(pos, x - 0.5), dx)
-        x = pos
-        y = sy + math.sin(t * math.pi * random.uniform(0.8, 1.6)) * random.uniform(0.4, 2.0)
-        await page.mouse.move(sx + x, y)
-        delay = random.uniform(0.008, 0.02)
-        if random.random() < 0.18:
-            delay += random.uniform(0.03, 0.09)   # 偶发停顿，更像人手
-        await asyncio.sleep(delay)
+        steps = random.randint(42, 64)
+        x = 0.0
+        for i in range(1, steps + 1):
+            if _handoff_requested(key):
+                logger.info(f"[{key or 'page'}] 检测到手动操作，自动拖动中途让位")
+                give_up = True
+                break
+            t = i / steps
+            if t < 0.5:
+                eased = 4 * t ** 3                    # 慢起（前 10% 位移很小）
+            else:
+                eased = 1 - (-2 * t + 2) ** 3 / 2     # 减速收敛
+            pos = dx * eased + random.uniform(-1.2, 1.2)
+            # 大体单调，允许偶尔回退 0.5px（人手抖动）
+            pos = min(max(pos, x - 0.5), dx)
+            x = pos
+            y = sy + math.sin(t * math.pi * random.uniform(0.8, 1.6)) * random.uniform(0.4, 2.0)
+            await page.mouse.move(sx + x, y)
+            delay = random.uniform(0.008, 0.02)
+            if random.random() < 0.18:
+                delay += random.uniform(0.03, 0.09)   # 偶发停顿，更像人手
+            await asyncio.sleep(delay)
 
-    # 末端微调：回拉 1-2px 再对齐，模拟“对准”动作
-    await page.mouse.move(sx + dx - random.uniform(1, 2.5), sy + random.uniform(-0.5, 0.5))
-    await asyncio.sleep(random.uniform(0.03, 0.07))
-    await page.mouse.move(sx + dx, sy)
-    await asyncio.sleep(random.uniform(0.08, 0.16))  # 松开前停一下
-    await page.mouse.up()
+        if not give_up:
+            # 末端微调：回拉 1-2px 再对齐，模拟“对准”动作
+            await page.mouse.move(sx + dx - random.uniform(1, 2.5), sy + random.uniform(-0.5, 0.5))
+            await asyncio.sleep(random.uniform(0.03, 0.07))
+            await page.mouse.move(sx + dx, sy)
+            await asyncio.sleep(random.uniform(0.08, 0.16))  # 松开前停一下
+    finally:
+        # 无论正常结束、异常还是中途让位，都必须抬起按键（Playwright 记得最后坐标），
+        # 否则页面一直处于拖拽态，人手接管时“不跟手”
+        if pressed:
+            try:
+                await page.mouse.up()
+            except Exception:  # noqa: BLE001
+                pass
+        _slide_dragging.discard(slot)
+
+
+# 站点直接判失败（不是“没拖到位”）的文案：出现它说明已被风控，刷新重拖没有意义
+# 只收「已经判负」的确定字样；「请重试」「操作太频繁」这类泛化词会误伤正常题干/限流提示
+_CAPTCHA_FAIL_MARKERS = ("验证失败", "点击框体重试", "verifyfail", "verify fail", "click to retry")
+
+# 手动接管信号（合作式中止）：不 cancel 任务，避免把后台聊天那条请求一起带崩
+_slide_running: dict[str, int] = {}
+_slide_handoff: set[str] = set()
+# 此刻真的按着左键在拖的 key：手动接管前要等它空出来（一个页面只有一只鼠标）
+_slide_dragging: set[str] = set()
+
+
+def request_slide_handoff(key: str) -> bool:
+    """让正在跑的自动过滑块立刻收手（人在画面里动手时调用）。
+
+    拖拽循环与结果轮询都会检查这个标志，最多一个采样周期就停下并松开按键；
+    按 key（provider）粒度登记，所以 /live 按钮触发的和后台聊天触发的拖动都能让位。
+    返回确实有自动拖动在跑。
+    """
+    if not key or key not in _slide_running:
+        return False
+    _slide_handoff.add(key)
+    return True
+
+
+def _handoff_requested(key: str) -> bool:
+    return bool(key) and key in _slide_handoff
+
+
+def _has_fail_marker(text: str) -> bool:
+    """弹窗文案是否表示“已被判失败”（而不是“还没拖到位”）。"""
+    return bool(text) and any(m in text.lower() for m in _CAPTCHA_FAIL_MARKERS)
+
+
+async def wait_slide_release(key: str, timeout: float = 0.8) -> bool:
+    """等自动拖动松开左键；返回左键是否真的空出来了。
+
+    每个页面只有一只 Playwright 鼠标：若用户的 mousePressed 抢在自动拖动的
+    mouse.up 之前落下，那只 up 会把用户的拖拽抬起来，表现就是“手动拖不跟手”。
+    所以让位标志置起来后还得等它退出按下区间（停在结果轮询阶段时不按住键，立即返回）。
+    """
+    slot = key or ""
+    deadline = time.monotonic() + timeout
+    while slot in _slide_dragging and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    return slot not in _slide_dragging
 
 
 async def _captcha_text(page) -> str:
-    """读出验证码容器文案（“拖动到最右边”/“完成拼图”/“验证失败”等）。"""
+    """读出验证码容器文案（“拖动到最右边”/“完成拼图”/“验证失败”等）。
+
+    主文档里的 `.baxia-dialog` 往往只有关闭按钮「X」，真正的提示（如
+    “验证失败，点击框体重试(error:xxx)”）在 punish 子 frame 里；所以优先返回
+    带失败字样的文案，其余情况取最长的一条，纯符号直接跳过。
+    """
+    best = ""
     for fr in page.frames:
         try:
             txt = await fr.evaluate(
                 "() => { const el = document.querySelector('.nc_scale') || document.querySelector('.baxia-dialog')"
-                " || document.querySelector('[id*=nocaptcha]'); return el ? (el.innerText || '').trim().slice(0, 120) : ''; }"
+                " || document.querySelector('[id*=nocaptcha]'); return el ? (el.innerText || '').trim().slice(0, 200) : ''; }"
             )
-            if txt:
-                return txt.replace("\n", " / ")
         except Exception:  # noqa: BLE001
             continue
-    return ""
+        cand = " ".join((txt or "").split())[:120]
+        if not cand or not cand.strip("Xx×✕ "):
+            continue  # 只有关闭按钮，不是提示文案
+        if _has_fail_marker(cand):
+            return cand
+        # 比较与返回用同一个 120 窗口，免得选出长文案后又被截掉尾巴
+        if len(cand) > len(best):
+            best = cand
+    return best
 
 
 async def auto_slide_page(page, key: str = "", find_timeout: float = 8.0, verify_timeout: float = 6.0,
                          max_rounds: int = 3) -> dict:
     """对任意 Playwright 页面自动过滑块验证，返回 {ok, message}。
 
+    进这里就把 key 登记为“拖动中”，人在 /live 里动手时 `request_slide_handoff(key)`
+    能让它立即让位；退出时清掉计数，保证不会把后来的手动操作误判成接管。
+    """
+    slot = key or ""
+    if slot not in _slide_running:
+        # 只有第一个进来的清历史残留信号；并发时先退出的那个不能抹掉别人还没消费的让位
+        _slide_handoff.discard(slot)
+    _slide_running[slot] = _slide_running.get(slot, 0) + 1
+    try:
+        return await _auto_slide_rounds(page, key, find_timeout, verify_timeout, max_rounds)
+    finally:
+        left = _slide_running.get(slot, 1) - 1
+        if left > 0:
+            _slide_running[slot] = left
+        else:
+            _slide_running.pop(slot, None)
+            _slide_handoff.discard(slot)
+
+
+async def _auto_slide_rounds(page, key: str, find_timeout: float, verify_timeout: float,
+                            max_rounds: int) -> dict:
+    """多轮过滑块的实际循环（由 `auto_slide_page` 包住做登记/清理）。
+
     阿里 baxia 常见多轮验证（过一轮后又弹一轮），故最多连过 max_rounds 轮；
     每轮成功判据为滑块消失，且随后观察一小段时间看是否会再弹。
     """
+    handoff = {"ok": False, "handoff": True, "message": "已让位给手动操作（自动拖动已停止，你在画面里拖完就行）"}
     solved = 0
     for rnd in range(max_rounds):
+        if _handoff_requested(key):
+            return dict(handoff)
         wait = find_timeout if rnd == 0 else 2.5
         try:
             found = await _find_slider(page, wait)
@@ -721,19 +843,46 @@ async def auto_slide_page(page, key: str = "", find_timeout: float = 8.0, verify
             else:
                 dx = 260.0  # 兜底：常见轨道约 260px
         caption = await _captcha_text(page)
+        if _has_fail_marker(caption):
+            # 弹窗里已经是“验证失败，点击框体重试”：这张题已作废，先点刷新换一张。
+            # 换不出新题就别拖了 —— 再拖一次只是又给风控喂一个失败样本。
+            if not await _try_refresh(page):
+                logger.warning(f"[{key or 'page'}] 验证码处于失败态且没找到刷新控件：{caption!r}")
+                return {
+                    "ok": False,
+                    "message": f"验证码已处于失败态（{caption}）：页面上没找到刷新入口，无法换题；"
+                               "请在 /live 手动完成，或等几分钟/换网络后再试",
+                }
+            logger.info(f"[{key or 'page'}] 验证码处于失败态，已点刷新换题")
+            await asyncio.sleep(1.2)
+            if _has_fail_marker(await _captcha_text(page)):
+                logger.warning(f"[{key or 'page'}] 刷新后仍是失败态，停止自动拖动：{caption!r}")
+                return {
+                    "ok": False,
+                    "message": f"验证码刷新后仍是失败态（{caption}）：当前账号/IP 已被风控，"
+                               "请等几分钟或换网络后手动完成",
+                }
+            # 已换出新题：重走一轮重新定位手柄与轨道，别再用旧的 sx/sy/dx
+            continue
         logger.info(
             f"[{key or 'page'}] 自动过滑块 第{rnd + 1}轮: 起点=({sx:.0f},{sy:.0f}) 距离={dx:.0f}px "
             f"轨道={'有' if tbox else '无'} 文案={caption!r}"
         )
         try:
-            await _drag_human(page, sx, sy, dx)
+            await _drag_human(page, sx, sy, dx, key=key)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "message": f"拖动失败: {exc}"}
+        if _handoff_requested(key):
+            return dict(handoff)
         # 等本轮到结果：滑块与验证弹窗都消失，且连续两次采样稳定，避免换题瞬间误判通过
         gone = False
         stable = 0
-        for _ in range(max(int(verify_timeout / 0.5), 1)):
+        failed_text = ""
+        fails = 0
+        for sample in range(max(int(verify_timeout / 0.5), 1)):
             await asyncio.sleep(0.5)
+            if _handoff_requested(key):
+                return dict(handoff)
             try:
                 clear = not await _slider_visible(page) and not await _mask_visible(page)
             except Exception:  # noqa: BLE001
@@ -745,6 +894,26 @@ async def auto_slide_page(page, key: str = "", find_timeout: float = 8.0, verify
                     break
             else:
                 stable = 0
+                # 隔一次采样再读文案：_captcha_text 要遍历所有 frame，别把 6 秒窗口拖成十几秒
+                if sample % 2 == 0:
+                    cand = await _captcha_text(page)
+                    if _has_fail_marker(cand):
+                        # 站点直接判失败（verifyFail）时刷新重拖不会变好；
+                        # 要求连续两次都命中，避开站点异步校验中的中间态被误判
+                        fails += 1
+                        if fails >= 2:
+                            failed_text = cand
+                            break
+                    else:
+                        fails = 0
+        if failed_text:
+            await _dump_dialog(page, key or 'page')
+            logger.warning(f"[{key or 'page'}] 第{rnd + 1}轮被判失败：{failed_text!r}（已触发风控，停止重试）")
+            return {
+                "ok": False,
+                "message": f"站点直接判失败（{failed_text}）：当前账号/IP 已触发风控，已停止自动重试。"
+                           "建议先在 /live 手动完成，或等几分钟/换网络后再试",
+            }
         if not gone:
             await _dump_dialog(page, key or 'page')
             # 被判定轨迹异常时滑块不会消失；点刷新重开一轮通常能过，别直接放弃

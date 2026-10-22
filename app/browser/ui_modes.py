@@ -377,6 +377,7 @@ async def apply_mode(page, key: str, plan: ModePlan, cfg: Any) -> dict:
     started = time.perf_counter()
     details: list[dict] = []
     missing: list[str] = []
+    skipped: list[str] = []
 
     try:
         await dismiss_blocking_dialogs(page, key)
@@ -386,8 +387,22 @@ async def apply_mode(page, key: str, plan: ModePlan, cfg: Any) -> dict:
     for feature, want in plan.changed_features.items():
         ctl = (cfg.ui or {}).get(feature)
         if ctl is None:
-            missing.append(feature)
-            details.append({"feature": feature, "want": want, "ok": False, "reason": "provider 未配置 ui"})
+            if not want:
+                # 目标就是关，而这个 provider 没配对应控件：既不能断定页面上
+                # 有没有这个开关，也没有可点的文案。不能算未对齐（前端每轮都带
+                # thinking/search=false，记 missing 会让千问这种站点每轮报警），
+                # 也不谎称“页面无此开关”——如实记进 skipped，供 /live 面板与日志排查。
+                skipped.append(feature)
+                details.append({
+                    "feature": feature,
+                    "want": False,
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "未配置 ui 绑定，目标为关，未在页面上确认",
+                })
+            else:
+                missing.append(feature)
+                details.append({"feature": feature, "want": want, "ok": False, "reason": "provider 未配置 ui"})
             continue
         res = await _set_toggle(page, feature, bool(want), ctl)
         details.append(res)
@@ -407,13 +422,15 @@ async def apply_mode(page, key: str, plan: ModePlan, cfg: Any) -> dict:
     result = {
         "ok": ok,
         "missing": missing,
+        "skipped": skipped,
         "details": details,
         "preset": plan.preset_id,
         "ms": ms,
         "url": (getattr(page, "url", "") or "")[:120],
     }
     if ok:
-        logger.info(f"[{key}] 模式已对齐 {plan.summary()} 用时 {ms}ms")
+        note = f" 未绑定(关)={skipped}" if skipped else ""
+        logger.info(f"[{key}] 模式已对齐 {plan.summary()} 用时 {ms}ms{note}")
     else:
         logger.warning(
             f"[{key}] 模式部分未对齐 {plan.summary()} 缺失={missing} 用时 {ms}ms "

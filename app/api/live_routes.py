@@ -294,6 +294,16 @@ async def _handle(live: LiveBrowserManager, sess: LiveSession, ws: WebSocket, da
     t = data.get("t")
     if t == "mouse":
         action = data.get("action", "move")
+        # 用户按下鼠标 = 手动接管：让正在跑的自动拖动立即收手并松开按键，
+        # 否则两条轨迹会同时拖同一个手柄（双方都过不了，人手还不跟手）。
+        # handoff_slide 会等到自动拖动真的抬起左键才返回（最多 0.8s），
+        # 保证下面这次 mousePressed 不会被对方的 mouse.up 抬掉。
+        if action == "down":
+            try:
+                if await sess.handoff_slide("检测到手动拖拽"):
+                    await ws.send_json({"t": "log", "message": "已让位给手动操作（自动过滑块已停止）"})
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[live:{sess.key}] 请求自动滑块让位失败: {exc}")
         cc = data.get("clickCount")
         await sess.mouse(
             _MOUSE_TYPE.get(action, "mouseMoved"),
@@ -372,6 +382,7 @@ async def _handle(live: LiveBrowserManager, sess: LiveSession, ws: WebSocket, da
             return
         # 拖动耗时约 2-3 秒 + 结果轮询，放后台跑，避免阻塞其他输入
         async def _run_slide() -> None:
+            me = asyncio.current_task()
             try:
                 res = await sess.auto_slide()
             except Exception as exc:  # noqa: BLE001
@@ -383,6 +394,10 @@ async def _handle(live: LiveBrowserManager, sess: LiveSession, ws: WebSocket, da
                 await ws.send_json({"t": "autoslide_result", "result": res})
             except Exception:  # noqa: BLE001
                 pass
+            finally:
+                # 只清自己：不能摸掉下一个已经排队的任务
+                if sess._slide_task is me:  # noqa: SLF001
+                    sess._slide_task = None  # noqa: SLF001
         await ws.send_json({"t": "log", "message": "正在自动拖动滑块…"})
         sess._slide_task = asyncio.create_task(_run_slide())
     elif t == "close":

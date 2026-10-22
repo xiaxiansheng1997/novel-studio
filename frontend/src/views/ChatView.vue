@@ -278,7 +278,9 @@ async function handleSend(text) {
   } catch (err) {
     if (err.name !== 'AbortError') {
       const cur = chatStore.messages[aIdx]
-      cur.content = cur.content || `请求失败：${err.message}`
+      // 401 单独提示：服务端设了 W2A_API_KEY 而前端还没填，不填的话每轮都是这个错
+      const hint = /\b401\b/.test(err.message || '') ? '（服务端设了访问口令：点左下角钥匙填入）' : ''
+      cur.content = cur.content || `请求失败：${err.message}${hint}`
     }
   } finally {
     chatStore.streaming = false
