@@ -251,6 +251,34 @@ async def _click_mark(page, value: str = "1") -> bool:
         return False
 
 
+def _hits_model_text(labels: list[str], model_labels: list[str]) -> bool:
+    """这串文案就是某个模型的下拉项：拿它当开关点下去，实际是在开模型菜单。"""
+    got = {str(x).strip() for x in labels if x and str(x).strip()}
+    return bool(got & {str(x).strip() for x in model_labels if x and str(x).strip()})
+
+
+def _misbind_hint(feature: str, labels: list[str], ui: dict, model_labels: list[str]) -> str:
+    """绑定的文案看着就不像这个开关（最常见：把模型下拉的文案当成了开关）。
+
+    误绑的代价不只是每轮刷 missing：want=False 时也会拿这串字去页面上找按钮，
+    而它命中的往往就是模型下拉的触发器，点一下就把菜单打开了 —— 等于每轮请求都
+    在动页面。所以先识别出来：目标为关时直接跳过；撞模型文案的连「开」也拒绝点。
+    """
+    got = {str(x).strip() for x in labels if x and str(x).strip()}
+    if not got:
+        return ""
+    hit = got & {str(x).strip() for x in model_labels if x and str(x).strip()}
+    if hit:
+        return f"疑似绑错：{'、'.join(sorted(hit))} 是模型下拉的文案，不是「{feature}」开关"
+    for other, octl in (ui or {}).items():
+        if other == feature or other == "model":
+            continue
+        dup = got & {str(x).strip() for x in (getattr(octl, "labels", None) or []) if x and str(x).strip()}
+        if dup:
+            return f"疑似绑错：与「{other}」绑了同一个控件（{'、'.join(sorted(dup))}），至少有一个不对"
+    return ""
+
+
 async def _set_toggle(page, feature: str, want: bool, ctl: UiControlConfig) -> dict:
     """把一个开关切到目标状态；已处于目标状态时不点击。"""
     labels = ctl.labels or [feature]
@@ -378,14 +406,19 @@ async def apply_mode(page, key: str, plan: ModePlan, cfg: Any) -> dict:
     details: list[dict] = []
     missing: list[str] = []
     skipped: list[str] = []
+    misbind: list[str] = []
 
     try:
         await dismiss_blocking_dialogs(page, key)
     except Exception:  # noqa: BLE001 - 弹窗清理失败不影响后续判断
         pass
 
+    ui = cfg.ui or {}
+    # 已声明的模型文案：用来认出“把模型名当开关绑了”这种误绑
+    model_labels = [getattr(m, "label", "") or "" for m in cfg.models]
+
     for feature, want in plan.changed_features.items():
-        ctl = (cfg.ui or {}).get(feature)
+        ctl = ui.get(feature)
         if ctl is None:
             if not want:
                 # 目标就是关，而这个 provider 没配对应控件：既不能断定页面上
@@ -404,7 +437,40 @@ async def apply_mode(page, key: str, plan: ModePlan, cfg: Any) -> dict:
                 missing.append(feature)
                 details.append({"feature": feature, "want": want, "ok": False, "reason": "provider 未配置 ui"})
             continue
+        labels = list(ctl.labels or [])
+        hint = _misbind_hint(feature, labels, ui, model_labels)
+        # 两种情况一律不点：目标本来就是关（点了也拿不到信息）；或者这串字就是模型文案
+        # （那一点下去开的是模型菜单，不是开关）
+        if hint and (not want or _hits_model_text(labels, model_labels)):
+            why = (
+                "目标为关已跳过不点，请在 /live 改回未绑定"
+                if not want
+                else "已拒绝点击（这一下点开的是模型菜单），请在 /live 改回未绑定"
+            )
+            res = {
+                "feature": feature,
+                "want": bool(want),
+                "ok": not want,
+                "misbind": True,
+                "reason": f"{hint}；{why}",
+            }
+            if not want:
+                res["skipped"] = True
+                skipped.append(feature)
+            else:
+                missing.append(feature)
+            misbind.append(feature)
+            details.append(res)
+            logger.warning(f"[{key}] {feature} {hint}")
+            continue
         res = await _set_toggle(page, feature, bool(want), ctl)
+        if hint:
+            res["misbind"] = True
+            if res.get("ok"):
+                res["hint"] = hint  # 竟然点成功了：文案复用，但下次改版就会失效，提醒一下
+            else:
+                res["reason"] = f"{hint}；{res.get('reason') or ''}".rstrip("；")
+                misbind.append(feature)
         details.append(res)
         if not res.get("ok"):
             missing.append(feature)
@@ -423,17 +489,21 @@ async def apply_mode(page, key: str, plan: ModePlan, cfg: Any) -> dict:
         "ok": ok,
         "missing": missing,
         "skipped": skipped,
+        "misbind": misbind,
         "details": details,
         "preset": plan.preset_id,
         "ms": ms,
         "url": (getattr(page, "url", "") or "")[:120],
     }
     if ok:
-        note = f" 未绑定(关)={skipped}" if skipped else ""
+        note = f" 已跳过={skipped}" if skipped else ""
+        if misbind:
+            note += f"（疑似绑错 {misbind}，请在 /live 解绑）"
         logger.info(f"[{key}] 模式已对齐 {plan.summary()} 用时 {ms}ms{note}")
     else:
         logger.warning(
-            f"[{key}] 模式部分未对齐 {plan.summary()} 缺失={missing} 用时 {ms}ms "
-            f"（可在 /live 的「页面模式」里探测实际文案后改 config.yaml）"
+            f"[{key}] 模式部分未对齐 {plan.summary()} 缺失={missing} 用时 {ms}ms"
+            + (f" 疑似绑错={misbind}" if misbind else "")
+            + "（可在 /live 的「页面模式」里探测实际文案后改 config.yaml）"
         )
     return result

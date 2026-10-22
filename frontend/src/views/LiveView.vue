@@ -117,16 +117,38 @@
             v-for="(it, i) in probeItems"
             :key="i"
             class="probe-chip"
-            :class="{ on: probeOn(it) }"
-            :title="probeTitle(it)"
+            :class="{ on: probeOn(it), used: chipUsed(it.text) }"
+            :title="chipTitle(it)"
+            @click="openChipMenu(it, $event)"
           >
             {{ it.text }}
             <b v-if="probeState(it)">{{ probeState(it) }}</b>
           </span>
         </div>
-        <!-- 页面内绑定：把探测到的控件指给「思考 / 联网 / 模型 / 自定义场景」，存到 storage/ui-bindings.yaml，不改 config.yaml -->
+        <!-- 绑定：常用的只露「模型触发器 + 各模型文案」，思考/联网/场景收进高级；存 storage/ui-bindings.yaml，不改 config.yaml -->
         <div v-if="bindingLoaded" class="bind-row">
           <span class="bind-title" :title="bindingsFile">绑定</span>
+          <label class="bind-field">
+            模型触发器
+            <input v-model="bindModelTrigger" class="field bind-input" placeholder="下拉按钮当前显示的字，可留空" />
+          </label>
+          <label v-for="m in modelLabels" :key="m.id" class="bind-field">
+            {{ m.id }}
+            <input v-model="m.label" class="field bind-input" placeholder="下拉里的文案，留空=不切" />
+          </label>
+          <span v-if="advSummary" class="bind-sum" :title="'点「高级」修改：' + advSummary">{{ advSummary }}</span>
+          <button class="btn btn-sm" :title="showAdvanced ? '收起思考/联网/场景绑定' : '展开思考/联网/场景绑定'" @click="showAdvanced = !showAdvanced">
+            {{ showAdvanced ? '收起高级' : '高级（思考/联网/场景）' }}
+          </button>
+          <button class="btn btn-sm" @click="saveBindings" :disabled="savingBindings">
+            <AppIcon name="check" :size="12" />
+            {{ savingBindings ? '保存中…' : '保存绑定' }}
+          </button>
+          <button class="btn btn-sm" @click="clearBindings" :disabled="savingBindings" title="删除页面覆盖，回到 config.yaml 的写法">
+            清除
+          </button>
+        </div>
+        <div v-if="bindingLoaded && showAdvanced" class="bind-row bind-adv">
           <label class="bind-field">
             思考
             <select v-model="bindThinking" class="field bind-select">
@@ -140,14 +162,6 @@
               <option value="">未绑定</option>
               <option v-for="t in probeTexts" :key="'bs-' + t" :value="t">{{ t }}</option>
             </select>
-          </label>
-          <label class="bind-field">
-            模型触发器
-            <input v-model="bindModelTrigger" class="field bind-input" placeholder="如：切换模型，可留空" />
-          </label>
-          <label v-for="m in modelLabels" :key="m.id" class="bind-field">
-            {{ m.id }}
-            <input v-model="m.label" class="field bind-input" placeholder="下拉里的文案，留空=不切" />
           </label>
           <span class="bind-title">场景</span>
           <select v-model="customPick" class="field bind-select">
@@ -165,14 +179,11 @@
             {{ c.text }} <b>{{ c.key }}</b>
             <button class="bind-x" @click="removeCustom(c.key)" title="移除">×</button>
           </span>
-          <button class="btn btn-sm" @click="saveBindings" :disabled="savingBindings">
-            <AppIcon name="check" :size="12" />
-            {{ savingBindings ? '保存中…' : '保存绑定' }}
-          </button>
-          <button class="btn btn-sm" @click="clearBindings" :disabled="savingBindings" title="删除页面覆盖，回到 config.yaml 的写法">
-            清除
-          </button>
         </div>
+        <!-- 绑定体检：把“看着就绑错了”的地方直接说出来，而不是等日志刷「按钮未找到」 -->
+        <p v-if="bindingLoaded && bindNotes.length" class="bind-notes" :class="{ 'is-bad': bindBad }">
+          <span v-for="(n, i) in bindNotes" :key="'bn-' + i">{{ (i ? ' · ' : '') + n }}</span>
+        </p>
       </section>
 
       <!-- 画面 -->
@@ -235,6 +246,19 @@
         </div>
       </section>
     </main>
+
+    <!-- 点探测到的 chip = 直接把它绑给某个语义，省掉「先记住文案再去下拉里找」这一步 -->
+    <Teleport to="body">
+      <div v-if="chipMenu" class="chip-mask" @mousedown.self="chipMenu = null">
+        <div class="chip-pop" :style="{ left: chipMenu.x + 'px', top: chipMenu.y + 'px' }">
+          <p class="chip-pop-t">把「{{ chipMenu.text }}」绑给：</p>
+          <button v-for="o in chipTargets" :key="o.key" type="button" class="chip-pop-i" @click="applyChip(o.key)">
+            {{ o.label }}<em v-if="o.hint">{{ o.hint }}</em>
+          </button>
+          <button type="button" class="chip-pop-i chip-pop-x" @click="chipMenu = null">取消</button>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -285,6 +309,8 @@ const bindingModes = ref([])
 const customFeatures = ref([])
 const customPick = ref('')
 const customKey = ref('')
+// 思考/联网/场景不配就不该占地方，默认折起来；一旦里面已有绑定就自动展开
+const showAdvanced = ref(false)
 const STD_MODES = [
   { id: 'quick', label: '快速模式' },
   { id: 'think', label: '深度思考' },
@@ -319,6 +345,132 @@ const customCandidates = computed(() => {
   }
   return out
 })
+
+// ---- 绑定体检：把“一眼就不对”的组合当场说出来 ----
+// 只有带 aria 开/关状态的控件才可能当开关用（盲点读不出状态，会每轮报 missing）
+const toggleCandidates = computed(() => {
+  const out = []
+  for (const it of probeItems.value) {
+    if (!it.text || (it.pressed == null && it.checked == null)) continue
+    if (!out.includes(it.text)) out.push(it.text)
+  }
+  return out
+})
+// 探过了、一个开关都没有：思考/联网 就该锁在「未绑定」，不用从 chip 里硬挑
+const noToggleUi = computed(() => probeItems.value.length > 0 && toggleCandidates.value.length === 0)
+const GUESS_WORDS = { thinking: ['思考', '推理', '深度'], search: ['联网', '搜索', '网络'] }
+function guessOf(feature) {
+  const words = GUESS_WORDS[feature] || []
+  return toggleCandidates.value.filter((t) => words.some((w) => t.includes(w)))
+}
+const modelLabelSet = computed(() => new Set(modelLabels.value.map((m) => (m.label || '').trim()).filter(Boolean)))
+// 与后端 ui_modes._misbind_hint 同口径：撞模型文案 / 两个语义撞同一个控件
+const bindAudit = computed(() => {
+  const bad = []
+  const tips = []
+  const pairs = [
+    ['思考', bindThinking.value, 'thinking'],
+    ['联网', bindSearch.value, 'search'],
+  ]
+  for (const [name, picked, feature] of pairs) {
+    if (!picked) continue
+    if (modelLabelSet.value.has(picked)) {
+      bad.push(`「${name}」绑的「${picked}」是模型下拉的文案，不是开关 —— 改回「未绑定」`)
+    } else if (!noToggleUi.value && !guessOf(feature).includes(picked)) {
+      tips.push(`「${name}」绑的「${picked}」文案里没有开关字样，确认它就是那个开关`)
+    }
+  }
+  if (bindThinking.value && bindThinking.value === bindSearch.value) {
+    bad.push(`思考与联网绑了同一个控件「${bindThinking.value}」，至少有一个不对`)
+  }
+  const trigger = bindModelTrigger.value.trim()
+  if (trigger && [bindThinking.value, bindSearch.value].includes(trigger)) {
+    bad.push(`模型触发器与开关绑了同一个控件「${trigger}」`)
+  }
+  if (!noToggleUi.value) {
+    for (const [name, picked, feature] of pairs) {
+      const g = guessOf(feature)
+      if (!picked && g.length) tips.push(`「${name}」没绑，探测里有 ${g.slice(0, 3).join('、')}${g.length > 3 ? '…' : ''} 看着像`)
+    }
+  } else {
+    tips.push('这个页面没探到任何带开/关状态的控件：思考/联网 保持未绑定就行，不用硬挑一个')
+  }
+  return { bad, tips, all: [...bad, ...tips] }
+})
+const bindNotes = computed(() => bindAudit.value.all)
+const bindBad = computed(() => bindAudit.value.bad.length > 0)
+// 高级里的绑定收成一行摘要摆在主行上，折叠了也看得见配过什么
+const advSummary = computed(() => {
+  const parts = []
+  if (bindThinking.value) parts.push('思考=' + bindThinking.value)
+  if (bindSearch.value) parts.push('联网=' + bindSearch.value)
+  for (const c of customFeatures.value) parts.push(c.key + '=' + c.text)
+  return parts.length ? parts.join('  ') : '思考/联网/场景：均未绑定'
+})
+
+// ---- 点 chip 直接绑定 ----
+const chipMenu = ref(null)
+const chipTargets = computed(() => {
+  const out = [
+    { key: 'thinking', label: '思考开关', hint: bindThinking.value ? '（换掉现有绑定）' : '' },
+    { key: 'search', label: '联网开关', hint: bindSearch.value ? '（换掉现有绑定）' : '' },
+    { key: 'model', label: '模型触发器', hint: bindModelTrigger.value ? '（换掉现有绑定）' : '' },
+    { key: 'custom', label: '新增为场景', hint: '代码/翻译这类开关' },
+  ]
+  for (const m of modelLabels.value.slice(0, 6)) {
+    out.push({ key: 'model:' + m.id, label: '模型 ' + m.id, hint: m.label ? '现：' + m.label : '' })
+  }
+  return out
+})
+function chipUsed(text) {
+  const bound = [
+    bindThinking.value,
+    bindSearch.value,
+    bindModelTrigger.value.trim(),
+    ...modelLabels.value.map((m) => (m.label || '').trim()),
+    ...customFeatures.value.map((c) => c.text),
+  ].filter(Boolean)
+  return bound.includes(text)
+}
+function chipTitle(it) {
+  const base = probeTitle(it)
+  return (chipUsed(it.text) ? '已绑定 · 点击可改绑' : '点击把它绑给…') + (base ? ' · ' + base : '')
+}
+function openChipMenu(it, ev) {
+  if (!it.text) return
+  const x = Math.max(8, Math.min(ev.clientX, window.innerWidth - 240))
+  const y = Math.max(8, Math.min(ev.clientY + 10, window.innerHeight - 300))
+  chipMenu.value = { text: it.text, x, y }
+}
+function applyChip(key) {
+  const text = chipMenu.value ? chipMenu.value.text : ''
+  chipMenu.value = null
+  if (!text) return
+  if (key === 'thinking' || key === 'search') {
+    if (noToggleUi.value) {
+      appendLog(`提醒：这个页面没探到带开/关状态的控件，「${text}」多半不是开关`, 'err')
+    }
+    if (key === 'thinking') bindThinking.value = text
+    else bindSearch.value = text
+    showAdvanced.value = true
+  } else if (key === 'model') {
+    bindModelTrigger.value = text
+  } else if (key === 'custom') {
+    showAdvanced.value = true
+    customPick.value = text
+    appendLog(`场景候选已填入「${text}」：补个英文键名（如 code）再点「添加」`)
+    return
+  } else if (key.startsWith('model:')) {
+    const m = modelLabels.value.find((x) => x.id === key.slice(6))
+    if (!m) return
+    m.label = text
+  } else {
+    return
+  }
+  const t = chipTargets.value.find((o) => o.key === key)
+  appendLog(`已把「${text}」填进「${t ? t.label : key}」，点「保存绑定」才生效`)
+}
+
 const modeOptions = computed(() => {
   const list = bindingModes.value.length ? bindingModes.value : STD_MODES
   return list.map((m) => ({ id: m.id, label: m.label || m.id }))
@@ -511,7 +663,15 @@ async function probeModes() {
     if (!r.ok) throw new Error(await readError(r))
     const j = await r.json()
     probeItems.value = j.items || []
-    appendLog(`探测到 ${probeItems.value.length} 个可点控件（悬停可看 aria/class）；在下方「绑定」里选对应控件，带开/关状态的场景可加成自定义模式，保存即生效（不用改 yaml）`)
+    // 探不到任何带开/关状态的控件：上一轮硬挑的开关绑定就是错的，直接改回未绑定
+    // （不靠禁用下拉拦人：禁了就没法把旧值清掉了）
+    if (noToggleUi.value && (bindThinking.value || bindSearch.value)) {
+      appendLog(`这个页面没有带开/关状态的控件，已把思考/联网改回未绑定（还需点「保存绑定」生效）`)
+      bindThinking.value = ''
+      bindSearch.value = ''
+      showAdvanced.value = true
+    }
+    appendLog(`探测到 ${probeItems.value.length} 个可点控件；直接点某个控件就能把它绑给思考/联网/模型，带开/关状态的才能当开关（悬停可看 aria/class）`)
   } catch (e) {
     appendLog('探测失败：' + e.message, 'err')
   } finally {
@@ -533,6 +693,10 @@ async function applyPreset() {
     const label = j.mode || modePreset.value
     if (j.ok) appendLog(`✓ 模式已对齐 ${label}，用时 ${j.ms}ms`)
     else appendLog(`✗ 模式部分未对齐 ${label}，缺失=${(j.missing || []).join('/')}（先点「重载配置」让新文案生效；仍失败就重新探测校准）`, 'err')
+    // 绑错单独报：后端已经把它跳过了（不去碰模型下拉），但配置本身仍需要修
+    if (j.misbind && j.misbind.length) {
+      appendLog(`✗ 疑似绑错：${j.misbind.join('/')} 绑的文案不是这个开关，目标为关时已直接跳过（点「高级」改回未绑定）`, 'err')
+    }
     for (const d of j.details || []) {
       appendLog(`  · ${d.feature} want=${d.want} ${d.action || d.reason || ''}`)
     }
@@ -589,6 +753,8 @@ function applyBindings(j) {
   modelLabels.value = (j.models || []).map((m) => ({ id: m.id, label: m.label || '' }))
   bindingModes.value = j.modes || []
   if (!bindingModes.value.some((m) => m.id === modePreset.value)) modePreset.value = 'quick'
+  // 已经配过开关/场景就不能藏着，否则用户看不到自己绑了什么；全空时保持折叠
+  if (bindThinking.value || bindSearch.value || custom.length) showAdvanced.value = true
 }
 
 function bindPayload(name, picked) {
@@ -640,6 +806,9 @@ async function loadBindings() {
 }
 
 async function saveBindings() {
+  // 后端会把“绑了模型文案且目标为关”的开关直接跳过不点，所以误绑不会每轮去碰模型下拉；
+  // 这里只提醒不拦阻，用户确实可能有理由复用同一个文案
+  for (const w of bindAudit.value.bad) appendLog('提醒：' + w, 'err')
   savingBindings.value = true
   try {
     const ui = {}
@@ -985,7 +1154,17 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocke
   background: #0c121b;
   font-size: 11.5px;
   color: var(--text-muted);
-  cursor: default;
+  cursor: pointer;
+}
+.probe-chip:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+/* 已经绑给某个语义的控件：标出来，避免同一个文案绑两处 */
+.probe-chip.used {
+  border-color: rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.08);
+  color: #7dd3fc;
 }
 .probe-chip.on {
   border-color: rgba(34, 197, 94, 0.35);
@@ -1063,6 +1242,82 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocke
 }
 .bind-x:hover {
   color: var(--danger);
+}
+/* 高级里配了什么，折起来也能一眼看到 */
+.bind-sum {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 320px;
+}
+.bind-adv {
+  padding-left: 44px;
+  padding-top: 0;
+}
+/* 绑定体检结果：有硬错时标红，否则只是淡灰提示 */
+.bind-notes {
+  margin: 4px 0 0;
+  padding-left: 44px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-faint);
+}
+.bind-notes.is-bad {
+  color: #fca5a5;
+}
+.chip-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+}
+.chip-pop {
+  position: fixed;
+  width: 224px;
+  padding: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+}
+.chip-pop-t {
+  margin: 2px 4px 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chip-pop-i {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.chip-pop-i:hover {
+  border-color: var(--line);
+  background: var(--panel-2);
+}
+.chip-pop-i em {
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.chip-pop-x {
+  margin-top: 4px;
+  color: var(--text-faint);
+  border-top: 1px solid var(--line-soft);
+  border-radius: 0 0 8px 8px;
 }
 
 /* 画面 */

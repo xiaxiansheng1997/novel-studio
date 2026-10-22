@@ -279,9 +279,11 @@ function modelTags(p) {
 function alignText(p) {
   const st = capsOf(p).last_mode_status
   if (!st) return '暂无（还没发过带模式的请求）'
-  if (st.ok) return `已对齐 ${st.preset || ''} ${st.ms != null ? st.ms + 'ms' : ''}`.trim()
+  // 绑错时后端会直接跳过不点（对齐仍算 ok），但配置得修，不然模型开关形同虚设
+  const warn = (st.misbind || []).length ? `｜疑似绑错：${st.misbind.join('/')}（去 /live 高级里改回未绑定）` : ''
+  if (st.ok) return `已对齐 ${st.preset || ''} ${st.ms != null ? st.ms + 'ms' : ''}${warn}`.trim()
   const miss = (st.missing || []).join('/') || '未知'
-  return `未对齐：${miss}（去 /live 探测文案）`
+  return `未对齐：${miss}（去 /live 探测文案）${warn}`
 }
 
 function alignClass(p) {
