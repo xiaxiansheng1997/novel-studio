@@ -4,8 +4,9 @@
 对外采用双轨，两条路最终都收敛成同一份 ModePlan：
 
 - 模型名：站点真实模型 id（deepseek-chat / qwen-max / doubao-pro）
-  也接受模式后缀别名（`-think` / `-search` / `-expert` / `-quick`），
-  例如 `deepseek-reasoner-search` = 深度思考 + 联网。
+  也接受模式后缀别名（`-think` / `-search` / `-expert` / `-quick`，以及
+  页面上绑定出来的场景模式名，如 `-code`），例如 `deepseek-reasoner-search`
+  = 深度思考 + 联网。
 - 请求参数：`mode` / `thinking` / `search` / `reasoning_effort`，
   优先级高于模型名，用来给只会传 model 的客户端兜底。
 
@@ -17,8 +18,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
-# 网页端通用的开关语义；一条 ModePlan 里的 features 只用这些键
+# 内置开关语义；除此之外，页面绑定还能加自定义场景键（如 code / translate），
+# 它们由 config.yaml 的 modes[].features 声明，ModePlan 原样透传给 apply_mode。
 FEATURES = ("thinking", "search")
+
+# 内置模式名；其余模式视为「场景模式」，可用作模型名后缀与能力别名
+STANDARD_MODES = ("quick", "think", "search", "expert")
 
 # 模型名后缀 -> 预设 id
 _ALIAS = {
@@ -46,27 +51,34 @@ class ModePlan:
 
     @property
     def changed_features(self) -> dict[str, bool]:
-        return {k: v for k, v in self.features.items() if k in FEATURES}
+        # 不再只放行 thinking/search：场景模式（code 等）也要能到页面上开/关。
+        # features 全部来自配置（quick 铺底 / 模型固有 / 模式预设），不存在凭空键。
+        return dict(self.features)
 
     def summary(self) -> str:
         feats = " ".join(f"{k}={str(v).lower()}" for k, v in self.changed_features.items())
         return f"preset={self.preset_id} {feats}".strip()
 
 
-def split_model(models: Iterable[Any], model: str) -> tuple[Optional[Any], list[str]]:
+def split_model(
+    models: Iterable[Any], model: str, extra_suffixes: Iterable[str] = ()
+) -> tuple[Optional[Any], list[str]]:
     """拆出「基础模型 + 模式后缀」。
 
     先按已声明的模型 id 做最长匹配，剩下的每一段都必须是模式后缀才算数，
     这样 `deepseek-reasoner`（已声明）与 `deepseek-chat-think`（别名）都能识别，
     而 `doubao-unknown` 不会被误判成模式。
+
+    extra_suffixes 传 provider 声明的场景模式名（如 code），它们同样能当后缀用。
     """
     model = (model or "").strip()
+    extra = {s for s in extra_suffixes if s and s not in _ALIAS}
     for m in sorted(models, key=lambda x: len(x.id), reverse=True):
         if model == m.id:
             return m, []
         if model.startswith(m.id + "-"):
             toks = model[len(m.id) + 1:].split("-")
-            if toks and all(t in _ALIAS for t in toks):
+            if toks and all(t in _ALIAS or t in extra for t in toks):
                 return m, toks
     return None, []
 
@@ -87,7 +99,9 @@ def _as_bool(value: Any) -> Optional[bool]:
 
 def resolve_mode(pcfg: Any, req: Any) -> ModePlan:
     """把一次请求解析成 ModePlan（解析失败一律降级，不抛异常）。"""
-    base, suffixes = split_model(pcfg.models, getattr(req, "model", "") or "")
+    # 场景模式（如 code）也能当模型名后缀：qwen-max-code
+    scenes = [n for n in pcfg.modes if n not in STANDARD_MODES]
+    base, suffixes = split_model(pcfg.models, getattr(req, "model", "") or "", scenes)
     plan = ModePlan(base_model=base.id if base else "")
 
     # 0) 先铺底 quick 预设的开关状态：每轮请求都要把页面拉到确定状态，
@@ -108,7 +122,7 @@ def resolve_mode(pcfg: Any, req: Any) -> ModePlan:
 
     # 2) 模型名后缀（可叠加，后者覆盖前者）
     for tok in suffixes:
-        pid = _ALIAS[tok]
+        pid = _ALIAS.get(tok, tok)  # 不是内置别名就是场景模式名
         plan.preset_id = pid
         spec = pcfg.modes.get(pid)
         if spec:
@@ -164,11 +178,13 @@ def resolve_mode(pcfg: Any, req: Any) -> ModePlan:
 
 def alias_ids(pcfg: Any) -> list[str]:
     """该 provider 可用的模式别名（供 /v1/capabilities 展示）。"""
+    suffixes = [s for s in ("think", "search", "expert") if s in pcfg.modes]
+    # 页面绑定出来的场景模式（如 code）同样可用 <model>-<scene> 调用
+    suffixes += [n for n in pcfg.modes if n not in STANDARD_MODES]
     out: list[str] = []
     for m in pcfg.models:
-        for suffix in ("think", "search", "expert"):
-            if suffix in pcfg.modes:
-                out.append(f"{m.id}-{suffix}")
+        for suffix in suffixes:
+            out.append(f"{m.id}-{suffix}")
     return out
 
 

@@ -69,6 +69,44 @@ def test_unknown_suffix_not_treated_as_mode() -> None:
     assert toks == []
 
 
+def _scene_pcfg() -> ProviderConfig:
+    """页面绑定后生成的 qwen 形态：quick 关场景，code 开场景。"""
+    return ProviderConfig(
+        key="qwen",
+        models=[ModelDef(id="qwen-max", label="qwen-max")],
+        modes={
+            "quick": ModeSpecConfig(label="快速", features={"code": False}),
+            "code": ModeSpecConfig(label="代码", features={"code": True}),
+        },
+    )
+
+
+def test_scene_mode_reaches_page() -> None:
+    """code 不在 thinking/search 里，但必须原样传给 apply_mode（否则页面不会点）。"""
+    plan = resolve_mode(_scene_pcfg(), _req(model="qwen-max", mode="code"))
+    assert plan.preset_id == "code"
+    assert plan.changed_features == {"code": True}
+
+
+def test_quick_turns_scene_off() -> None:
+    plan = resolve_mode(_scene_pcfg(), _req(model="qwen-max"))
+    assert plan.preset_id == "quick"
+    assert plan.changed_features == {"code": False}
+
+
+def test_scene_suffix_alias() -> None:
+    plan = resolve_mode(_scene_pcfg(), _req(model="qwen-max-code"))
+    assert plan.base_model == "qwen-max"
+    assert plan.preset_id == "code"
+    assert plan.features["code"] is True
+
+
+def test_scene_alias_in_capabilities() -> None:
+    from app.core.modes import alias_ids
+
+    assert alias_ids(_scene_pcfg()) == ["qwen-max-code"]
+
+
 def test_both_features_on_maps_to_expert() -> None:
     plan = resolve_mode(_pcfg(), _req(thinking=True, search=True))
     assert plan.preset_id == "expert"

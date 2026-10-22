@@ -59,6 +59,16 @@ export const useProviderStore = defineStore('provider', () => {
     localStorage.setItem('w2a_modes', JSON.stringify(modes.value))
   }
 
+  // localStorage 里的勾选可能来自另一个 provider（如豆包已无思考/联网开关）：
+  // 能力表里没有的开关一律夹回 false，避免发出永远对不齐的参数
+  function clampModes() {
+    const m = modes.value
+    if (!supports.value.thinking) m.thinking = false
+    if (!supports.value.search) m.search = false
+    if (!m.thinking || !m.search) m.expert = false
+    saveModes()
+  }
+
   function loadModes() {
     try {
       const saved = JSON.parse(localStorage.getItem('w2a_modes') || 'null')
@@ -126,6 +136,7 @@ export const useProviderStore = defineStore('provider', () => {
       selectedModel.value = models.value.length ? models.value[0].id : ''
     }
     if (!loadModes()) applyModelModes()
+    clampModes()
   }
 
   async function fetchStatus() {

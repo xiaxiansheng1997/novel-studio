@@ -119,6 +119,13 @@ class QwenAdapter(BrowserStreamProvider):
         body.update(plan.body_patch)
         want_think = bool(plan.features.get("thinking"))
         want_search = bool(plan.features.get("search"))
+        # 场景模式（代码/翻译等）只能点页面 chip，body 里没有对应字段
+        scenes = [k for k, v in plan.changed_features.items() if v and k not in ("thinking", "search")]
+        if scenes:
+            raise ProviderError(
+                "qwen",
+                f"HTTP 快路径不支持场景模式 {scenes}，回落浏览器路径",
+            )
         if (want_think and "chat_mode" not in plan.body_patch) or (
             want_search and "deep_search" not in plan.body_patch
         ):

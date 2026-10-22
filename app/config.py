@@ -114,8 +114,8 @@ class AppConfig(BaseModel):
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
 
     @classmethod
-    def load(cls, path: Path) -> "AppConfig":
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    def from_raw(cls, raw: dict) -> "AppConfig":
+        raw = raw or {}
         providers: dict[str, ProviderConfig] = {}
         for key, val in (raw.get("providers") or {}).items():
             val = dict(val or {})
@@ -133,6 +133,10 @@ class AppConfig(BaseModel):
             providers=providers,
         )
 
+    @classmethod
+    def load(cls, path: Path) -> "AppConfig":
+        return cls.from_raw(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -144,4 +148,10 @@ def get_config() -> AppConfig:
     cfg_path = BASE_DIR / "config.yaml"
     if not cfg_path.exists():
         return AppConfig()
-    return AppConfig.load(cfg_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    # 页面「绑定」覆盖层（storage/ui-bindings.yaml）优先于 config.yaml 的 ui / models.label；
+    # 不直接改 config.yaml，避免 yaml 重写丢掉注释与手写字段。
+    from app.core.ui_bindings import bindings_path, load as load_bindings, merge as merge_bindings
+
+    raw = merge_bindings(raw, load_bindings(bindings_path(get_settings())))
+    return AppConfig.from_raw(raw)

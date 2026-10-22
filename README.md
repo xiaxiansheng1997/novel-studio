@@ -71,20 +71,21 @@ resp = client.chat.completions.create(
 
 ## 模型与模式（快速 / 深度思考 / 联网 / 专家）
 
-三家网页端的能力（模型下拉、深度思考、联网、专家模式）已经对齐到接口，两种用法可混用。
+接口支持模型下拉、深度思考、联网、专家模式四类能力，但**各家页面实际具备哪些以 `config.yaml` 为准**：只声明页面真实存在的开关，页面没有的不要配（否则每次请求都会记 `missing` 告警）。千问新版页面目前只保留了快速模式；豆包新版页面只剩「快速 / 专家」两个档位（模型下拉），没有深度思考/联网开关；DeepSeek 只有「深度思考」与「智能搜索」两枚开关。
 
 **一、模型名自带模式**（适合只会传 `model` 的客户端）
 
 | 写法 | 实际请求 |
 | --- | --- |
-| `qwen-max` / `doubao-pro` / `deepseek-chat` | 快速模式（思考、联网关） |
+| `qwen-max` / `deepseek-chat` | 快速模式（思考、联网关） |
+| `doubao-pro` / `doubao-lite` | 豆包「专家 / 快速」档位（页面无思考/联网开关） |
 | `deepseek-chat-think` | 深度思考 |
 | `deepseek-chat-search` | 联网搜索 |
 | `deepseek-chat-expert` | 思考 + 联网 |
 | `deepseek-reasoner` | 等价 `deepseek-chat-think`（模型自带思考） |
 | `deepseek-reasoner-search` | 后缀可叠加 |
 
-后缀是 `<基础模型>-quick/-think/-search/-expert`，`GET /v1/models` 会把别名一起列出来。
+后缀是 `<基础模型>-quick/-think/-search/-expert`，`GET /v1/models` 只列出该 provider 在 `modes` 里声明了对应预设的别名；未声明的后缀仍会被识别，但静默降级为页面当前状态（不报错，也不切换）。
 
 **二、请求参数**（`/v1/chat/completions` body 的额外字段）
 
@@ -92,11 +93,11 @@ resp = client.chat.completions.create(
 | --- | --- | --- |
 | `mode` | `quick` `think` `search` `expert` | 直接选预设 |
 | `thinking` | bool | 网页端「深度思考」 |
-| `search` | bool | 「联网搜索」 |
-| `reasoning_effort` | `low` `medium` `high` | 豆包对应档位；DeepSeek 的 `medium/high` 视为开思考 |
+| `search` | bool | 「联网搜索」（DeepSeek 现叫「智能搜索」，文案已兼容） |
+| `reasoning_effort` | `low` `medium` `high` | DeepSeek 的 `medium/high` 视为开思考 |
 | `web_search_options` | 对象 | 只要出现就视为开联网（兼容 OpenAI 写法） |
 
-优先级：`mode` 选预设，`thinking`/`search`/`reasoning_effort` 再覆盖具体开关；两者都高于模型名后缀与模型自带特性，未指定时按快速模式兜底。每轮都会先把页面拉到确定状态（没指定的开关显式关掉），避免上一轮的「深度思考/联网」残留影响本轮。
+优先级：`mode` 选预设，`thinking`/`search`/`reasoning_effort` 再覆盖具体开关；两者都高于模型名后缀与模型自带特性，未指定时按快速模式兜底。每轮会先把页面拉到确定状态（没指定的开关显式关掉），避免上一轮的「深度思考/联网」残留影响本轮——这只对 `ui` 段里配了定位文案的开关生效，没配的开关不会被触碰。
 
 ```python
 client.chat.completions.create(
@@ -114,8 +115,13 @@ client.chat.completions.create(
 
 1. 打开 `/live?provider=qwen`（或 doubao / deepseek）并点「连接」；
 2. 点「探测页面模式」，面板会列出页面上的可点控件与 `开/关` 状态，悬停可看 `aria-pressed`/`class`；`config.yaml` 里已声明的模型名与开关文案排在最前（模型下拉常在页面顶部，不只探输入框一带）；
-3. 没命中就把网页上的实际文字补进 `config.yaml` 对应 provider 的 `ui` 段（例如 `thinking: {labels: ["深度思考 (R1)"]}`）；状态读不出来时补 `active_class: "active"`，或设 `blind: true` 允许盲点；
-4. 点「应用模式」（即 `POST /live/mode/<key>`）当场验证，成功后管理页的「最近对齐」显示绿色。
+3. 在探测结果下方的「绑定」行里直接选：把对应文案指给「思考 / 联网」，模型下拉的触发文案与各模型在页面上的显示文案也在这里填；页面上的**场景开关**（如「代码 / 翻译 / AI 写作」这类带 `aria-pressed` 的 chip）可在「场景」一行选中文案、起个英文键名（如 `code`）后点「添加」，再点「保存绑定」；点「保存绑定」即写入 `storage/ui-bindings.yaml` 并立即热加载，**不用改 `config.yaml`、也不用重启**。模式预设会按绑定自动推导：始终有快速，绑了思考/联网就有对应模式，两个都绑才有专家模式，每个场景各出一个同名模式；
+4. 点「应用模式」（即 `POST /live/mode/<key>`）当场验证，成功后管理页的「最近对齐」显示绿色；
+5. 绑定不准就重新探测后再选；想回到 `config.yaml` 的出厂写法点「清除」（即 `DELETE /live/ui-bindings/<key>`）。手动改过 `config.yaml` 时仍可点「重载配置」让其生效。
+
+绑定的状态判定默认看 `aria-pressed`/`aria-checked`，读不出来时再按 `active_class` 正则判断；两者都没有的控件需要 `blind` 盲点，目前只在 `config.yaml` 的 `ui` 段里手写（绑定面板的「场景」候选只列带 `aria` 状态的控件），探测结果悬停可看该控件有没有 `aria` 状态可依据。
+
+自定义场景键只接受 `^[a-z][a-z0-9_]{0,23}$`（小写字母开头），不能与内置的 `thinking/search/model/quick/think/expert` 重名，最多 8 个。绑定后即可用 `extra_body={"mode": "code"}` 或模型名后缀 `qwen-max-code` 调用；快速模式会自动把上一轮留下的场景标签关掉，不会串到下一轮。
 
 模式对齐失败不会中断回答，只降级成告警并记 `missing`；设 `W2A_STRICT_MODE=1` 才会把未对齐当错误抛出。
 
@@ -126,7 +132,8 @@ client.chat.completions.create(
 - `config.yaml`：provider 开关、首页地址、模型列表、并发上限、全局每分钟限流（非敏感）。
 - `.env`（由 `.env.example` 复制）：`W2A_HOST/PORT`、可选 `W2A_API_KEY`（同时保护 `/v1` 与 `/admin/*`）、`W2A_STORAGE_DIR`。
 - 浏览器跨域/WS 来源：默认只放行本机与 `5173` 开发端口，需要时用 `W2A_ALLOW_ORIGINS` 追加（逗号分隔，`*` 全放开）。
-- 热加载：改完 `config.yaml` 后 `POST /admin/reload` 就地生效（模型/模式/并发/限流都会重建，无需重启；`GET` 会返回 405 提示）。
+- 页面绑定覆盖层：`storage/ui-bindings.yaml`（已 gitignore），由 `/live` 的「绑定」行写入；加载时覆盖 `config.yaml` 的 `ui` 与 `models[].label`，并按绑定的开关重建模式（标准四模式 + 每个自定义场景各一个同名模式；`body_patch`/`label` 仍沿用 `config.yaml`）。删掉该文件即完全回到 `config.yaml`。
+- 热加载：改完 `config.yaml` 后 `POST /admin/reload` 就地生效（模型/模式/并发/限流都会重建，无需重启；`GET` 会返回 405 提示），`/live` 的「页面模式」面板里也有同名按钮。保存页面绑定会自动触发同样的热加载。
 - 千问 HTTP 快路径开关：环境变量 `W2A_QWEN_HTTP=1`（需已 recon 出 `fixtures/qwen.json`）。
 - 真流式开关：`W2A_CDP_STREAM=1`（默认开）；异常时可设 `0` 退回整段读取。
 - SSE 心跳：`W2A_HEARTBEAT_SEC=15`（秒），思考阶段长期无增量时发注释行 `: ping`，防反代超时。
@@ -166,7 +173,7 @@ storage/    <浏览器 profile / 票据 / 会话库，已 gitignore>
 
 ### `/live/loggedin/<key>` 显示 false，但页面里明明登录了
 
-这是登录判定误报，不是真的掉登录。判定依赖的 cookie 名单是硬编码的，站点改版（例如千问从 `tongyi.aliyun.com` 迁到 `chat.qwen.ai`）后 cookie 全改名就会失效。现在会依次用「sentinel cookie → 特征 cookie 名 → localStorage → 页面外观（头像/登录按钮）」兜底判定，返回体里的 `cookie_names` 是实际存在的 cookie 名（不含值），可用于核对。
+这是登录判定误报，不是真的掉登录。判定依赖的 cookie 名单是硬编码的，站点改版（例如千问从 `tongyi.aliyun.com` 迁到 `chat.qwen.ai`，又迁到 `qianwen.com`）后 cookie 全改名就会失效。现在会依次用「sentinel cookie → 特征 cookie 名 → localStorage → 页面外观（头像/登录按钮）」兜底判定，返回体里的 `cookie_names` 是实际存在的 cookie 名（不含值），可用于核对。
 
 `GET /live/debug/<key>` 会返回页面地址、标题、登录判定、cookie 名与 localStorage 键名，排查时先打这个接口。
 
@@ -236,9 +243,13 @@ data: {"v":"植物"}                                                            
 - `temperature/top_p` 仍只是接受但不透传。
 - 页面结构/接口会变：失效时先重跑 `recon`，必要时微调 provider 的选择器与 `parse_payload`
   （对照 `fixtures/<key>.json` 里的 `response_sample`）。
+- 自定义场景目前只是「点一下页面上带 `aria-pressed` 的 chip」：千问的代码/翻译/AI 写作等场景互斥关系由站点决定，同一请求同时开多个场景时页面表现以站点为准；聊天页仍只有「深度思考 / 联网 / 专家」三枚按钮，自定义场景请在 `/live` 里绑定后通过 `mode` 参数或 `<model>-<场景>` 别名调用。
 - 切换模型/模式可能让站点新开一个会话（豆包换模型最明显），上游上下文会重置，`conversation_id` 映射不会自动迁移。
 - 模型是否已切换只看「按钮/下拉这类控件上的文字」，正文里提到某个模型名不算数（避免误判成已切换而一直用错模型）；代价是模型在下拉里显示的文案若与 `models[].label` 不一致，会多走一次「打开下拉再选一次」。
 - 模式切换本身有 0.3～1.5 秒开销；连续用同一模式不会重复点击。未校准的模式在千问 HTTP 快路径会回落到浏览器路径，速度更慢。
+- 千问网页端改版后（`qianwen.com`）只剩输入框下方的「快速」chip，没有深度思考/联网/模型下拉的稳定控件；`config.yaml` 里对应的 `modes`/`ui` 已先移除，调用 `qwen-*-think/search/expert` 会静默降级为页面当前状态。站点再次改版并出现新控件时，在 `/live` 里探测后直接用「绑定」行指回去即可，不必改 yaml。
+- 豆包 2026-10 改版后输入区只剩「豆包 快速 / 豆包 专家」模型档位，原来的「深度思考 / 联网搜索」开关已不存在：`doubao-pro` 映射「豆包 专家」、`doubao-lite` 映射「豆包 快速」，联网由站点自行决定；「更多技能」里的视频生成/帮我写作/PPT 等是一次性技能入口，没有开/关状态，**不能**当自定义场景绑定（不是盲点又无法判定状态，除非站点将来补上 `aria-pressed`）。
+- DeepSeek 页面只有「深度思考」与「智能搜索」两枚开关，没有场景 chip；这两个已按标准开关绑定，不需要再用「场景」行另加。
 - 参考项目 `LLM-Red-Team/qwen-free-api` 曾被曝供应链投毒，本项目未使用其代码，仅参考协议思路。
 
 ## 免责声明

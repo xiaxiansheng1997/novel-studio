@@ -15,28 +15,25 @@ providers:
     enabled: true
     display_name: "通义千问"
     model_prefix: "qwen-"
-    # 通义走 HTTP 快路径：用 Playwright 登录后取 login_tongyi_ticket，再用 httpx 直接打
-    home_url: "https://tongyi.aliyun.com/qianwen"
+    # 千问已迁到 qianwen.com（旧 tongyi.aliyun.com 会跳转，但登录判定按域名匹配，直接写新地址更稳）
+    home_url: "https://www.qianwen.com/"
     headless: true         # 千问反爬门槛低：无头运行→内嵌登录与聊天都不弹独立窗口（若登录被拦，改回 false）
     # 抓取真实接口前，endpoint 留空 -> 运行时报错提示执行 recon；recon 会把结果写入 fixtures/qwen.json
     endpoint: ""
     # label 是网页端模型下拉里的文案；留空 = 不驱动模型切换。
-    # 文案不对时用 /live 的「探测页面模式」看实际按钮文本，再回来改。
+    # 页面改版后顶部只显示「Qwen3.7-千问」，不再是这三串文案，先全部留空；
+    # 等用 /live 探测到下拉项的真实写法再填，否则每次请求都会记 missing=model。
     models:
-      - {id: qwen-max, label: "Qwen3-Max"}
-      - {id: qwen-plus, label: "Qwen3.5-Plus"}
-      - {id: qwen-turbo, label: "Qwen3-Turbo"}
+      - {id: qwen-max, label: ""}
+      - {id: qwen-plus, label: ""}
+      - {id: qwen-turbo, label: ""}
     # 模式预设：模型名后缀（-think/-search/-expert）与请求参数 mode 都映射到这里。
-    # body_patch 只对 HTTP 快路径生效；没校准过的字段不要写（宁可不发也不发错）。
+    # 新版页面只有输入框下方的「快速」chip，没有「深度思考/联网」按钮，也没有可点的模型下拉；
+    # 未校准的开关一律不配（配了每次请求都会记 missing 并告警）。body_patch 只对 HTTP 快路径生效。
     modes:
-      quick:  {label: "快速模式", features: {thinking: false}, body_patch: {chat_mode: "quick"}}
-      think:  {label: "深度思考", features: {thinking: true}}
-      search: {label: "联网搜索", features: {search: true}, body_patch: {deep_search: true}}
-      expert: {label: "专家模式", features: {thinking: true, search: true}}
-    ui:
-      thinking: {labels: ["深度思考", "思考"]}
-      search: {labels: ["联网搜索", "联网"]}
-      model: {labels: ["切换模型", "选择模型", "模型"]}
+      quick:  {label: "快速模式", body_patch: {chat_mode: "quick"}}
+    # ui 段可留空：改到 /live 面板的「绑定」行配置（存 storage/ui-bindings.yaml，不写回本文件）；
+    # 这里仍可写出厂默认值，页面绑定会覆盖它，点「清除」后回到这里。
     # 模式切换要点页面按钮，只能串行；并发 2 会让两条流互踩同一个输入框
     max_concurrency: 1
     # 相邻两次请求的最小间隔（秒，从上一次回复结束算起）。
@@ -50,20 +47,15 @@ providers:
     # 豆包依赖前端 X-Signature，走 Playwright 驱动真实页面 + 拦截响应
     home_url: "https://www.doubao.com/chat/"
     headless: false        # 豆包风控较严，建议有头运行以复用登录态
+    # 2026-10 实测：新版输入区只有「豆包 快速 / 豆包 专家」两个档位（模型下拉），
+    # 页面上的「深度思考 / 联网搜索」开关已移除；思考档用「专家」表达，联网由站点自动决定。
     models:
-      - {id: doubao-pro, label: ""}
-      - {id: doubao-lite, label: ""}
-    # 豆包的模式/模型在页面输入框一带：深度思考开关、模型/智能体下拉。
-    # 模型 label 先留空（换模型可能新开会话），探测到确切文案后再填。
+      - {id: doubao-pro, label: "豆包 专家"}
+      - {id: doubao-lite, label: "豆包 快速"}
     modes:
-      quick:  {label: "快速模式", features: {thinking: false}}
-      think:  {label: "深度思考", features: {thinking: true}}
-      search: {label: "联网搜索", features: {search: true}}
-      expert: {label: "专家模式", features: {thinking: true, search: true}}
+      quick: {label: "快速模式"}
     ui:
-      thinking: {labels: ["深度思考", "深度思考 (R1)"]}
-      search: {labels: ["联网搜索", "联网"]}
-      model: {labels: ["切换模型", "选择模型"]}
+      model: {labels: ["豆包 快速", "豆包 专家"]}
     max_concurrency: 1
 
   deepseek:
@@ -85,5 +77,6 @@ providers:
       expert: {label: "专家模式", features: {thinking: true, search: true}}
     ui:
       thinking: {labels: ["深度思考", "深度思考 (R1)", "R1"]}
-      search: {labels: ["联网搜索", "联网"]}
+      # 2026-10 实测：另一枚开关已改叫「智能搜索」（保留旧文案作站点 A/B 回退）
+      search: {labels: ["智能搜索", "联网搜索", "联网"]}
     max_concurrency: 1     # 官方封号严，务必保持极低并发

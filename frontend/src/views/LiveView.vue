@@ -88,18 +88,24 @@
         <div class="mode-head">
           <span class="mode-title"><AppIcon name="sliders" :size="14" /> 页面模式</span>
           <span class="mode-hint">
-            探测到的控件就是能命中的文案；没列出来的，把网页上的实际文字补进 config.yaml 的 ui 段
+            探测到的控件就是能命中的文案；带开/关状态的场景（如代码/翻译）可在下方加成自定义模式
           </span>
           <span class="mode-spacer"></span>
           <select v-model="modePreset" class="field mode-select" aria-label="模式预设" :disabled="!connected">
-            <option value="quick">快速模式</option>
-            <option value="think">深度思考</option>
-            <option value="search">联网搜索</option>
-            <option value="expert">专家模式（思考 + 联网）</option>
+            <option v-for="m in modeOptions" :key="m.id" :value="m.id">{{ m.label }}</option>
           </select>
           <button class="btn btn-sm" :disabled="!connected || probing" @click="probeModes">
             <AppIcon name="search" :size="13" />
             {{ probing ? '探测中…' : '探测页面模式' }}
+          </button>
+          <button
+            class="btn btn-sm"
+            title="重读 config.yaml 并就地生效，不用重启后端"
+            @click="reloadConfig"
+            :disabled="reloading"
+          >
+            <AppIcon name="refresh" :size="13" />
+            {{ reloading ? '重载中…' : '重载配置' }}
           </button>
           <button class="btn btn-sm" :disabled="!connected || applying" @click="applyPreset">
             <AppIcon name="check" :size="13" />
@@ -117,6 +123,55 @@
             {{ it.text }}
             <b v-if="probeState(it)">{{ probeState(it) }}</b>
           </span>
+        </div>
+        <!-- 页面内绑定：把探测到的控件指给「思考 / 联网 / 模型 / 自定义场景」，存到 storage/ui-bindings.yaml，不改 config.yaml -->
+        <div v-if="bindingLoaded" class="bind-row">
+          <span class="bind-title" :title="bindingsFile">绑定</span>
+          <label class="bind-field">
+            思考
+            <select v-model="bindThinking" class="field bind-select">
+              <option value="">未绑定</option>
+              <option v-for="t in probeTexts" :key="'bt-' + t" :value="t">{{ t }}</option>
+            </select>
+          </label>
+          <label class="bind-field">
+            联网
+            <select v-model="bindSearch" class="field bind-select">
+              <option value="">未绑定</option>
+              <option v-for="t in probeTexts" :key="'bs-' + t" :value="t">{{ t }}</option>
+            </select>
+          </label>
+          <label class="bind-field">
+            模型触发器
+            <input v-model="bindModelTrigger" class="field bind-input" placeholder="如：切换模型，可留空" />
+          </label>
+          <label v-for="m in modelLabels" :key="m.id" class="bind-field">
+            {{ m.id }}
+            <input v-model="m.label" class="field bind-input" placeholder="下拉里的文案，留空=不切" />
+          </label>
+          <span class="bind-title">场景</span>
+          <select v-model="customPick" class="field bind-select">
+            <option value="">选探测到的开关</option>
+            <option v-for="t in customCandidates" :key="'bc-' + t" :value="t">{{ t }}</option>
+          </select>
+          <input
+            v-model="customKey"
+            class="field bind-input bind-key"
+            placeholder="英文键名，如 code"
+            @keydown.enter.prevent="addCustom"
+          />
+          <button class="btn btn-sm" @click="addCustom" :disabled="!customPick || !customKey">添加</button>
+          <span v-for="c in customFeatures" :key="'cf-' + c.key" class="bind-tag" :title="'调用：mode=' + c.key">
+            {{ c.text }} <b>{{ c.key }}</b>
+            <button class="bind-x" @click="removeCustom(c.key)" title="移除">×</button>
+          </span>
+          <button class="btn btn-sm" @click="saveBindings" :disabled="savingBindings">
+            <AppIcon name="check" :size="12" />
+            {{ savingBindings ? '保存中…' : '保存绑定' }}
+          </button>
+          <button class="btn btn-sm" @click="clearBindings" :disabled="savingBindings" title="删除页面覆盖，回到 config.yaml 的写法">
+            清除
+          </button>
         </div>
       </section>
 
@@ -212,7 +267,61 @@ const autoSend = ref(true)
 const modePreset = ref('quick')
 const probing = ref(false)
 const applying = ref(false)
+const reloading = ref(false)
 const probeItems = ref([])
+const bindingLoaded = ref(false)
+const savingBindings = ref(false)
+const bindingsFile = ref('')
+const bindThinking = ref('')
+const bindSearch = ref('')
+const bindModelTrigger = ref('')
+const modelLabels = ref([])
+// 服务端可能给同一控件配了多个文案（站点 A/B），保存时只改首选、其余保留；
+// active_class / blind 面板不编辑，但必须原样带回，否则保存一次就被抹掉。
+const uiPools = ref({ thinking: [], search: [], model: [] })
+const uiExtras = ref({ thinking: {}, search: {}, model: {} })
+const bindingModes = ref([])
+const customFeatures = ref([])
+const customPick = ref('')
+const customKey = ref('')
+const STD_MODES = [
+  { id: 'quick', label: '快速模式' },
+  { id: 'think', label: '深度思考' },
+  { id: 'search', label: '联网搜索' },
+  { id: 'expert', label: '专家模式（思考 + 联网）' },
+]
+const STD_FEATURES = ['thinking', 'search', 'model']
+const RESERVED_KEYS = ['thinking', 'search', 'model', 'quick', 'think', 'expert']
+const probeTexts = computed(() => {
+  const out = []
+  for (const it of probeItems.value) {
+    if (it.text && !out.includes(it.text)) out.push(it.text)
+  }
+  for (const v of [bindThinking.value, bindSearch.value, bindModelTrigger.value]) {
+    if (v && !out.includes(v)) out.push(v)
+  }
+  for (const c of customFeatures.value) {
+    if (c.text && !out.includes(c.text)) out.push(c.text)
+  }
+  return out
+})
+const customCandidates = computed(() => {
+  const used = new Set(
+    [bindThinking.value, bindSearch.value, bindModelTrigger.value, ...customFeatures.value.map((c) => c.text)].filter(Boolean)
+  )
+  const out = []
+  for (const it of probeItems.value) {
+    if (!it.text || used.has(it.text)) continue
+    // 只收带 aria 状态的控件：自定义场景在 quick 里要能被关掉，盲点会每轮报 missing
+    if (it.pressed == null && it.checked == null) continue
+    if (!out.includes(it.text)) out.push(it.text)
+  }
+  return out
+})
+const modeOptions = computed(() => {
+  const list = bindingModes.value.length ? bindingModes.value : STD_MODES
+  return list.map((m) => ({ id: m.id, label: m.label || m.id }))
+})
 let ws = null
 let composing = false
 let logicalW = 1280, logicalH = 800, dsf = 1
@@ -257,6 +366,7 @@ function connect() {
   if (ws) { ws.close(); ws = null }
   // 换一个站点就是一个新页面，上次的探测结果留着会误导
   probeItems.value = []
+  bindingLoaded.value = false
   // 记录“用户想保持连接”：即使这次开浏览器失败，下次回到 /live 也自动重试
   try {
     localStorage.setItem(PROVIDER_KEY, provider.value)
@@ -273,6 +383,7 @@ function connect() {
     connected.value = true
     statusText.value = '已连接'
     appendLog('连接成功')
+    loadBindings()
   }
   ws.onclose = () => { connected.value = false; statusText.value = '未连接'; frameSrc.value = ''; appendLog('连接已断开') }
   ws.onerror = () => { statusText.value = '连接错误'; appendLog('WebSocket 连接错误') }
@@ -401,7 +512,7 @@ async function probeModes() {
     if (!r.ok) throw new Error(await readError(r))
     const j = await r.json()
     probeItems.value = j.items || []
-    appendLog(`探测到 ${probeItems.value.length} 个可点控件（悬停可看 aria/class），未命中就改 config.yaml 的 ui 段后点「重载配置」`)
+    appendLog(`探测到 ${probeItems.value.length} 个可点控件（悬停可看 aria/class）；在下方「绑定」里选对应控件，带开/关状态的场景可加成自定义模式，保存即生效（不用改 yaml）`)
   } catch (e) {
     appendLog('探测失败：' + e.message, 'err')
   } finally {
@@ -422,7 +533,7 @@ async function applyPreset() {
     const j = await r.json()
     const label = j.mode || modePreset.value
     if (j.ok) appendLog(`✓ 模式已对齐 ${label}，用时 ${j.ms}ms`)
-    else appendLog(`✗ 模式部分未对齐 ${label}，缺失=${(j.missing || []).join('/')}（先探测文案再校准）`, 'err')
+    else appendLog(`✗ 模式部分未对齐 ${label}，缺失=${(j.missing || []).join('/')}（先点「重载配置」让新文案生效；仍失败就重新探测校准）`, 'err')
     for (const d of j.details || []) {
       appendLog(`  · ${d.feature} want=${d.want} ${d.action || d.reason || ''}`)
     }
@@ -430,6 +541,152 @@ async function applyPreset() {
     appendLog('应用模式失败：' + e.message, 'err')
   } finally {
     applying.value = false
+  }
+}
+
+async function reloadConfig() {
+  reloading.value = true
+  try {
+    const r = await fetch('/admin/reload', { method: 'POST', headers: apiHeaders() })
+    if (!r.ok) throw new Error(await readError(r))
+    const j = await r.json()
+    const models = Object.entries(j.models || {}).map(([k, v]) => `${k}×${v}`).join(' ')
+    appendLog(`✓ 配置已重载：${(j.providers || []).length} 个 provider，模型 ${models || '-'}`)
+    // 旧探测结果对应旧配置，先清掉；当前 provider 有变化时顺手重探一次，省一步手点
+    probeItems.value = []
+    const touched = [...(j.added || []), ...(j.updated || [])]
+    if (connected.value && touched.includes(provider.value)) await probeModes()
+    else if (connected.value) appendLog('当前 provider 未被更新（可能已从配置移除），跳过重新探测')
+  } catch (e) {
+    const tip = /HTTP 401/.test(e.message) ? '（先在设置里填 API Key）' : ''
+    appendLog('重载配置失败：' + e.message + tip, 'err')
+  } finally {
+    reloading.value = false
+  }
+}
+
+// ---- 页面内绑定：探测到的文案 -> 思考/联网/模型/自定义场景 -> storage/ui-bindings.yaml ----
+function applyBindings(j) {
+  bindingLoaded.value = true
+  bindingsFile.value = j.bindings_file || ''
+  const ui = j.ui || {}
+  const pools = {}
+  const extras = {}
+  const custom = []
+  for (const [name, ctl] of Object.entries(ui)) {
+    pools[name] = [...(ctl.labels || [])]
+    const extra = {}
+    if (ctl.active_class) extra.active_class = ctl.active_class
+    if (ctl.blind) extra.blind = true
+    extras[name] = extra
+    if (!STD_FEATURES.includes(name)) custom.push({ key: name, text: pools[name][0] || name })
+  }
+  uiPools.value = pools
+  uiExtras.value = extras
+  customFeatures.value = custom
+  bindThinking.value = pools.thinking?.[0] || ''
+  bindSearch.value = pools.search?.[0] || ''
+  bindModelTrigger.value = pools.model?.[0] || ''
+  modelLabels.value = (j.models || []).map((m) => ({ id: m.id, label: m.label || '' }))
+  bindingModes.value = j.modes || []
+  if (!bindingModes.value.some((m) => m.id === modePreset.value)) modePreset.value = 'quick'
+}
+
+function bindPayload(name, picked) {
+  if (!picked) return null
+  const labels = []
+  for (const v of [picked, ...(uiPools.value[name] || [])]) {
+    if (v && !labels.includes(v)) labels.push(v)
+  }
+  return { labels, ...uiExtras.value[name] }
+}
+
+function addCustom() {
+  const text = customPick.value
+  const key = customKey.value.trim().toLowerCase()
+  if (!text || !key) return
+  if (!/^[a-z][a-z0-9_]{0,23}$/.test(key)) {
+    appendLog('键名只能用 a-z、0-9、_，以小写字母开头，最长 24 位', 'err')
+    return
+  }
+  if (RESERVED_KEYS.includes(key)) {
+    appendLog(`「${key}」是内置开关/模式名，换一个，比如 code / translate`, 'err')
+    return
+  }
+  if (customFeatures.value.some((c) => c.key === key)) {
+    appendLog(`键名 ${key} 已经绑过了`, 'err')
+    return
+  }
+  if (customFeatures.value.length >= 8) {
+    appendLog('最多绑定 8 个自定义场景', 'err')
+    return
+  }
+  customFeatures.value.push({ key, text })
+  customPick.value = ''
+  customKey.value = ''
+  appendLog(`已添加场景「${text}」→ ${key}，点「保存绑定」生效`)
+}
+
+function removeCustom(key) {
+  customFeatures.value = customFeatures.value.filter((c) => c.key !== key)
+  appendLog(`已移除场景 ${key}（点「保存绑定」生效）`)
+}
+
+async function loadBindings() {
+  try {
+    const r = await fetch(`/live/ui-bindings/${provider.value}`, { headers: apiHeaders() })
+    if (!r.ok) return
+    applyBindings(await r.json())
+  } catch (_) { /* 绑定面板失败不影响聊天 */ }
+}
+
+async function saveBindings() {
+  savingBindings.value = true
+  try {
+    const ui = {}
+    const th = bindPayload('thinking', bindThinking.value)
+    if (th) ui.thinking = th
+    const se = bindPayload('search', bindSearch.value)
+    if (se) ui.search = se
+    const trigger = bindModelTrigger.value.trim()
+    const mo = bindPayload('model', trigger)
+    if (mo) ui.model = mo
+    for (const c of customFeatures.value) {
+      const item = bindPayload(c.key, c.text)
+      if (item) ui[c.key] = item
+    }
+    const models = {}
+    for (const m of modelLabels.value) if (m.label.trim()) models[m.id] = m.label.trim()
+    const r = await fetch(`/live/ui-bindings/${provider.value}`, {
+      method: 'POST',
+      headers: apiHeaders(true),
+      body: JSON.stringify({ ui, models }),
+    })
+    if (!r.ok) throw new Error(await readError(r))
+    applyBindings(await r.json())
+    const scenes = customFeatures.value.map((c) => `${c.text}=${c.key}`).join(' ')
+    appendLog(`✓ 绑定已保存并生效：思考=${bindThinking.value || '无'}，联网=${bindSearch.value || '无'}，模型=${trigger || '不切'}${scenes ? `，场景 ${scenes}` : ''}`)
+    appendLog('  点「应用模式」验证；要回退到 config.yaml 的写法就点「清除」')
+    if (connected.value) await probeModes()
+  } catch (e) {
+    appendLog('保存绑定失败：' + e.message, 'err')
+  } finally {
+    savingBindings.value = false
+  }
+}
+
+async function clearBindings() {
+  savingBindings.value = true
+  try {
+    const r = await fetch(`/live/ui-bindings/${provider.value}`, { method: 'DELETE', headers: apiHeaders() })
+    if (!r.ok) throw new Error(await readError(r))
+    applyBindings(await r.json())
+    appendLog('✓ 已清除页面绑定，回到 config.yaml 的写法')
+    if (connected.value) await probeModes()
+  } catch (e) {
+    appendLog('清除绑定失败：' + e.message, 'err')
+  } finally {
+    savingBindings.value = false
   }
 }
 
@@ -746,6 +1003,70 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocke
 }
 .probe-chip.on b {
   color: inherit;
+}
+.bind-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+.bind-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+.bind-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.bind-select {
+  width: 126px;
+  height: 26px;
+  padding-right: 24px;
+  font-size: 11.5px;
+}
+.bind-input {
+  width: 150px;
+  height: 26px;
+  font-size: 11.5px;
+}
+.bind-key {
+  width: 118px;
+}
+.bind-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.bind-tag b {
+  color: var(--run);
+  font-weight: 600;
+}
+.bind-x {
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 3px;
+}
+.bind-x:hover {
+  color: var(--danger);
 }
 
 /* 画面 */

@@ -13,6 +13,8 @@
   --panel-2: #0f1621;
   --line: #1e2a3a;
   --line-soft: #16202d;
+  /* 与 tailwind.config.js 的 line.strong 保持一致；focus/悬浮态用 */
+  --line-strong: #2c3b50;
   --text: #e8eef7;
   --text-muted: #a3b0c2;
   --text-faint: #6c7c92;

@@ -151,6 +151,98 @@ async def live_ui_probe(request: Request, key: str):
     return {"key": key, "url": sess.page.url, "items": items}
 
 
+def _reload_runtime_config(request: Request):
+    """重读 config.yaml + 页面绑定覆盖层，并就地应用到运行中的适配器。"""
+    from app.config import get_config
+
+    get_config.cache_clear()
+    cfg = get_config()
+    reg = getattr(request.app.state, "registry", None)
+    summary = reg.apply_config(cfg) if reg else {"added": [], "updated": [], "removed": []}
+    request.app.state.config = cfg
+    return cfg, summary
+
+
+def _bindings_view(request: Request, key: str, cfg) -> dict:
+    """配置文件 + 覆盖层合并后的有效绑定，供 /live 面板回填。"""
+    from app.core.ui_bindings import bindings_path
+
+    pcfg = cfg.providers.get(key)
+    if pcfg is None:
+        return {}
+    reg = getattr(request.app.state, "registry", None)
+    adapter = reg.get(key) if reg else None
+    return {
+        "key": key,
+        "bindings_file": str(bindings_path(request.app.state.settings)),
+        "ui": {
+            name: {
+                "labels": list(ctl.labels or []),
+                "active_class": ctl.active_class or "",
+                "blind": bool(ctl.blind),
+            }
+            for name, ctl in (pcfg.ui or {}).items()
+        },
+        "models": [{"id": m.id, "label": m.label or ""} for m in (pcfg.models or [])],
+        "modes": [
+            {"id": name, "label": spec.label or name, "features": spec.features}
+            for name, spec in (pcfg.modes or {}).items()
+        ],
+        "last_mode_status": adapter.last_mode_status if adapter else None,
+    }
+
+
+@router.get("/live/ui-bindings/{key}")
+async def live_ui_bindings(request: Request, key: str):
+    """当前生效的控件绑定（config.yaml 与 storage/ui-bindings.yaml 合并后）。"""
+    settings = request.app.state.settings
+    if not _origin_ok(request.headers.get("origin"), settings) or not _key_ok(_bearer(request), settings):
+        return JSONResponse(status_code=403, content={"error": {"message": "forbidden", "type": "forbidden"}})
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is None or key not in cfg.providers:
+        return JSONResponse(status_code=404, content={"error": {"message": f"未知 provider: {key}", "type": "not_found"}})
+    return _bindings_view(request, key, cfg)
+
+
+@router.post("/live/ui-bindings/{key}")
+async def live_ui_bindings_save(request: Request, key: str):
+    """保存页面上的绑定并立即热加载（不写 config.yaml，只写 storage/ui-bindings.yaml）。"""
+    settings = request.app.state.settings
+    if not _origin_ok(request.headers.get("origin"), settings) or not _key_ok(_bearer(request), settings):
+        return JSONResponse(status_code=403, content={"error": {"message": "forbidden", "type": "forbidden"}})
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is None or key not in cfg.providers:
+        return JSONResponse(status_code=404, content={"error": {"message": f"未知 provider: {key}", "type": "not_found"}})
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - 空 body = 清空该 provider 的覆盖
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    from app.core.ui_bindings import bindings_path, save_provider
+
+    entry = save_provider(bindings_path(settings), key, body)
+    new_cfg, summary = _reload_runtime_config(request)
+    logger.info(f"[live:{key}] 页面绑定已保存: ui={list(entry.get('ui', {}))} models={entry.get('models', {})}")
+    return {"saved": True, "override": entry, "reloaded": summary, **_bindings_view(request, key, new_cfg)}
+
+
+@router.delete("/live/ui-bindings/{key}")
+async def live_ui_bindings_clear(request: Request, key: str):
+    """删除该 provider 的页面覆盖，回到 config.yaml 里的写法。"""
+    settings = request.app.state.settings
+    if not _origin_ok(request.headers.get("origin"), settings) or not _key_ok(_bearer(request), settings):
+        return JSONResponse(status_code=403, content={"error": {"message": "forbidden", "type": "forbidden"}})
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is None or key not in cfg.providers:
+        return JSONResponse(status_code=404, content={"error": {"message": f"未知 provider: {key}", "type": "not_found"}})
+    from app.core.ui_bindings import bindings_path, save_provider
+
+    save_provider(bindings_path(settings), key, {})
+    new_cfg, summary = _reload_runtime_config(request)
+    logger.info(f"[live:{key}] 页面绑定已清除，回升到 config.yaml")
+    return {"cleared": True, "reloaded": summary, **_bindings_view(request, key, new_cfg)}
+
+
 @router.post("/live/mode/{key}")
 async def live_set_mode(request: Request, key: str):
     """在 /live 页面上立即切到指定模式（校准与手动控制用）。"""
