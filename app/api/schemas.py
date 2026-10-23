@@ -39,6 +39,11 @@ class ChatCompletionRequest(BaseModel):
     search: Optional[bool] = None
     # 模式预设（quick/think/search/expert）：与模型名后缀是双轨，参数优先
     mode: Optional[str] = None
+    # 重新生成：先丢弃该会话末尾的助手回复，再按同样的用户消息重跑
+    # （前端把最后一条用户消息再发一遍；服务端不会重复落库同一句）
+    regenerate: bool = False
+    # 多轮策略覆盖：site = 用站点自己的会话；prompt = 每轮自己拼历史（不传则用 provider 配置）
+    history_mode: Optional[Literal["site", "prompt"]] = None
     # OpenAI o 系列风格：medium/high 视为要深度思考
     reasoning_effort: Optional[str] = None
     # OpenAI 联网搜索开关，等价 search=true

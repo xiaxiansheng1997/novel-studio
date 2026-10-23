@@ -165,6 +165,8 @@ class ConversationStore:
         assert self._db is not None
         async with self._lock:
             await self._db.execute("DELETE FROM messages WHERE conversation_id = ?", (conv_id,))
+            # 会话删了，站点会话映射也要清：否则重建同名 id 时会拿到旧站点会话
+            await self._db.execute("DELETE FROM sessions WHERE conv_key LIKE ?", (f"%::{conv_id}",))
             await self._db.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
             await self._db.commit()
         return True
@@ -209,6 +211,76 @@ class ConversationStore:
             )
             rows = await cur.fetchall()
         return [dict(r) for r in reversed(rows)]
+
+    async def last_message(self, conv_id: str) -> Optional[dict[str, Any]]:
+        """最后一条消息（按 rowid 而非时间戳，避免同秒写入排序不稳）。"""
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT id, role, content, reasoning_content, created_at "
+                "FROM messages WHERE conversation_id = ? ORDER BY rowid DESC LIMIT 1",
+                (conv_id,),
+            )
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def delete_trailing_assistant(self, conv_id: str) -> int:
+        """删掉最后一条用户消息之后的助手回复（重新生成用），返回删除条数。"""
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "DELETE FROM messages WHERE conversation_id = ? AND role = 'assistant' "
+                "AND rowid > COALESCE((SELECT MAX(rowid) FROM messages "
+                "WHERE conversation_id = ? AND role = 'user'), 0)",
+                (conv_id, conv_id),
+            )
+            await self._db.commit()
+        return cur.rowcount or 0
+
+    async def delete_from_message(self, conv_id: str, msg_id: str) -> int:
+        """从指定消息起（含）删除其后所有消息（编辑重发用），返回删除条数。
+
+        原子查询不用 COALESCE：消息不存在时子查询为 NULL，比较不成立，
+        一行也不会删（防拿错 id 把整个会话删空）。
+        """
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "DELETE FROM messages WHERE conversation_id = ? AND rowid >= "
+                "(SELECT rowid FROM messages WHERE id = ? AND conversation_id = ?)",
+                (conv_id, msg_id, conv_id),
+            )
+            await self._db.commit()
+        return cur.rowcount or 0
+
+    async def search_messages(self, q: str, limit: int = 20) -> list[dict[str, Any]]:
+        """按正文/思考内容搜消息（LIKE，不建全文索引），命中处附近截一段做摘要。"""
+        assert self._db is not None
+        esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{esc}%"
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT m.id AS message_id, m.conversation_id, m.role, m.content, m.created_at, "
+                "c.title, c.provider, c.model "
+                "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+                "WHERE m.content LIKE ? ESCAPE '\\' OR m.reasoning_content LIKE ? ESCAPE '\\' "
+                "ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
+                (pattern, pattern, limit),
+            )
+            rows = await cur.fetchall()
+        out: list[dict[str, Any]] = []
+        low = q.lower()
+        for r in rows:
+            item = dict(r)
+            text = item.get("content") or ""
+            idx = text.lower().find(low)
+            if idx < 0:
+                item["snippet"] = text[:90]
+            else:
+                start = max(0, idx - 40)
+                item["snippet"] = ("…" if start else "") + text[start : idx + len(q) + 50].replace("\n", " ")
+            out.append(item)
+        return out
 
     async def auto_title(self, conv_id: str, first_message: str) -> None:
         """用第一条用户消息的前 20 字自动生成标题。"""

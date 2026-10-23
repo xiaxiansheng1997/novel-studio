@@ -16,11 +16,33 @@ from app.api import admin_routes, conversation_routes, live_routes, openai_route
 from app.config import BASE_DIR, get_settings
 from app.core.auth import allowed_origins
 from app.core.errors import W2AError
-from app.core.request_log import RequestLogMiddleware
+from app.core.request_log import RequestLogMiddleware, log_patcher
 from app.runtime import build_runtime, setup, teardown
 
-WEB_DIR = BASE_DIR / "web"
+# 请求内的日志统一带 [rid] 前缀（patcher 改 record，不挑 sink 格式）
+logger.configure(patcher=log_patcher)
+
+_WEB_DIR = BASE_DIR / "web"
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
+
+
+def _add_file_sink(rt) -> int:
+    """日志落盘：storage/logs/web2api_<日期>.log，按天轮转保留 14 天。
+
+    enqueue=True 让写盘不阻塞事件循环（Windows 上尤其明显）。
+    """
+    log_dir = rt.settings.resolved_storage_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return logger.add(
+        str(log_dir / "web2api_{time:YYYY-MM-DD}.log"),
+        rotation="00:00",
+        retention="14 days",
+        encoding="utf-8",
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+        level=rt.config.log_level or "INFO",
+    )
 
 
 @asynccontextmanager
@@ -34,6 +56,7 @@ async def lifespan(app: FastAPI):
         )
     rt = build_runtime()
     await setup(rt)
+    sink_id = _add_file_sink(rt)
     app.state.settings = rt.settings
     app.state.config = rt.config
     app.state.sessions = rt.sessions
@@ -42,12 +65,17 @@ async def lifespan(app: FastAPI):
     app.state.live = rt.live
     logger.info(
         f"Web2API v{__version__} 已启动 | providers={list(rt.registry.adapters.keys())} "
-        f"| http://{rt.settings.host}:{rt.settings.port}/v1"
+        f"| http://{rt.settings.host}:{rt.settings.port}/v1 "
+        f"| 日志={rt.settings.resolved_storage_dir() / 'logs'}"
     )
     try:
         yield
     finally:
         await teardown(rt)
+        try:
+            logger.remove(sink_id)  # 先关文件 sink，避免 teardown 日志写进已关闭的文件
+        except ValueError:
+            pass
         logger.info("Web2API 已优雅关停")
 
 
@@ -73,6 +101,10 @@ async def w2a_error_handler(request: Request, exc: W2AError):
     retry_after = getattr(exc, "retry_after", None)
     if isinstance(retry_after, (int, float)) and retry_after > 0:
         headers["Retry-After"] = str(int(retry_after + 0.999))
+    # 出错时把 trace id 也回给对方：报障时能直接对上 /admin/logs 与落盘日志
+    rid = getattr(request.state, "rid", "")
+    if rid:
+        headers["X-W2A-Request-Id"] = rid
     return JSONResponse(
         status_code=exc.status,
         content={"error": {"message": exc.message, "type": exc.type, "code": exc.code}},
@@ -116,5 +148,5 @@ if FRONTEND_DIST.exists():
             return FileResponse(str(index))
         return {"error": "Frontend not built"}
 
-elif WEB_DIR.exists():
-    app.mount("/ui", StaticFiles(directory=str(WEB_DIR), html=True), name="ui")
+elif _WEB_DIR.exists():
+    app.mount("/ui", StaticFiles(directory=str(_WEB_DIR), html=True), name="ui")

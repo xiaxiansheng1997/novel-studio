@@ -29,8 +29,16 @@
         <p v-if="!message.content && !streaming" class="bubble-empty">（空回复）</p>
       </div>
 
-      <div v-if="!streaming && message.content" class="msg-actions">
-        <button class="action-btn" :aria-label="copied ? '已复制' : '复制内容'" @click="copyText">
+      <div v-if="!streaming && (message.content || showRegenerate || showEdit)" class="msg-actions">
+        <button v-if="showRegenerate" class="action-btn" title="重新生成这条回答" @click="$emit('regenerate')">
+          <AppIcon name="refresh" :size="13" />
+          <span>重新生成</span>
+        </button>
+        <button v-if="showEdit" class="action-btn" title="编辑这条提问并重发" @click="$emit('edit')">
+          <AppIcon name="edit" :size="13" />
+          <span>编辑</span>
+        </button>
+        <button v-if="message.content" class="action-btn" :aria-label="copied ? '已复制' : '复制内容'" @click="copyText">
           <AppIcon :name="copied ? 'check' : 'copy'" :size="13" />
           <span>{{ copied ? '已复制' : '复制' }}</span>
         </button>
@@ -47,7 +55,11 @@ import AppIcon from './AppIcon.vue'
 const props = defineProps({
   message: { type: Object, required: true },
   streaming: { type: Boolean, default: false },
+  // 只有「最后一条」消息才露出重新生成 / 编辑：中间轮次改了也会被后续回答覆盖
+  showRegenerate: { type: Boolean, default: false },
+  showEdit: { type: Boolean, default: false },
 })
+defineEmits(['regenerate', 'edit'])
 
 const showReasoning = ref(false)
 const copied = ref(false)

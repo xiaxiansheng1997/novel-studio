@@ -10,15 +10,32 @@
 
     <div class="search-box">
       <AppIcon name="search" :size="15" class="search-icon" />
-      <input v-model="search" class="search-input" placeholder="搜索会话" aria-label="搜索会话" />
+      <input v-model="search" class="search-input" placeholder="搜索会话或消息" aria-label="搜索会话或消息" />
       <button v-if="search" class="search-clear" aria-label="清空搜索" @click="search = ''">
         <AppIcon name="x" :size="13" />
       </button>
     </div>
 
     <div class="conv-list">
+      <div v-if="search && messageHits.length" class="hit-group">
+        <div class="conv-group-label">
+          <span>消息命中</span>
+          <span class="conv-count">{{ messageHits.length }}</span>
+        </div>
+        <button
+          v-for="hit in messageHits"
+          :key="hit.message_id"
+          class="hit-item"
+          :title="hit.title || '新对话'"
+          @click="openHit(hit)"
+        >
+          <span class="hit-title">{{ hit.title || '新对话' }}</span>
+          <span class="hit-snippet">{{ hit.snippet }}</span>
+        </button>
+      </div>
+
       <div class="conv-group-label">
-        <span>最近对话</span>
+        <span>{{ search ? '匹配会话' : '最近对话' }}</span>
         <span class="conv-count">{{ filteredConversations.length }}</span>
       </div>
 
@@ -28,21 +45,38 @@
         class="conv-item"
         :class="{ active: conv.id === activeId }"
       >
-        <button class="conv-main" @click="$emit('select', conv.id)">
-          <span class="conv-title">{{ conv.title || '新对话' }}</span>
-          <span class="conv-meta">
-            <span class="conv-provider">{{ conv.provider || conv.model || '未知模型' }}</span>
-            <span v-if="conv.updated_at" class="conv-time">{{ formatTime(conv.updated_at) }}</span>
-          </span>
-        </button>
-        <button class="conv-delete" title="删除会话" aria-label="删除会话" @click.stop="$emit('delete', conv.id)">
-          <AppIcon name="trash" :size="14" />
-        </button>
+        <div v-if="renamingId === conv.id" class="conv-rename">
+          <input
+            v-model="renameText"
+            class="rename-input"
+            maxlength="60"
+            aria-label="重命名会话"
+            @keydown.enter.prevent="commitRename(conv)"
+            @keydown.esc.prevent="cancelRename"
+            @blur="commitRename(conv)"
+            @click.stop
+          />
+        </div>
+        <template v-else>
+          <button class="conv-main" @click="$emit('select', conv.id)">
+            <span class="conv-title">{{ conv.title || '新对话' }}</span>
+            <span class="conv-meta">
+              <span class="conv-provider">{{ conv.provider || conv.model || '未知模型' }}</span>
+              <span v-if="conv.updated_at" class="conv-time">{{ formatTime(conv.updated_at) }}</span>
+            </span>
+          </button>
+          <button class="conv-rename-btn" title="重命名会话" aria-label="重命名会话" @click.stop="startRename(conv)">
+            <AppIcon name="edit" :size="13" />
+          </button>
+          <button class="conv-delete" title="删除会话" aria-label="删除会话" @click.stop="$emit('delete', conv.id)">
+            <AppIcon name="trash" :size="14" />
+          </button>
+        </template>
       </div>
 
-      <div v-if="!filteredConversations.length" class="empty-hint">
+      <div v-if="!filteredConversations.length && !messageHits.length" class="empty-hint">
         <AppIcon name="chat" :size="20" />
-        <span>{{ search ? '没有匹配的会话' : '还没有对话，发一条消息就会出现在这里' }}</span>
+        <span>{{ search ? '没有匹配的会话或消息' : '还没有对话，发一条消息就会出现在这里' }}</span>
       </div>
     </div>
 
@@ -57,7 +91,8 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onUnmounted, nextTick } from 'vue'
+import { useChatStore } from '../stores/chat'
 import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
@@ -65,7 +100,9 @@ const props = defineProps({
   activeId: { type: String, default: null },
   collapsed: { type: Boolean, default: false },
 })
-defineEmits(['new-chat', 'select', 'delete', 'toggle'])
+const emit = defineEmits(['new-chat', 'select', 'delete', 'rename', 'toggle'])
+
+const chatStore = useChatStore()
 
 const search = ref('')
 const filteredConversations = computed(() => {
@@ -74,6 +111,52 @@ const filteredConversations = computed(() => {
   const q = search.value.toLowerCase()
   return list.filter(c => (c.title || '').toLowerCase().includes(q))
 })
+
+// 消息全文搜索：标题过滤在本地做，正文命中走后端 /v1/search（防抖 300ms）
+const messageHits = ref([])
+let hitsTimer = 0
+watch(search, q => {
+  clearTimeout(hitsTimer)
+  const kw = (q || '').trim()
+  if (kw.length < 2) {
+    messageHits.value = []
+    return
+  }
+  hitsTimer = setTimeout(async () => {
+    messageHits.value = await chatStore.searchMessages(kw)
+  }, 300)
+})
+onUnmounted(() => clearTimeout(hitsTimer))
+
+function openHit(hit) {
+  emit('select', hit.conversation_id)
+}
+
+// 行内重命名
+const renamingId = ref(null)
+const renameText = ref('')
+
+async function startRename(conv) {
+  renamingId.value = conv.id
+  renameText.value = conv.title || ''
+  await nextTick()
+  const el = document.querySelector('.rename-input')
+  el?.focus()
+  el?.select()
+}
+
+function cancelRename() {
+  renamingId.value = null
+}
+
+function commitRename(conv) {
+  // Enter 提交后 blur 还会再进一次，用 renamingId 守卫
+  if (renamingId.value !== conv.id) return
+  const title = renameText.value.trim()
+  renamingId.value = null
+  if (!title || title === (conv.title || '')) return
+  emit('rename', { id: conv.id, title })
+}
 
 function formatTime(ts) {
   if (!ts) return ''
@@ -278,6 +361,83 @@ function formatTime(ts) {
 }
 .conv-delete:hover {
   color: var(--danger);
+}
+
+/* 行内重命名 */
+.conv-rename-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease), color 0.15s var(--ease);
+}
+.conv-item:hover .conv-rename-btn,
+.conv-rename-btn:focus-visible {
+  opacity: 1;
+}
+.conv-rename-btn:hover {
+  color: var(--text);
+}
+.conv-rename {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+}
+.rename-input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid rgba(34, 197, 94, 0.55);
+  background: #0d131d;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+/* 消息命中 */
+.hit-group {
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px dashed var(--line-soft);
+}
+.hit-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.16s var(--ease);
+}
+.hit-item:hover {
+  background: #101722;
+}
+.hit-title {
+  font-size: 12px;
+  color: #86efac;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hit-snippet {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-faint);
+  word-break: break-word;
 }
 
 /* 空态 */

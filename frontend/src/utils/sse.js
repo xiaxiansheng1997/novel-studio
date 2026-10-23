@@ -33,7 +33,7 @@ export async function* parseSSE(response) {
  * Send a streaming chat completion request.
  * Returns an async generator yielding { content, reasoning_content, finish_reason }.
  */
-export async function* streamChat({ model, messages, signal, apiKey, conversationId, thinking, search, mode }) {
+export async function* streamChat({ model, messages, signal, apiKey, conversationId, thinking, search, mode, regenerate, onResponse }) {
   const headers = { 'Content-Type': 'application/json' }
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
 
@@ -43,6 +43,8 @@ export async function* streamChat({ model, messages, signal, apiKey, conversatio
   if (thinking !== null && thinking !== undefined) body.thinking = Boolean(thinking)
   if (search !== null && search !== undefined) body.search = Boolean(search)
   if (mode) body.mode = mode
+  // 重新生成：后端先丢弃该会话末尾的助手回复，再按同一条用户消息重跑
+  if (regenerate) body.regenerate = true
 
   const resp = await fetch('/v1/chat/completions', {
     method: 'POST',
@@ -55,6 +57,8 @@ export async function* streamChat({ model, messages, signal, apiKey, conversatio
     const err = await resp.json().catch(() => ({}))
     throw new Error(err?.error?.message || `HTTP ${resp.status}`)
   }
+  // 让调用方拿到响应头（如 X-W2A-User-Message-Id），用于后续编辑重发
+  onResponse?.(resp)
 
   for await (const chunk of parseSSE(resp)) {
     if (chunk.error) throw new Error(chunk.error.message)

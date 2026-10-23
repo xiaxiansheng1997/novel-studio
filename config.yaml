@@ -39,6 +39,11 @@ providers:
     # 相邻两次请求的最小间隔（秒，从上一次回复结束算起）。
     # 刚答完就立刻发下一条最容易触发 RGV587 人机验证；0 表示不限制。
     min_interval_sec: 3
+    # 多轮策略：site = 用站点自己的会话（默认）；prompt = 每轮把 system+历史拼成一段发（每次新开会话）
+    history_mode: site
+    # 站点会话直链（{id} = 站点会话 id）。切回历史会话要靠它；留空只能新开会话（丢站点上下文）。
+    # 已按实测地址栏校准：https://www.qianwen.com/chat/<32位hex>
+    chat_url: "https://www.qianwen.com/chat/{id}"
 
   doubao:
     enabled: true
@@ -57,6 +62,9 @@ providers:
     ui:
       model: {labels: ["豆包 快速", "豆包 专家"]}
     max_concurrency: 1
+    history_mode: site
+    # 站点会话直链（{id} = 站点会话 id）。已按实测地址栏校准：/chat/<纯数字id>
+    chat_url: "https://www.doubao.com/chat/{id}"
 
   deepseek:
     enabled: true
@@ -80,3 +88,6 @@ providers:
       # 2026-10 实测：另一枚开关已改叫「智能搜索」（保留旧文案作站点 A/B 回退）
       search: {labels: ["智能搜索", "联网搜索", "联网"]}
     max_concurrency: 1     # 官方封号严，务必保持极低并发
+    history_mode: site
+    # DeepSeek 会话直链：切回旧会话时直接导航（页面改版导致 404 会自动退化为新开会话）
+    chat_url: "https://chat.deepseek.com/a/chat/s/{id}"

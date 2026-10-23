@@ -93,6 +93,11 @@ async def chat_completions(req: ChatCompletionRequest, request: Request, respons
     # 会话 id 必须真实存在，否则消息会写成孤儿；放在 ensure_session 前，避免白等一次浏览器启动
     if req.conversation_id and req.messages and await store.get_conversation(req.conversation_id) is None:
         raise HTTPException(status_code=404, detail=f"会话不存在: {req.conversation_id}")
+    # 重新生成：先丢掉上次的助手回复，避免刷新/导出时同一问题挂两段回答
+    if req.conversation_id and req.regenerate:
+        dropped = await store.delete_trailing_assistant(req.conversation_id)
+        if dropped:
+            logger.info(f"[{adapter.key}] 重新生成：已丢弃上一次的 {dropped} 条助手回复")
     await adapter.ensure_session()
     # 最小请求间隔（从上一次回复结束算起）：降低上游风控触发率
     waited = await throttle.wait_turn()
@@ -101,18 +106,33 @@ async def chat_completions(req: ChatCompletionRequest, request: Request, respons
 
     chat_id = gen_id()
 
-    # 持久化用户消息
+    # 持久化用户消息（返回 id 给前端：编辑重发时要按 id 把旧消息及其后的回答一起删掉）
+    user_msg_id = ""
     if req.conversation_id and req.messages:
         last_user = next((m.content for m in reversed(req.messages) if m.role == "user"), None)
         if last_user:
-            await store.add_message(req.conversation_id, "user", str(last_user))
             await store.auto_title(req.conversation_id, str(last_user))
+            # 重新生成时前端会把同一条用户消息原样再发一遍：末尾已经是它就不再写一条，
+            # 否则刷新后同一个问题会出现两次（普通请求连发同一句话仍照常各记一条）
+            prev = await store.last_message(req.conversation_id)
+            same = bool(
+                prev
+                and prev.get("role") == "user"
+                and str(prev.get("content") or "").strip() == str(last_user).strip()
+            )
+            if not (req.regenerate and same):
+                saved = await store.add_message(req.conversation_id, "user", str(last_user))
+                user_msg_id = saved.get("id") or ""
+
+    extra_headers = {**warn_headers}
+    if user_msg_id:
+        extra_headers["X-W2A-User-Message-Id"] = user_msg_id
 
     if req.stream:
         return StreamingResponse(
             _stream_with_persist(reg, adapter, throttle, req, chat_id, store, request),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **warn_headers},
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **extra_headers},
         )
 
     async with throttle:
@@ -138,7 +158,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request, respons
             text,
             reasoning_content=msg.reasoning_content or "",
         )
-    for key, value in warn_headers.items():
+    for key, value in extra_headers.items():
         response.headers[key] = value
     return resp
 

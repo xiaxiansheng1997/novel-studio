@@ -100,6 +100,15 @@ class ProviderConfig(BaseModel):
     max_concurrency: int = 1
     # 相邻两次请求的最小间隔（秒，从上一次回复结束算起）；0 表示不限制
     min_interval_sec: float = 0.0
+    # 站点会话直链模板：{id} 会替换成站点会话 id（如 DeepSeek 的 .../a/chat/s/{id}）。
+    # 留空 = 不支持直达：切换会话时退化为点「新对话」/回首页（宁丢上下文也不串上下文）。
+    chat_url: str = ""
+    # 「新对话」按钮文案（留空用内置通用文案），站点改版时在 config.yaml 里覆盖
+    new_chat_labels: list[str] = Field(default_factory=list)
+    # 多轮策略：
+    #   site   = 复用站点自己的会话（默认，最省 token，依赖站点上下文）
+    #   prompt = 每轮把 system+历史拼成一段 prompt 发送，每次请求都新开会话（不依赖站点记忆）
+    history_mode: str = "site"
 
     def model_ids(self) -> list[str]:
         return [m.id for m in self.models]

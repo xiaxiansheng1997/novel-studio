@@ -26,6 +26,21 @@ class UpdateConversationRequest(BaseModel):
     system_prompt: Optional[str] = None
 
 
+class RewindRequest(BaseModel):
+    # 给了 message_id：从这条（含）往后全删（编辑重发）；不给：只删末尾的助手回复（重新生成）
+    message_id: Optional[str] = None
+
+
+@router.get("/v1/search", dependencies=[Depends(verify_key)])
+async def search_messages(request: Request, q: str = "", limit: int = 20):
+    """全文搜消息内容，返回所属会话与摘要（前端侧栏搜索用）。"""
+    q = q.strip()
+    if len(q) < 2:
+        return {"query": q, "items": []}
+    items = await _store(request).search_messages(q, limit=max(1, min(limit, 50)))
+    return {"query": q, "items": items}
+
+
 @router.get("/v1/conversations", dependencies=[Depends(verify_key)])
 async def list_conversations(request: Request, limit: int = 100, offset: int = 0):
     store = _store(request)
@@ -80,6 +95,21 @@ async def delete_conversation(conv_id: str, request: Request):
 async def get_messages(conv_id: str, request: Request, limit: int = 200):
     store = _store(request)
     return await store.get_messages(conv_id, limit=limit)
+
+
+@router.post("/v1/conversations/{conv_id}/rewind", dependencies=[Depends(verify_key)])
+async def rewind_conversation(conv_id: str, body: RewindRequest, request: Request):
+    """把会话回退到上一次提问：重新生成只丢助手回复，编辑重发从指定消息起全丢。"""
+    store = _store(request)
+    if await store.get_conversation(conv_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if body.message_id:
+        deleted = await store.delete_from_message(conv_id, body.message_id)
+        mode = "from_message"
+    else:
+        deleted = await store.delete_trailing_assistant(conv_id)
+        mode = "drop_last_assistant"
+    return {"ok": True, "deleted": deleted, "mode": mode}
 
 
 @router.post("/v1/conversations/{conv_id}/export", dependencies=[Depends(verify_key)])

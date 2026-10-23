@@ -18,6 +18,7 @@ from loguru import logger
 from app.api.schemas import ChatCompletionRequest
 from app.browser.live_browser import auto_slide_page, captcha_overlay_visible, detect_captcha
 from app.browser.session_manager import login_hint_on_page
+from app.browser.site_session import extract_chat_id, open_conversation
 from app.browser.stream_capture import (
     AUTO_SLIDE,
     HUMAN_WAIT_SEC,
@@ -31,6 +32,7 @@ from app.browser.stream_capture import (
 )
 from app.browser.ui_modes import apply_mode
 from app.config import get_settings
+from app.core.alerts import publish as publish_alert
 from app.core.base import ProviderAdapter
 from app.core.blocked import find_upstream_error, needs_human_verify
 from app.core.control_tokens import strip_control_tokens
@@ -45,7 +47,7 @@ from app.core.errors import (
 )
 from app.core.sse import DeltaEvent
 from app.core.modes import resolve_mode
-from app.providers._replay import SSEBuffer, is_done, last_user_text
+from app.providers._replay import SSEBuffer, is_done, last_user_text, render_prompt
 
 # 流式空闲超时：超过该时间没有新块就结束，避免上游中断后长时间挂起
 STREAM_IDLE_TIMEOUT = get_settings().stream_idle_timeout
@@ -78,13 +80,41 @@ class BrowserStreamProvider(ProviderAdapter):
     def parse_payload(self, payload: str) -> Optional[DeltaEvent]:
         raise NotImplementedError
 
+    def history_mode(self, req: ChatCompletionRequest) -> str:
+        """多轮策略：请求级覆盖优先，其次 provider 配置，默认 site。"""
+        mode = (req.history_mode or getattr(self.cfg, "history_mode", "site") or "site").lower()
+        return "prompt" if mode == "prompt" else "site"
+
     def build_prompt(self, req: ChatCompletionRequest) -> str:
-        # UI 输入框只适合发送"本轮用户消息"，上下文由站点自有会话携带
+        # site 模式：只发本轮用户消息，上下文由站点自有会话携带
+        # prompt 模式：把 system + 历史拼成一段发过去（每次请求都新开会话，见 app.browser.site_session）
+        if self.history_mode(req) == "prompt":
+            return render_prompt(req)
         return last_user_text(req)
+
+    async def _remember_site_session(self, req: ChatCompletionRequest, page, *, allow: bool = True) -> None:
+        """把当前页面 URL 里的站点会话 id 记到 sessions 表，供下次切换/复用。
+
+        `allow=False` 用在会话切换失败时：页面可能还停在别的站点会话上，
+        此时记录会把旧会话错配给当前会话（比不记录更糟，直接串台）。
+        """
+        if not allow or not req.conversation_id:
+            return
+        site_id = extract_chat_id(getattr(page, "url", "") or "")
+        if not site_id:
+            return
+        try:
+            if await self.resolve_internal_id(req) == site_id:
+                return
+            await self.save_internal_id(req, site_id)
+            logger.info(f"[{self.key}] 记录站点会话 id={site_id}（API 会话 {req.conversation_id}）")
+        except Exception as exc:  # noqa: BLE001 - 记录失败不影响对话本身
+            logger.debug(f"[{self.key}] 记录站点会话 id 失败: {exc}")
 
     # ---- 会话校验 ----
     async def ensure_session(self) -> None:
         if not self.ctx.sessions.has_profile(self.key):
+            publish_alert("login", self.key, "缺少有效登录态，需要到 /live 登录", level="error")
             raise NeedsLogin(self.key)
 
     # ---- 核心：浏览器捕获增量流 ----
@@ -98,6 +128,12 @@ class BrowserStreamProvider(ProviderAdapter):
         remain = risk_cooldown_remaining(self.key)
         if remain > 0:
             logger.warning(f"[{self.key}] 风控冷却中，拒绝请求（剩余 {remain}s）")
+            publish_alert(
+                "risk",
+                self.key,
+                f"上游风控冷却中（剩余 {remain}s），需先在 /live 完成人机验证",
+                level="warn",
+            )
             yield DeltaEvent(
                 content=(
                     f"⚠️ 上游风控冷却中（剩余 {remain}s）：刚触发过人机验证，"
@@ -127,6 +163,27 @@ class BrowserStreamProvider(ProviderAdapter):
             headless=pcfg.headless,
             url_hint=self.url_hint(),
         )
+        # ---- 站点会话隔离：API 会话变了就切站点会话，避免上下文串台 ----
+        prompt_mode = self.history_mode(req) == "prompt"
+        site_id = await self.resolve_internal_id(req) if req.conversation_id else None
+        current_site = extract_chat_id(page.url)
+        need_switch = False
+        site_switch_failed = False
+        if prompt_mode:
+            # prompt 模式自己拼历史：站点会话必须是干净的，否则历史会叠两遍
+            need_switch = current_site is not None
+        elif req.conversation_id:
+            # 有映射就回到那条站点会话；没映射说明是新会话，页面停在旧会话上就新开
+            need_switch = (current_site != site_id) if site_id else (current_site is not None)
+        if need_switch:
+            sw = await open_conversation(page, pcfg, None if prompt_mode else site_id)
+            site_switch_failed = not sw["ok"]
+            logger.info(
+                f"[{self.key}] 站点会话切换 {(current_site or '(home)')} -> "
+                f"{'(prompt-new)' if prompt_mode else (site_id or '(new)')}: {sw['action']} "
+                f"ok={sw['ok']} {sw.get('error') or ''}".strip()
+            )
+            _drain_queue(queue)
         # 登录外观探测（仅日志）：一眼区分“页面是游客态”还是“请求被风控拦了”
         try:
             hint = await login_hint_on_page(page)
@@ -186,6 +243,7 @@ class BrowserStreamProvider(ProviderAdapter):
                 send_selectors=self.send_selectors() or None,
             )
             logger.info(f"[{self.key}] trigger_send OK, page_url={page.url[:80]}")
+            await self._remember_site_session(req, page, allow=not site_switch_failed)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[{self.key}] 驱动发送失败: {exc}")
             hint = await self._send_failure_hint(exc, page)
@@ -213,6 +271,8 @@ class BrowserStreamProvider(ProviderAdapter):
             try:
                 async for ev in self._consume(page, queue):
                     yield ev
+                # 发送后 SPA 才 pushState 到 /c/<id>，这里再记一次
+                await self._remember_site_session(req, page, allow=not site_switch_failed)
                 return
             except VerifyChallenge as vc:
                 pending = vc
@@ -227,6 +287,12 @@ class BrowserStreamProvider(ProviderAdapter):
                 break
         if pending is not None:
             mark_risk(self.key, note or "人机验证未通过")
+            publish_alert(
+                "captcha",
+                self.key,
+                f"自动处理人机验证未成功（{note or '未知原因'}），需到 /live 手动完成",
+                level="error",
+            )
             raise HumanVerifyRequired(
                 self.key,
                 pending.detail,
@@ -323,6 +389,12 @@ class BrowserStreamProvider(ProviderAdapter):
         logger.warning(
             f"[{self.key}] 这是图片点选验证码（{cap_text[:60]!r}），自动过滑块帮不上；"
             f"请在弹出来的 Chrome 窗口里勾选图片，最多等 {int(wait)}s…"
+        )
+        publish_alert(
+            "captcha",
+            self.key,
+            f"检测到图片点选验证码（{cap_text[:40] or '按题面勾选图片'}），请在浏览器窗口里完成，最多等 {int(wait)}s",
+            level="warn",
         )
         deadline = time.monotonic() + wait
         last_log = 0.0

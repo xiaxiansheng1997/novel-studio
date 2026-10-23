@@ -8,6 +8,7 @@
       @new-chat="handleNewChat"
       @select="handleSelect"
       @delete="handleDelete"
+      @rename="handleRename"
     />
     <div v-if="!sidebarCollapsed" class="sidebar-backdrop" @click="sidebarCollapsed = true"></div>
 
@@ -28,6 +29,15 @@
         </div>
 
         <div class="topbar-right">
+          <button
+            class="icon-btn"
+            title="导出当前会话为 Markdown"
+            aria-label="导出当前会话"
+            :disabled="!chatStore.activeId"
+            @click="exportActive"
+          >
+            <AppIcon name="download" :size="17" />
+          </button>
           <label class="model-field">
             <span class="model-label">模型</span>
             <select class="field model-select" :value="providerStore.selectedModel" @change="onModelChange">
@@ -65,12 +75,17 @@
           :key="i"
           :message="msg"
           :streaming="i === chatStore.messages.length - 1 && chatStore.streaming"
+          :show-regenerate="!chatStore.streaming && i === lastAssistantIndex"
+          :show-edit="!chatStore.streaming && i === lastUserIndex"
+          @regenerate="regenerate"
+          @edit="editMessage(i)"
         />
       </div>
 
       <InputArea
         ref="inputRef"
         :streaming="chatStore.streaming"
+        :placeholder="editing ? '编辑这条提问后回车重发（会删掉它后面的回答）…' : '输入消息，和网页端对话一样…'"
         @send="handleSend"
         @stop="chatStore.stopStreaming()"
       >
@@ -103,6 +118,9 @@
             <AppIcon name="terminal" :size="12" /> 专家模式
           </button>
           <span class="mode-note">{{ modeNote }}</span>
+          <button v-if="editing" class="mode-chip editing" title="取消编辑" @click="cancelEdit">
+            <AppIcon name="x" :size="12" /> 取消编辑
+          </button>
         </template>
       </InputArea>
     </main>
@@ -126,6 +144,8 @@ const providerStore = useProviderStore()
 const messagesEl = ref(null)
 const inputRef = ref(null)
 const sidebarCollapsed = ref(window.innerWidth <= 1024)
+// 编辑重发：{ index, id, text }；id 为空表示这条提问还没拿到服务端 id
+const editing = ref(null)
 
 const suggestions = [
   { icon: 'spark', text: '用一句话解释什么是光合作用' },
@@ -174,6 +194,8 @@ function globalKeyHandler(e) {
   }
   if (e.key === 'Escape' && chatStore.streaming) {
     chatStore.stopStreaming()
+  } else if (e.key === 'Escape' && editing.value) {
+    cancelEdit()
   }
 }
 
@@ -220,10 +242,12 @@ async function handleNewChat() {
   }
   chatStore.activeId = null
   chatStore.messages = []
+  editing.value = null
   if (window.innerWidth <= 1024) sidebarCollapsed.value = true
 }
 
 async function handleSelect(id) {
+  editing.value = null
   await chatStore.selectConversation(id)
   nextTick(() => scrollToBottom())
   if (window.innerWidth <= 1024) sidebarCollapsed.value = true
@@ -234,6 +258,50 @@ async function handleDelete(id) {
 }
 
 async function handleSend(text) {
+  // 编辑模式下发送：先让后端把旧提问及其后的回答删掉，再当普通消息重发
+  const pending = editing.value
+  if (pending) {
+    editing.value = null
+    if (pending.id) await chatStore.rewindConversation(chatStore.activeId, pending.id)
+    else await chatStore.rewindConversation(chatStore.activeId)
+    chatStore.messages.splice(pending.index)
+  }
+  await sendText(text)
+}
+
+const lastUserIndex = computed(() => {
+  for (let i = chatStore.messages.length - 1; i >= 0; i--) {
+    if (chatStore.messages[i].role === 'user') return i
+  }
+  return -1
+})
+const lastAssistantIndex = computed(() => {
+  for (let i = chatStore.messages.length - 1; i >= 0; i--) {
+    if (chatStore.messages[i].role === 'assistant') return i
+  }
+  return -1
+})
+
+function cancelEdit() {
+  editing.value = null
+  inputRef.value?.setText('')
+}
+
+function editMessage(idx) {
+  const m = chatStore.messages[idx]
+  if (!m || chatStore.streaming) return
+  editing.value = { index: idx, id: m.id || '', text: m.content }
+  inputRef.value?.setText(m.content)
+}
+
+async function regenerate() {
+  if (chatStore.streaming) return
+  const lastUser = [...chatStore.messages].reverse().find(m => m.role === 'user')
+  if (!lastUser) return
+  await sendText(String(lastUser.content || ''), { regenerate: true })
+}
+
+async function sendText(text, { regenerate = false } = {}) {
   const model = providerStore.selectedModel
   if (!model) return
 
@@ -241,34 +309,49 @@ async function handleSend(text) {
   if (!chatStore.activeId) {
     await chatStore.createConversation(model)
   }
-  const convId = chatStore.activeId
 
-  chatStore.messages.push({ role: 'user', content: text, created_at: Date.now() / 1000 })
+  let userMsg = null
+  if (regenerate) {
+    // 最后一条用户消息留原地，只摘掉它后面的旧回答（后端也会丢掉并重跑）
+    while (chatStore.messages.length && chatStore.messages[chatStore.messages.length - 1].role !== 'user') {
+      chatStore.messages.pop()
+    }
+    userMsg = chatStore.messages[chatStore.messages.length - 1] || null
+  } else {
+    userMsg = { role: 'user', content: text, created_at: Date.now() / 1000 }
+    chatStore.messages.push(userMsg)
+  }
 
   // Assistant placeholder: 保留索引，后续通过 chatStore.messages[idx] 访问响应式代理
   chatStore.messages.push({ role: 'assistant', content: '', reasoning_content: '', created_at: Date.now() / 1000 })
   const aIdx = chatStore.messages.length - 1
+  // 排除刚插入的空占位；空内容（如被中断的旧回答）不发回上游
+  const apiMessages = chatStore.messages
+    .slice(0, aIdx)
+    .filter(m => m.content)
+    .map(m => ({ role: m.role, content: m.content }))
 
   chatStore.streaming = true
   const controller = new AbortController()
   chatStore.abortController = controller
+  const modePayload = providerStore.modePayload()
 
   try {
-    const apiMessages = chatStore.messages
-      .slice(0, aIdx) // 排除刚插入的空占位
-      .filter(m => m.role !== 'system' || m.content)
-      .map(m => ({ role: m.role, content: m.content }))
-
-    const modePayload = providerStore.modePayload()
     for await (const ev of streamChat({
       model,
       messages: apiMessages,
       signal: controller.signal,
       apiKey: getApiKey(),
-      conversationId: convId,
+      conversationId: chatStore.activeId,
       thinking: modePayload.thinking,
       search: modePayload.search,
       mode: modePayload.mode,
+      regenerate,
+      onResponse: (resp) => {
+        // 后端落库后的消息 id：编辑重发要按它删旧提问
+        const id = resp.headers.get('X-W2A-User-Message-Id')
+        if (id && userMsg) userMsg.id = id
+      },
     })) {
       const cur = chatStore.messages[aIdx] // 通过响应式数组取值，改动才会触发重渲染
       if (ev.content) cur.content += ev.content
@@ -287,6 +370,26 @@ async function handleSend(text) {
     chatStore.abortController = null
     await chatStore.fetchConversations()
   }
+}
+
+async function exportActive() {
+  if (!chatStore.activeId) return
+  const j = await chatStore.exportConversation(chatStore.activeId)
+  if (!j) return
+  const blob = new Blob([j.content || ''], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${(activeTitle.value || 'conversation').replace(/[\\/:*?"<>|]/g, '_')}.md`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+async function handleRename(payload) {
+  if (!payload?.id || !payload?.title) return
+  await chatStore.renameConversation(payload.id, payload.title)
 }
 
 // Event delegation for code copy buttons
@@ -399,6 +502,16 @@ function handleContentClick(e) {
 .mode-chip:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+/* 编辑重发中的提示 chip：醒目的黄色，和普通开关区分 */
+.mode-chip.editing {
+  border-color: rgba(250, 204, 21, 0.5);
+  background: rgba(250, 204, 21, 0.12);
+  color: #fde68a;
+}
+.mode-chip.editing:hover:not(:disabled) {
+  border-color: rgba(250, 204, 21, 0.75);
+  color: #fef3c7;
 }
 .mode-note {
   margin-left: auto;

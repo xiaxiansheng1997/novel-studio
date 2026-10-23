@@ -57,6 +57,30 @@ export const useChatStore = defineStore('chat', () => {
     if (conv) conv.title = title
   }
 
+  // 回退会话：带 messageId = 从这条（含）删到末尾（编辑重发）；不带 = 只删末尾的助手回答（重新生成）
+  async function rewindConversation(id, messageId) {
+    if (!id) return
+    await apiFetch(`/v1/conversations/${id}/rewind`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(messageId ? { message_id: messageId } : {}),
+    })
+  }
+
+  // 消息全文搜索（侧栏用）：返回 [{conversation_id, title, snippet, ...}]
+  async function searchMessages(q) {
+    if (!q || q.trim().length < 2) return []
+    const r = await apiFetch(`/v1/search?q=${encodeURIComponent(q.trim())}`)
+    if (!r.ok) return []
+    const j = await r.json()
+    return j.items || []
+  }
+
+  async function exportConversation(id) {
+    const r = await apiFetch(`/v1/conversations/${id}/export`, { method: 'POST' })
+    return r.ok ? r.json() : null
+  }
+
   function stopStreaming() {
     if (abortController.value) {
       abortController.value.abort()
@@ -70,5 +94,6 @@ export const useChatStore = defineStore('chat', () => {
     activeConversation,
     fetchConversations, createConversation, selectConversation,
     deleteConversation, renameConversation, stopStreaming,
+    rewindConversation, searchMessages, exportConversation,
   }
 })

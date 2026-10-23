@@ -49,8 +49,8 @@ def last_user_text(req: ChatCompletionRequest) -> str:
 def render_prompt(req: ChatCompletionRequest) -> str:
     """把 system + 历史轮次 + 最后一条用户消息合成单个 prompt。
 
-    网页端多数为单次发送或自有会话；这里以"整体携带上下文"的方式保证多轮语义，
-    避免依赖各家不稳定的 conversation_id。
+    用于 history_mode=prompt：站点会话不携带上下文，多轮语义全靠这里拼；
+    按时间顺序拼接（system 在最前），避免依赖各家不稳定的 conversation_id。
     """
     sys_parts = [extract_text(m.content) for m in req.messages if m.role == "system"]
     convo: list[str] = []
@@ -59,7 +59,6 @@ def render_prompt(req: ChatCompletionRequest) -> str:
             convo.append(f"用户：{extract_text(m.content)}")
         elif m.role == "assistant":
             convo.append(f"助手：{extract_text(m.content)}")
-    # 最后一条用户消息放最前，确保模型聚焦
     body = "\n".join(convo)
     head = "\n".join(sys_parts)
     if head:
