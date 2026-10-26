@@ -105,6 +105,7 @@
             <span v-if="st" class="mem-stat">
               {{ st.chunks_body }} 块 · {{ st.nodes_indexed }}/{{ st.nodes_total }} 节
               · 摘要 {{ st.summaries }}
+              <template v-if="staleCount"> · {{ staleCount }} 份已过期</template>
             </span>
           </div>
           <div class="mem-actions">
@@ -115,10 +116,13 @@
               全量重建
             </button>
             <button class="btn btn-sm" :disabled="store.indexing || store.summarizing" @click="doSummarize">
-              {{ store.summarizing ? '摘要中…' : '生成摘要' }}
+              {{ store.summarizing ? '摘要中…' : (staleCount ? '重算过期摘要' : '生成摘要') }}
             </button>
           </div>
           <p v-if="store.memoryNote" class="hint">{{ store.memoryNote }}</p>
+          <p v-else-if="staleCount" class="hint">
+            这几节的正文改过但摘要还是旧的：生成时不会注入它们（宁缺勿假），点上面重算。
+          </p>
           <p v-else-if="st && st.chunks_body === 0" class="hint">
             还没建索引：不建索引，S5 检索证据与 S4 最近摘要都不会进上下文。
           </p>
@@ -331,6 +335,11 @@ const busy = ref(false)
 const loadingCtx = ref(false)
 const ctx = ref(null)
 const st = computed(() => store.indexStatus)
+// 过期摘要 = 正文改过但摘要还是旧的（节级按内容指纹判）+ 由它拼出来的卷/全书摘要。
+// 两者分开计数是为了说清「重算」要花多少调用：节摘要要重跑，上游只要重拼。
+const staleCount = computed(
+  () => (st.value?.stale_summaries || 0) + (st.value?.stale_upstream || 0)
+)
 
 const src = ref({ title: '', url: '', published_at: '', content: '' })
 const fact = ref({ statement: '', valid_until: '' })

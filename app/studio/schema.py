@@ -290,6 +290,9 @@ CREATE TABLE IF NOT EXISTS summaries (
     ref_id TEXT NOT NULL,
     ref_ordinal INTEGER DEFAULT 0,
     content TEXT NOT NULL,
+    -- 生成这一份摘要时的内容指纹（节摘要用未 strip 的原文，与 nodes.content_hash 同口径）。
+    -- 空串 = 已知过期。老库缺这一列，由 store._migrate() 补，别指望 CREATE TABLE IF NOT EXISTS。
+    ref_hash TEXT DEFAULT '',
     model TEXT DEFAULT '',
     created_at REAL NOT NULL,
     UNIQUE(scope, ref_id)

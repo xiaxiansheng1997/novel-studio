@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import aiosqlite
+from loguru import logger
 
 from app.studio import content_types
 from app.studio.schema import BUILTIN_TEMPLATES, SCHEMA
@@ -79,7 +80,40 @@ class StudioStore:
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
         await self._db.commit()
+        await self._migrate()
         await self._seed_templates()
+
+    async def _migrate(self) -> None:
+        """给已有库补新列。
+
+        `SCHEMA` 全是 `CREATE TABLE IF NOT EXISTS`，对新库够用、对老库一句都不改：
+        表已经存在就直接跳过，后加上去的列根本不会出现。`summaries.ref_hash` 就是
+        这种情况——缺它的话摘要没法判断「正文改过了」，改完稿子下游还在用旧记忆。
+
+        回填很要紧：新列默认空串，而空串在我们的口径里等于「已过期」。
+        不回填的话升级当天所有现存摘要都会被判过期，S3/S4 直接空掉，
+        看起来就像「记忆全丢了」。所以历史行一律按当时的内容指纹补上。
+        """
+        assert self._db is not None
+        cur = await self._db.execute("PRAGMA table_info(summaries)")
+        cols = {r[1] for r in await cur.fetchall()}
+        if "ref_hash" in cols:
+            return
+        await self._db.execute("ALTER TABLE summaries ADD COLUMN ref_hash TEXT DEFAULT ''")
+        # 节摘要：拿节点自己的 content_hash；容器/全书摘要没有单一源文本，
+        # 用一个非空占位表示「当年生成过、没理由认为它过期」。
+        await self._db.execute(
+            "UPDATE summaries SET ref_hash = "
+            "COALESCE(NULLIF(ref_hash, ''), "
+            "(SELECT n.content_hash FROM nodes n WHERE n.id = summaries.ref_id), '') "
+            "WHERE scope = 'node'"
+        )
+        await self._db.execute(
+            "UPDATE summaries SET ref_hash = 'legacy' "
+            "WHERE scope IN ('container', 'work') AND ref_hash = ''"
+        )
+        await self._db.commit()
+        logger.info("[studio] summaries 已补 ref_hash 列并回填历史指纹")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -380,7 +414,9 @@ class StudioStore:
         now = _now()
 
         async with self._lock:
-            cur = await self._db.execute("SELECT content FROM nodes WHERE id = ?", (node_id,))
+            cur = await self._db.execute(
+                "SELECT content, work_id FROM nodes WHERE id = ?", (node_id,)
+            )
             row = await cur.fetchone()
             if not row:
                 return False
@@ -393,6 +429,13 @@ class StudioStore:
             sets = ", ".join(f"{k} = ?" for k in updates)
             params = list(updates.values()) + [now, node_id]
             await self._db.execute(f"UPDATE nodes SET {sets}, updated_at = ? WHERE id = ?", params)
+
+            # 正文真改了才让下游记忆跟着失效（改标题/状态不算）。
+            # 节摘要不需要显式标：它的 ref_hash 与新 content_hash 自然对不上。
+            # 但卷/讲与全书摘要是多节拼出来的，没任何一个字段能反映它旧了，
+            # 只能在这一刻主动置空——不然改完第 7 章，S3 会继续拿着旧卷概要用下去。
+            if "content" in updates and (updates["content"] or "") != old:
+                await self._mark_stale_locked(row["work_id"], node_id)
 
             # 只在显式要求时留版本：自动保存每几秒一次，全存会把库撑爆
             if snapshot and "content" in updates and (updates["content"] or "") != old:
@@ -1185,36 +1228,49 @@ class StudioStore:
 
     async def upsert_summary(
         self, work_id: str, *, scope: str, ref_id: str, content: str,
-        ref_ordinal: int = 0, model: str = "",
+        ref_ordinal: int = 0, model: str = "", ref_hash: str = "",
     ) -> None:
         assert self._db is not None
         async with self._lock:
             await self._db.execute(
-                "INSERT INTO summaries(id, work_id, scope, ref_id, ref_ordinal, content, model, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(scope, ref_id) DO UPDATE SET "
+                "INSERT INTO summaries(id, work_id, scope, ref_id, ref_ordinal, content, "
+                "ref_hash, model, created_at) VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(scope, ref_id) DO UPDATE SET "
                 "content=excluded.content, ref_ordinal=excluded.ref_ordinal, "
-                "model=excluded.model, created_at=excluded.created_at",
-                (_new_id("sm_"), work_id, scope, ref_id, int(ref_ordinal), content, model, _now()),
+                "ref_hash=excluded.ref_hash, model=excluded.model, created_at=excluded.created_at",
+                (_new_id("sm_"), work_id, scope, ref_id, int(ref_ordinal), content,
+                 ref_hash, model, _now()),
             )
             await self._db.commit()
+
+    # 这一句在两个查询里重复用：节摘要拿节点当下的 content_hash 比，
+    # 容器/全书摘要只能看 ref_hash 是不是被置空过（置空就是失效标记）。
+    _SUMMARY_FRESH_SQL = (
+        "SELECT s.*, "
+        "CASE WHEN s.scope = 'node' "
+        "     THEN (s.ref_hash <> '' AND s.ref_hash = COALESCE(n.content_hash, '')) "
+        "     ELSE (s.ref_hash <> '') END AS fresh "
+        "FROM summaries s LEFT JOIN nodes n ON n.id = s.ref_id "
+    )
 
     async def get_summary(self, scope: str, ref_id: str) -> Optional[dict[str, Any]]:
         assert self._db is not None
         async with self._lock:
             cur = await self._db.execute(
-                "SELECT * FROM summaries WHERE scope = ? AND ref_id = ?", (scope, ref_id)
+                self._SUMMARY_FRESH_SQL + "WHERE s.scope = ? AND s.ref_id = ?",
+                (scope, ref_id),
             )
             row = await cur.fetchone()
         return dict(row) if row else None
 
     async def list_summaries(self, work_id: str, scope: str = "") -> list[dict[str, Any]]:
         assert self._db is not None
-        sql = "SELECT * FROM summaries WHERE work_id = ?"
+        sql = self._SUMMARY_FRESH_SQL + "WHERE s.work_id = ?"
         params: list[Any] = [work_id]
         if scope:
-            sql += " AND scope = ?"
+            sql += " AND s.scope = ?"
             params.append(scope)
-        sql += " ORDER BY ref_ordinal"
+        sql += " ORDER BY s.ref_ordinal"
         async with self._lock:
             cur = await self._db.execute(sql, params)
             rows = await cur.fetchall()
@@ -1226,6 +1282,47 @@ class StudioStore:
             await self._db.execute(
                 "DELETE FROM summaries WHERE scope = ? AND ref_id = ?", (scope, ref_id)
             )
+            await self._db.commit()
+
+    async def stale_summaries(self, work_id: str) -> list[dict[str, Any]]:
+        """过期的那几份摘要（只返回非空的行，调用方拿 len 就是「待重算 N 节」）。"""
+        rows = await self.list_summaries(work_id)
+        return [r for r in rows if not r.get("fresh")]
+
+    async def _ancestor_ids_locked(self, node_id: str) -> list[str]:
+        """从父节点往上收集容器 id（深度很浅，写循环比递归 CTE 好读）。"""
+        assert self._db is not None
+        out: list[str] = []
+        cur_id: Optional[str] = node_id
+        for _ in range(8):  # 层级上限防环：写作树最深就卷/讲/章/节
+            cur = await self._db.execute(
+                "SELECT parent_id FROM nodes WHERE id = ?", (cur_id,)
+            )
+            row = await cur.fetchone()
+            if not row or not row["parent_id"]:
+                break
+            cur_id = row["parent_id"]
+            out.append(cur_id)
+        return out
+
+    async def _mark_stale_locked(self, work_id: str, node_id: str) -> None:
+        """把这一节上游的卷/全书摘要标为过期。**调用方必须已持有 self._lock**。"""
+        assert self._db is not None
+        chain = await self._ancestor_ids_locked(node_id)
+        if chain:
+            marks = ",".join("?" * len(chain))
+            await self._db.execute(
+                f"UPDATE summaries SET ref_hash = '' "
+                f"WHERE scope = 'container' AND ref_id IN ({marks})", chain)
+        await self._db.execute(
+            "UPDATE summaries SET ref_hash = '' WHERE scope = 'work' AND work_id = ?",
+            (work_id,))
+
+    async def mark_summaries_stale(self, work_id: str, node_id: str) -> None:
+        """对外入口（脚本/接口用）：手动把某一节的上游摘要判过期。"""
+        assert self._db is not None
+        async with self._lock:
+            await self._mark_stale_locked(work_id, node_id)
             await self._db.commit()
 
     # ==================== 任务队列（M4） ====================

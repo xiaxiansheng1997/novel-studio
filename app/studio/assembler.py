@@ -263,23 +263,37 @@ async def assemble(
             warnings.append("S2 作品圣经超出预算，已按顺序截断（靠后的节点未列出）")
 
     # ---------- S3 前情概要（父容器/全书摘要） ----------
+    # 过期的一律不注入：少一份记忆只是少点背景，但旧的概要是假的，
+    # 模型会把已经改了的情节当成既定事实写下去。
     if "S3" in buckets:
         text = ""
+        stale_bits: list[str] = []
         parent_id = (node or {}).get("parent_id")
         if parent_id:
             sm = await store.get_summary("container", parent_id)
             if sm and sm.get("content"):
-                text = "本卷/本讲概要：\n" + sm["content"]
+                if sm.get("fresh"):
+                    text = "本卷/本讲概要：\n" + sm["content"]
+                else:
+                    stale_bits.append("本卷")
         if not text:
             wsm = await store.get_summary("work", work["id"])
             if wsm and wsm.get("content"):
-                text = "全书概要：\n" + wsm["content"]
+                if wsm.get("fresh"):
+                    text = "全书概要：\n" + wsm["content"]
+                else:
+                    stale_bits.append("全书")
         if text:
             buckets["S3"].text, cut = _head(text, buckets["S3"].budget)
             if cut:
                 warnings.append("S3 前情概要超出预算，已截断")
         else:
             buckets.pop("S3", None)
+        if stale_bits:
+            warnings.append(
+                "S3 里" + "/".join(stale_bits) + "的摘要已过期（正文改过还没重算），本轮未注入："
+                "在右栏「上下文」点「重算过期摘要」补回"
+            )
 
     # ---------- S4 最近节摘要（三段式记忆卡） ----------
     if "S4" in buckets:
@@ -288,7 +302,10 @@ async def assemble(
         rows = [
             r for r in rows
             if r.get("content") and (current is None or int(r.get("ref_ordinal") or 0) < current)
-        ][-6:]
+        ]
+        # 先挑过期的报出去，再取尾部 6 条：不能让一节旧摘要占着名额
+        stale = [int(r.get("ref_ordinal") or 0) for r in rows if not r.get("fresh")]
+        rows = [r for r in rows if r.get("fresh")][-6:]
         if rows:
             tree_map = {n["id"]: n for n in await store.list_tree(work["id"])}
             parts = []
@@ -301,6 +318,12 @@ async def assemble(
                 warnings.append(f"S4 只保留了最近 {len(rows)} 节摘要的尾部")
         else:
             buckets.pop("S4", None)
+        if stale:
+            shown = "、".join(str(x) for x in stale[:8])
+            more = f" 等 {len(stale)} 节" if len(stale) > 8 else ""
+            warnings.append(
+                f"第 {shown}{more} 的摘要已过期（正文改过还没重算），本轮未注入"
+            )
 
     # ---------- S6 图谱子图（仅小说） ----------
     # 放在检索之前：先给「谁是谁、什么关系、谁死了」，再给原文片段。

@@ -9,6 +9,10 @@
 
 分层：节摘要 → 容器（讲/卷）摘要 → 全书概要。
 到 20 万字时只有节摘要会在上下文中「找不到第 7 讲讲什么」，中间层就是给这个用的。
+
+过期判定走内容指纹（`summaries.ref_hash`），跟 `graph.extract_node` 用 `index_stamp` 是同一个套路。
+之前这里比的是序号：序号相等就认为摘要还能用，于是改完第 7 章重跑队列，拿回来的还是上一版的摘要，
+而 S4「最近节摘要」会拿着这份旧记忆去写第 8 章。
 """
 from __future__ import annotations
 
@@ -16,6 +20,10 @@ import re
 from typing import Any, Optional
 
 from loguru import logger
+
+# 口径必须与 `nodes.content_hash` 完全一致（同样 sha1 取前 16 位，且不 strip）。
+# 自己另写一个或者先 strip 再算，会让每一节都被判过期，等于每次都在重跑摘要。
+from app.studio.store import _hash
 
 SUMMARY_SYSTEM = (
     "你是中文写作的编辑助理。你的任务是把一节正文压缩成可复用的记忆卡。"
@@ -71,12 +79,15 @@ async def summarize_node(
     min_chars: int = 200,
 ) -> Optional[str]:
     """给一个节点生成摘要并落库。返回摘要文本（跳过时返回 None）。"""
-    content = (node.get("content") or "").strip()
+    content_raw = node.get("content") or ""
+    content = content_raw.strip()
     if len(content) < min_chars:
         return None
+    # 指纹按未 strip 的原文算，才能和 update_node 写下的 content_hash 对上
+    digest = _hash(content_raw)
     if not force:
         exist = await store.get_summary("node", node["id"])
-        if exist and int(exist.get("ref_ordinal") or 0) == int(node.get("ordinal") or 0):
+        if exist and (exist.get("ref_hash") or "") == digest:
             return exist["content"]
 
     snippet = _tail(content, MAX_INPUT_CHARS)
@@ -101,6 +112,7 @@ async def summarize_node(
         content=summary,
         ref_ordinal=int(node.get("ordinal") or 0),
         model=model,
+        ref_hash=digest,
     )
     return summary
 
@@ -118,7 +130,10 @@ async def summarize_container(
     """把一个容器（讲/卷）下所有节摘要合并成上层摘要。"""
     if not force:
         exist = await store.get_summary("container", container["id"])
-        if exist:
+        # 容器摘要没有单一源文本：只要 ref_hash 非空就认它是当前这批子摘要拼出来的。
+        # 子节正文一改，store._mark_stale_locked 会把它置空，于是这里自然重算。
+        # （summarize_work_batch 按 nodes → containers → work 的顺序跑，轮到这里时子摘要已经是新的。）
+        if exist and (exist.get("ref_hash") or ""):
             return exist["content"]
 
     tree = await store.list_tree(work_id)
@@ -130,12 +145,13 @@ async def summarize_container(
     parts = [f"【{i}】{by_id[cid]}" for i, cid in enumerate(child_ids, 1) if cid in by_id]
     if not parts:
         return None
+    merged_src = "\n\n".join(parts)
 
     try:
         res = await gateway.complete(
             model=model,
             system=MERGE_SYSTEM,
-            prompt=MERGE_USER.format(label=label, parts="\n\n".join(parts)),
+            prompt=MERGE_USER.format(label=label, parts=merged_src),
             mode="quick",
         )
     except Exception as exc:  # noqa: BLE001
@@ -148,6 +164,7 @@ async def summarize_container(
     await store.upsert_summary(
         work_id, scope="container", ref_id=container["id"], content=text,
         ref_ordinal=int(container.get("ordinal") or 0), model=model,
+        ref_hash=_hash(merged_src),
     )
     return text
 
@@ -158,7 +175,7 @@ async def summarize_work(
     """全书概要：合并容器摘要（没有容器就用节摘要）。"""
     if not force:
         exist = await store.get_summary("work", work_id)
-        if exist:
+        if exist and (exist.get("ref_hash") or ""):
             return exist["content"]
 
     containers = await store.list_summaries(work_id, "container")
@@ -168,12 +185,13 @@ async def summarize_work(
         parts_src = [s["content"] for s in nodes if s.get("content")]
     if not parts_src:
         return None
+    merged_src = "\n\n".join(parts_src)
 
     try:
         res = await gateway.complete(
             model=model,
             system=MERGE_SYSTEM,
-            prompt=MERGE_USER.format(label="全书", parts="\n\n".join(parts_src)),
+            prompt=MERGE_USER.format(label="全书", parts=merged_src),
             mode="quick",
         )
     except Exception as exc:  # noqa: BLE001
@@ -183,7 +201,8 @@ async def summarize_work(
     text = _clean(res.text)
     if not text:
         return None
-    await store.upsert_summary(work_id, scope="work", ref_id=work_id, content=text, model=model)
+    await store.upsert_summary(work_id, scope="work", ref_id=work_id, content=text,
+                               model=model, ref_hash=_hash(merged_src))
     return text
 
 

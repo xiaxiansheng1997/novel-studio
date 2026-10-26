@@ -145,6 +145,7 @@ async def index_status(store, work_id: str) -> dict[str, Any]:
     src = await store.count_chunks(work_id, "source")
     readable = await store.list_readable(work_id)
     summaries = await store.list_summaries(work_id, "node")
+    stale = await store.stale_summaries(work_id)
     return {
         "chunks_body": body,
         "chunks_source": src,
@@ -152,5 +153,8 @@ async def index_status(store, work_id: str) -> dict[str, Any]:
         "sources_indexed": sum(1 for u in units if u["ref_kind"] == "source"),
         "nodes_total": len(readable),
         "summaries": len(summaries),
+        # 正文改过但还没重算的：这两个计数就是右栏「重算过期摘要」按钮的依据
+        "stale_summaries": sum(1 for s in stale if s["scope"] == "node"),
+        "stale_upstream": sum(1 for s in stale if s["scope"] != "node"),
         "state": await store.index_state(work_id),
     }

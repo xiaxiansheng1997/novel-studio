@@ -42,8 +42,9 @@ class TaskContext:
 
 
 async def _prev_summary(store, work_id: str, ordinal: int) -> str:
+    # 只要 fresh：上一节刚刚改过稿时，宁可不给前情提示，也不能拿旧摘要去定节拍卡
     rows = [s for s in await store.list_summaries(work_id, "node")
-            if int(s.get("ref_ordinal") or 0) < ordinal]
+            if int(s.get("ref_ordinal") or 0) < ordinal and s.get("fresh")]
     if not rows:
         return ""
     last = max(rows, key=lambda s: int(s.get("ref_ordinal") or 0))
