@@ -2,6 +2,16 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { apiFetch } from '../utils/api'
 
+/** 后端错误体是 FastAPI 的 `{detail: "..."}`，删除被备份拦住那句就在里面 */
+async function errDetail(r, fallback) {
+  try {
+    const j = await r.json()
+    return typeof j.detail === 'string' ? j.detail : fallback
+  } catch {
+    return fallback
+  }
+}
+
 /**
  * 写作台状态：作品 → 节点树 → 当前节点 → 生成。
  *
@@ -67,7 +77,12 @@ export const useStudioStore = defineStore('studio', () => {
   /** 删作品连同节点树；当前打开的就是它时清空右侧状态 */
   async function deleteWork(id) {
     const r = await apiFetch(`/studio/works/${id}`, { method: 'DELETE' })
-    if (!r.ok) return false
+    if (!r.ok) {
+      // 删之前服务端会先拷一份整库副本，备份没写成就是 500「已拒绝删除」：
+      // 这种时候书还在书架上，不把原因说出来只会被当成按钮没反应
+      error.value = await errDetail(r, '删除失败')
+      return false
+    }
     works.value = works.value.filter((w) => w.id !== id)
     if (work.value?.id === id) {
       work.value = null
@@ -175,11 +190,17 @@ export const useStudioStore = defineStore('studio', () => {
     return n
   }
 
+  /** 删节点连同子树。备份写不成时后端会拒绝删除，这里把原因带到 error 上 */
   async function deleteNode(id) {
     const r = await apiFetch(`/studio/nodes/${id}`, { method: 'DELETE' })
-    if (!r.ok) return
+    if (!r.ok) {
+      error.value = await errDetail(r, '删除失败')
+      return false
+    }
+    error.value = ''
     tree.value = tree.value.filter((n) => n.id !== id && !n.path.startsWith((tree.value.find((x) => x.id === id)?.path || '∅') + '.'))
     if (node.value?.id === id) node.value = null
+    return true
   }
 
   /**

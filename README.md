@@ -44,7 +44,7 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 2. 每节生成前按桶装配上下文（S0–S8 + S_src；novel 默认 28,000 字符、article 18,000）。`POST /studio/context/preview` 只装配不花钱，能看到每桶占多少、丢了什么——**调 prompt 靠这个，不然就是盲调**
 3. 生成后可选自动后处理：分块索引 → 三段式摘要（事件 / 变化 / 钩子）→ 图谱抽取 → 一致性检查 → 5 维打分
 4. 全文拼装 `POST …/assemble`，导出 `GET …/export`（Markdown）
-5. 选中任意段落可单独加工（重写 / 压缩 / 扩写 / 润色 / 翻译，`POST /studio/transform`），多候选横向比较
+5. 选中任意段落可单独加工（重写 / 压缩 / 扩写 / 润色 / 翻译 / 拆分 / 合并，`POST /studio/transform`），多候选横向比较
 
 ## 两种形态
 
@@ -68,6 +68,28 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 正文与素材切成 700 字块进 FTS5（jieba 预分词），`index_units` 记内容哈希做增量重建（没改过的节点直接跳过）。
 摘要分三段（事件 / 变化 / 钩子），装配上下文时按桶取用。
 **向量检索尚未接入**（`chunk_vectors` 表还没建，属可选的 M5），换个说法的语义查询仍只能靠关键词召回。
+
+## 改完稿子会发生什么
+
+改正文不是只改那一行字，库里有一圈东西是从正文派生出来的。这一节说清楚改完之后各自往哪走：
+
+- **摘要按内容指纹过期**。`summaries` 每行记着它是从哪一版正文算出来的（`ref_hash`），正文一改指纹就对不上；
+  卷摘要与全书摘要是多节拼出来的，没有单一源文本，靠失效传播把它们的 `ref_hash` 置空。
+  过期的摘要**不会进生成上下文**（S3/S4 只取新鲜的），被丢了哪几节写在「上下文」预览的 warnings 里，
+  右栏「记忆」也会显示「N 节摘要待重算」——按钮文案跟着变成「重算过期摘要」，点下去只会补过期那些，不重烧没改过的。
+- **每一版都留得回来**。每次「采用」与生成落库都会存一个版本，来源标成 AI 草稿 / AI 润色 / 手改，
+  右栏「历史」页能列出、能跟当前正文并排比对、能点「用这一版」回滚。
+  回滚前服务端会先把当下这份还没进版本表的正文存一版，所以点回滚不会吃掉你刚敲的几百字。
+- **上下移会把章号一起带走**。树上的 ↑↓ 只跟同一个父节点下的紧邻兄弟互换；「第几章」这个数在库里存了十份
+  （章节序、摘要序号、分块序、实体的登场/死亡章号、关系与事件与伏笔的章号、角色状态章号），
+  交换时一起对调，否则「已死的角色在第 5 章出场」这类判定会跟着错位。
+  内容没变，所以不重算索引与摘要，只把库标脏。
+- **删除前自动留备份**。删一节（含整棵子树与全部历史版本）先写一份 JSON 到 `storage/backups/nodes/`，
+  删作品先拷一份整库副本到 `storage/backups/works/`；**备份写不成就拒绝删除**，界面上会给出「备份失败，已拒绝删除」。
+  找回一节：`python -m scripts.restore_backup --list` 看有哪些，`--name <文件>` 试运行，加 `--yes` 真恢复
+  （原父节点还在就挂回去，没了就挂作品根；章号追加到末尾，再用 ↑↓ 挪回原位）。
+  整库副本只列不给脚本改：那种找回是停服务后把文件盖回 `storage/studio.sqlite`。
+  节点备份留最近 20 份、整库副本留最近 5 份，删的时候顺手清理。
 
 ## 检查规则
 
@@ -104,6 +126,10 @@ python -m scripts.cleanup_works --sweep-orphans    # 默认试运行，加 --yes
 
 清书架也走这个脚本（同样默认试运行）。
 
+删除本身也留退路：删节/删卷写 `storage/backups/nodes/*.json`（正文 + 全部历史版本），删作品写
+`storage/backups/works/*.sqlite` 整库副本；备份写不成就拒绝删除。找回见上面「改完稿子会发生什么」与
+`python -m scripts.restore_backup --list`。
+
 ## 界面规范
 
 深色「墨与金」：唯一强调色 `#D9A45B`、正文衬线 17px / 行高 1.9、编辑区宽度封顶 646px。
@@ -125,7 +151,7 @@ python -m scripts.cleanup_works --sweep-orphans    # 默认试运行，加 --yes
 ```
 app/
   main.py runtime.py config.py
-  api/      studio_routes.py（57 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
+  api/      studio_routes.py（62 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
   studio/   schema.py store.py content_types.py assembler.py prompting.py tokenize.py chunker.py
             indexer.py retrieval.py summarizer.py graph.py consistency.py soft_rules.py
             scoring.py tasks.py jobs.py jsonutil.py            ← 写作业务全在这
@@ -141,14 +167,16 @@ design-system/  本地生成，已 gitignore（写作台的界面规范）
 web/        旧版静态页 chat.html admin.html live.html（前端未构建时兜底）
 dev.py      frontend / backend / build / all
 scripts/    smoke_studio.py  smoke_m1_tail.py  smoke_m2.py  smoke_m3.py  smoke_m4.py  smoke_soft_rules.py
-            measure_baseline.py  shot_studio.py  cleanup_works.py  login.py  recon.py  check.ps1
-tests/      pytest（全量 125 例；写作侧用 tmp_path 建临时库，不碰 storage/）
-storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite / backups，已 gitignore>
+            measure_baseline.py  shot_studio.py  cleanup_works.py  restore_backup.py  login.py  recon.py  check.ps1
+tests/      pytest（全量 163 例；写作侧用 tmp_path 建临时库，不碰 storage/）
+storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
+            backups/nodes（删节前的 JSON 备份）/ backups/works（删作品前的整库副本），已 gitignore>
 ```
 
 `scripts/` 下的验收脚本分两类，账号被风控时别看错哪类会花钱：
 
-- **完全离线**（不起服务、不发起任何生成调用）：`smoke_soft_rules.py`（只读正文跑软规则）、`cleanup_works.py`（清书架 / 清孤儿行，默认试运行）；
+- **完全离线**（不起服务、不发起任何生成调用）：`smoke_soft_rules.py`（只读正文跑软规则）、`cleanup_works.py`（清书架 / 清孤儿行，默认试运行）、
+  `restore_backup.py`（默认 `--list` 只看，`--name` 不带 `--yes` 也只打印会恢复什么）；
 - **要先起服务**（跑本机 HTTP 接口）：`smoke_studio.py`（默认只读，`--generate` 才真生成）、`smoke_m3.py`（默认不调模型，`--llm` 才真实抽取）、
   `smoke_m1_tail.py` 与 `smoke_m2.py`（默认会真跑一次，`--skip-llm` 只验不调模型的部分）、`smoke_m4.py`（走队列，会生成）、
   `measure_baseline.py`（M0 基线实测，`--dry-run` 只看计划）、`shot_studio.py`（Playwright 截图，不发消息）。
@@ -202,12 +230,15 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite / back
 - 模板里的 `target_words` 是软约束，实测偏差约 ±20%~40%。
 - 删节点/删素材现在会把 `chunks_fts` / `index_units`（以及节点相关的 `summaries`）一起清掉；
   在这之前删下的历史残留用 `cleanup_works --sweep-orphans` 清（旧版只按 work_id 判，认不出「作品还活着、节点已没」的那些行）。
+- **备份只在删除那一刻写，不是定时快照**：没删过的东西不会自己多一份副本（`storage/backups/`），
+  也没做界面化的恢复入口——节点备份靠 `scripts/restore_backup.py`，整库副本靠停服务盖文件。
+- **上下移只在同层**：不能把一节拖到另一个卷下面（要跨卷得自己剪切正文重排）。
 - 生成吞吐受网页账号的限流与风控硬约束，串行跑一本长篇要按小时计；想要并发得自己解决账号问题。
 - 底座（`/v1` OpenAI 接口、模式与文案校准）的限制另有 **十几条**，见 `docs/reverse-proxy.md` 的「已知限制（底座侧）」。
 
 ## 文档索引
 
-- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v1.8）
+- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.0）
 - `docs/m0-baseline.md` — M0 基线实测数据
 - `docs/content-types.md` — 文种与模板配置约定
 - `docs/reverse-proxy.md` — 底座：驱动三家网页端、`/v1` API 用法、风控排查细则

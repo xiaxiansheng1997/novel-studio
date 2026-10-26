@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import shutil
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -58,6 +61,16 @@ _ORDINAL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("foreshadows", "planned_payoff_ordinal"),
     ("foreshadows", "resolved_ordinal"),
 )
+
+# 删除在这一层没有撤销键：`node_versions ON DELETE CASCADE` 挂在 nodes 上，
+# 删卷会连带抹掉该卷每一章的全部历史版本。所以删之前先落盘一份，按时间留住最近的：
+# 节点备份是一份 JSON，整库副本是一份 .sqlite（单作品级精准恢复做不了，不那个意）。
+BACKUP_NODE_KEEP = 20
+BACKUP_WORK_KEEP = 5
+
+
+class BackupError(RuntimeError):
+    """备份没写成。调用方必须先拒绝删除。"""
 
 
 def _now() -> float:
@@ -272,7 +285,16 @@ class StudioStore:
             await self._db.commit()
         return (cur.rowcount or 0) > 0
 
-    async def delete_work(self, work_id: str) -> bool:
+    async def delete_work(self, work_id: str, *, backup: bool = True) -> bool:
+        """删作品。**先用 shutil.copy2 拷一份整库再动手**。本项无回滚入口，找回靠
+        `scripts/restore_backup.py` 或直接把副本盖回去。
+
+        为什么不做「单作品级备份」：一个作品的数据摊在 12 张表里（还含图谱、索引、
+        生成记录），拼一份能准确回填的子集是个比 `delete_work` 本身更大的活，
+        而且写错就是「看起来能恢复、恢复出来是半本」。整库副本不体面但真能回去。
+        """
+        if backup:
+            self._copy_db_backup(f"work-{work_id}")
         assert self._db is not None
         async with self._lock:
             # _NO_FK_TABLES 与 chunks_fts 都没有外键兜底，必须手动清：
@@ -659,8 +681,20 @@ class StudioStore:
                 "DELETE FROM summaries WHERE scope IN ('node', 'container') "
                 f"AND ref_id IN ({marks})", list(ref_ids))
 
-    async def delete_node(self, node_id: str) -> bool:
-        """删节点连同其整棵子树（靠 path 前缀，不依赖递归）。"""
+    async def delete_node(self, node_id: str, *, backup: bool = True) -> bool:
+        """删节点连同其整棵子树（靠 path 前缀，不依赖递归）。
+
+        删之前先把这一子树连同全部历史版本写一份 JSON。备份写不成就直接拒绝删除：
+        宁可删不掉（重试、或者去把目录权限改对），不能删了找不回。
+        备份落在 `storage/backups/nodes/`，目录由库路径推出来，不另开配置项。
+        """
+        # 先在锁外把快照读出来：锁内那份要删的 id 是 `_drop_unit_rows` 用的，
+        # 两件事插队容易把「备份里的子树」与「真删掉的子树」对不上。
+        bundle = await self._node_backup_bundle(node_id)
+        if bundle is None:
+            return False
+        if backup:
+            self._write_node_backup(bundle)
         assert self._db is not None
         async with self._lock:
             cur = await self._db.execute("SELECT work_id, path FROM nodes WHERE id = ?", (node_id,))
@@ -675,6 +709,206 @@ class StudioStore:
             await self._db.execute(f"DELETE FROM nodes WHERE {where}", params)
             await self._db.commit()
         return True
+
+    # ==================== 删除备份与找回 ====================
+
+    def _backup_dir(self, kind: str) -> Path:
+        """备份目录：`storage/studio.sqlite` → `storage/backups/<kind>/`。不存在就建。"""
+        target = self.db_path.parent / "backups" / kind
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:  # 包一层：调用方只需要知道「备份写不成」
+            raise BackupError(f"备份目录不可用 {target}: {exc}") from exc
+        return target
+
+    def _stamp(self) -> str:
+        return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def _copy_db_backup(self, label: str) -> Path:
+        """删作品前的整库副本，与 `scripts/cleanup_works.py` 同一手法。"""
+        try:
+            # 文件名也要在 try 里拼：时间戳取不到同样是「备份写不成」，不能漏成 OSError 冒出去
+            dest = self._backup_dir("works") / f"studio-before-delete-{label}-{self._stamp()}.sqlite"
+            shutil.copy2(self.db_path, dest)
+        except OSError as exc:
+            raise BackupError(f"整库副本没写成，已拒绝删除：{exc}") from exc
+        self.prune_backups("works", BACKUP_WORK_KEEP)
+        return dest
+
+    async def _node_backup_bundle(self, node_id: str) -> Optional[dict[str, Any]]:
+        """读一份删除前的完整快照：这一节 + 整棵子树 + 每个节点的全部历史版本。"""
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute("SELECT * FROM nodes WHERE id = ?", (node_id,))
+            root = await cur.fetchone()
+            if not root:
+                return None
+            cur = await self._db.execute(
+                "SELECT * FROM nodes WHERE work_id = ? AND (id = ? OR path LIKE ?) ORDER BY path",
+                (root["work_id"], node_id, f"{root['path']}.%"))
+            rows = await cur.fetchall()
+            nodes: list[dict[str, Any]] = []
+            for r in rows:
+                d = dict(r)
+                vc = await self._db.execute(
+                    "SELECT version_no, content, source, run_id, created_at "
+                    "FROM node_versions WHERE node_id = ? ORDER BY version_no", (d["id"],))
+                d["versions"] = [dict(v) for v in await vc.fetchall()]
+                nodes.append(d)
+        return {
+            "work_id": root["work_id"], "node_id": node_id, "title": root["title"],
+            "kind": root["kind"], "path": root["path"], "parent_id": root["parent_id"],
+            "ordinal": root["ordinal"], "status": root["status"],
+            "deleted_at": _now(), "nodes": nodes,
+        }
+
+    def _write_node_backup(self, bundle: dict[str, Any]) -> Path:
+        name = (f"{bundle['work_id']}__{bundle['node_id']}__"
+                f"{datetime.fromtimestamp(bundle['deleted_at']).strftime('%Y%m%d_%H%M%S')}.json")
+        target = self._backup_dir("nodes") / name
+        try:
+            target.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError as exc:
+            raise BackupError(f"备份没写成，已拒绝删除：{exc}") from exc
+        self.prune_backups("nodes", BACKUP_NODE_KEEP)
+        return target
+
+    def backup_dir(self, kind: str) -> Path:
+        """备份目录的对外入口（接口与脚本用它定位文件，不在外面拼路径）。"""
+        return self._backup_dir(kind)
+
+    def list_work_backups(self) -> list[dict[str, Any]]:
+        """整库副本列举（新在前）：名字 / 大小 / 时间。找回靠 `scripts/restore_backup.py`。"""
+        folder = self._backup_dir("works")
+        out: list[dict[str, Any]] = []
+        for p in sorted(folder.glob("*.sqlite"),
+                        key=lambda x: (x.stat().st_mtime, x.name), reverse=True):
+            out.append({"name": p.name, "bytes": p.stat().st_size,
+                        "created_at": p.stat().st_mtime})
+        return out
+
+    def prune_backups(self, kind: str, keep: int) -> list[str]:
+        """只留最近 `keep` 份，返回被清掉的文件名。
+
+        按修改时间排而不是按文件名：节点备份名以 work id 开头，字典序不等于时间序。
+        本目录只存备份，不往里扫非备份文件；当前库本体在上一层目录，摸不到。"""
+        folder = self._backup_dir(kind)
+        files = sorted(folder.iterdir(), key=lambda p: (p.stat().st_mtime, p.name))
+        gone: list[str] = []
+        for stale in files[: max(0, len(files) - max(1, keep))]:
+            try:
+                stale.unlink()
+                gone.append(stale.name)
+            except OSError:
+                logger.warning(f"[studio] 旧备份删不掉，先留着：{stale}")
+        return gone
+
+    def list_node_backups(self) -> list[dict[str, Any]]:
+        """只读列举节点备份（新在前），不抛异常也不改任何东西。"""
+        out: list[dict[str, Any]] = []
+        for f in sorted(self._backup_dir("nodes").iterdir(),
+                        key=lambda p: (p.stat().st_mtime, p.name), reverse=True):
+            if f.suffix != ".json":
+                continue
+            row: dict[str, Any] = {
+                "name": f.name, "bytes": f.stat().st_size,
+                "created_at": f.stat().st_mtime,
+                "title": "", "work_id": "", "kind": "", "node_count": 0,
+            }
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                row.update(title=data.get("title") or "", work_id=data.get("work_id") or "",
+                           kind=data.get("kind") or "",
+                           node_count=len(data.get("nodes") or []))
+            except (OSError, ValueError):
+                row["title"] = "（读不了，文件可能坏了）"
+            out.append(row)
+        return out
+
+    async def restore_node_backup(self, name: str) -> Optional[dict[str, Any]]:
+        """从备份 JSON 找回一节（连子树与历史版本一起）。
+
+        口径：原父节点还在就挂回它下面，没了就挂到作品根（宁可位置不对，不能造孤儿）；
+        节点一律用新 id，旧 id 已被级联删掉、而且同一个备份可能被恢复两次；
+        path 重新排、ordinal 追加到末尾——原序就记在 bundle 里，恢复后用上下移挪回去。
+        返回 None = 备份不存在、读不懂、或那本书已经整本删了（那就只能走整库副本）。
+        """
+        path = self._backup_dir("nodes") / name
+        if not path.is_file():
+            return None
+        try:
+            bundle = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning(f"[studio] 备份读不了 {name}: {exc}")
+            return None
+        rows = bundle.get("nodes") or []
+        if not rows or not bundle.get("work_id"):
+            return None
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute("SELECT 1 FROM works WHERE id = ?", (bundle["work_id"],))
+            if not await cur.fetchone():
+                return None
+            now = _now()
+            restored: dict[str, str] = {}
+            made: list[dict[str, Any]] = []
+            # bundle 里的 nodes 是按 path 排的，父在子前，所以能一层层挂上去
+            for src in rows:
+                old_parent = src.get("parent_id")
+                parent_id: Optional[str] = None
+                parent_path, depth = "", 0
+                if old_parent:
+                    if old_parent in restored:  # 本次恢复的子树内部，用新 id
+                        parent_id = restored[old_parent]
+                        cur = await self._db.execute(
+                            "SELECT path, depth FROM nodes WHERE id = ?", (parent_id,))
+                        prow = await cur.fetchone()
+                        parent_path, depth = prow["path"] + ".", int(prow["depth"]) + 1
+                    else:
+                        cur = await self._db.execute(
+                            "SELECT path, depth FROM nodes WHERE id = ?", (old_parent,))
+                        prow = await cur.fetchone()
+                        if prow:
+                            parent_id = old_parent
+                            parent_path, depth = prow["path"] + ".", int(prow["depth"]) + 1
+                seq = await self._next_seq(bundle["work_id"], parent_id)
+                ordinal: Optional[int] = None
+                if src.get("ordinal") is not None:
+                    cur = await self._db.execute(
+                        "SELECT COALESCE(MAX(ordinal),0) AS m FROM nodes WHERE work_id = ?",
+                        (bundle["work_id"],))
+                    ordinal = int((await cur.fetchone())["m"]) + 1
+                nid = _new_id("n_")
+                content = src.get("content") or ""
+                await self._db.execute(
+                    "INSERT INTO nodes(id, work_id, parent_id, path, depth, ordinal, kind, title, "
+                    "content, status, word_count, content_hash, summary, created_at, updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (nid, bundle["work_id"], parent_id, f"{parent_path}{seq:04d}", depth,
+                     ordinal, src["kind"], src["title"], content, src.get("status") or "draft",
+                     _count_words(content), _hash(content) if content else "",
+                     src.get("summary") or "", now, now),
+                )
+                for v in src.get("versions") or []:
+                    await self._db.execute(
+                        "INSERT INTO node_versions(id, node_id, version_no, content, source, "
+                        "run_id, created_at) VALUES(?,?,?,?,?,?,?)",
+                        (_new_id("v_"), nid, int(v["version_no"]), v["content"],
+                         v.get("source") or "human", v.get("run_id"), v.get("created_at") or now),
+                    )
+                restored[src["id"]] = nid
+                made.append({"id": nid, "title": src["title"], "kind": src["kind"],
+                             "ordinal": ordinal, "versions": len(src.get("versions") or []),
+                             # 原父节点已不在，这一节被挂到了作品根：返回体里得说出来
+                             "hung_on_root": bool(parent_id is None and old_parent)})
+            await self._db.execute(
+                "UPDATE works SET updated_at = ? WHERE id = ?", (now, bundle["work_id"]))
+            await self._db.commit()
+        return {
+            "restored": made, "work_id": bundle["work_id"],
+            "root_id": restored.get(bundle.get("node_id") or "", ""),
+            "original_ordinal": bundle.get("ordinal"),
+        }
 
     async def list_versions(self, node_id: str, limit: int = 30) -> list[dict[str, Any]]:
         assert self._db is not None

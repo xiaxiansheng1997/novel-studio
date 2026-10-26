@@ -232,7 +232,9 @@ async def test_move_never_crosses_parents(store) -> None:
 
     assert r == {"moved": False, "reason": "已到边界"}, "A2 下面还有 B1，但它不在同一个 parent 里"
     rows = {n["id"]: n for n in await store.list_tree(work["id"])}
-    assert rows[a2["id"]]["parent_id"] == va["id"] and rows[b1["id"]]["parent_id"] == vb["id"]
+    assert (rows[a1["id"]]["parent_id"] == va["id"]
+            and rows[a2["id"]]["parent_id"] == va["id"]
+            and rows[b1["id"]]["parent_id"] == vb["id"])
     assert [n["title"] for n in await store.list_readable(work["id"])] == ["A1", "A2", "B1"]
 
 

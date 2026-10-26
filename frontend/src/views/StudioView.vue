@@ -2,6 +2,11 @@
   <div class="app-shell">
     <AppNav />
 
+    <!-- 会自己消掉的小提示：上下移的结果、删除被备份拦住都走这里（书架与工作台共用） -->
+    <div v-if="notice" class="notice" :class="{ 'notice--bad': noticeBad }" role="status">
+      {{ notice }}
+    </div>
+
     <div class="studio">
       <!-- 未选作品：书架 -->
       <main v-if="!store.work" class="shelf">
@@ -71,7 +76,11 @@
             @click="openWork(w.id)"
             @keydown.enter="openWork(w.id)"
           >
-            <button class="work-del" title="删除作品（连同节点树）" @click.stop="removeWork(w)">
+            <button
+              class="work-del"
+              title="删除作品（连同节点树与全部历史版本；删前留一份整库副本）"
+              @click.stop="removeWork(w)"
+            >
               <AppIcon name="trash" :size="12" />
             </button>
             <span class="work-kind">{{ kindLabel(w) }}</span>
@@ -97,9 +106,6 @@
           @remove="removeNode"
           @move="moveNode"
         />
-
-        <!-- 上下移的结果：到边了不是报错，给一条会自己消掉的提示 -->
-        <div v-if="moveNote" class="move-note" role="status">{{ moveNote }}</div>
 
         <main class="editor">
           <header class="ed-top">
@@ -454,7 +460,7 @@ onMounted(() => window.addEventListener('keydown', onKeydown))
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
   stopQueuePoll()
-  clearTimeout(moveNoteTimer)
+  clearTimeout(noticeTimer)
 })
 
 async function openWork(id) {
@@ -477,9 +483,23 @@ function backToShelf() {
   store.node = null
 }
 
+// ---- 操作结果的小提示（上下移到边、删除被备份拦住）----
+const notice = ref('')
+const noticeBad = ref(false)
+let noticeTimer = 0
+
+function showNotice(text, bad = false) {
+  notice.value = text
+  noticeBad.value = bad
+  clearTimeout(noticeTimer)
+  noticeTimer = setTimeout(() => (notice.value = ''), bad ? 5200 : 2600)
+}
+
 async function removeWork(w) {
-  if (!window.confirm(`删除《${w.title}》？节点与正文会一并删除，不可撤销。`)) return
-  await store.deleteWork(w.id)
+  if (!window.confirm(
+    `删除《${w.title}》？会连同它的节点树、正文与全部历史版本一并删掉。\n\n`
+    + '删之前会先拷一份整库副本到 storage/backups/works/，要找回只能停服务把那个文件盖回去。')) return
+  if (!(await store.deleteWork(w.id))) showNotice(store.error || '删除失败', true)
 }
 
 async function create() {
@@ -506,18 +526,10 @@ async function quickCreate(parent) {
 }
 
 async function removeNode(node) {
-  if (!window.confirm(`删除「${node.title}」及其子节点？此操作不可撤销。`)) return
-  await store.deleteNode(node.id)
-}
-
-// ---- 同层上下移 ----
-const moveNote = ref('')
-let moveNoteTimer = 0
-
-function showMoveNote(text) {
-  moveNote.value = text
-  clearTimeout(moveNoteTimer)
-  moveNoteTimer = setTimeout(() => (moveNote.value = ''), 2600)
+  if (!window.confirm(
+    `删除「${node.title}」及其子节点？会连同子树与全部历史版本删除。\n\n`
+    + '正文已自动备份，可用 scripts/restore_backup.py 找回。')) return
+  if (!(await store.deleteNode(node.id))) showNotice(store.error || '删除失败', true)
 }
 
 /**
@@ -532,10 +544,10 @@ async function moveNode(node, direction) {
   await flushSave()
   const r = await store.moveNode(node.id, direction)
   if (!r.moved) {
-    showMoveNote(r.reason || '移动失败')
+    showNotice(r.reason || '移动失败')
     return
   }
-  showMoveNote(`已与「${r.swapped_with_title}」交换位置`)
+  showNotice(`已与「${r.swapped_with_title}」交换位置`)
   await store.runCheck()
   await panelRef.value?.refreshContext()
 }
@@ -1017,13 +1029,13 @@ function onTransformAdopt(text) {
   line-height: 1.7;
 }
 
-/* ---------- 上下移结果提示（浮在树外角，不插进布局，不然行高会跳） ---------- */
-.move-note {
+/* ---------- 操作结果提示（浮在内容外角，不插进布局，不然行高会跳） ---------- */
+.notice {
   position: fixed;
   left: 16px;
   bottom: 16px;
   z-index: 90;
-  max-width: 240px;
+  max-width: 320px;
   padding: 7px 11px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1032,6 +1044,11 @@ function onTransformAdopt(text) {
   font-size: 11.5px;
   line-height: 1.6;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+}
+/* 删除被备份拦住不是「没什么发生」，得看得出一条没删成 */
+.notice--bad {
+  border-color: rgba(217, 107, 107, 0.45);
+  color: var(--danger);
 }
 
 /* ---------- 生成预览 ---------- */

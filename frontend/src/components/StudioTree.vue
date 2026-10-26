@@ -50,7 +50,11 @@
           <button class="op" title="在此节点下新建" @click.stop="$emit('create', n)">
             <AppIcon name="plus" :size="12" />
           </button>
-          <button class="op" title="删除" @click.stop="$emit('remove', n)">
+          <button
+            class="op"
+            title="删除（连同子树与全部历史版本；正文会先备份，可用 scripts/restore_backup.py 找回）"
+            @click.stop="$emit('remove', n)"
+          >
             <AppIcon name="trash" :size="12" />
           </button>
         </span>

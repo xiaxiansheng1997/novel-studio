@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 import time
+from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import quote
 
@@ -26,6 +27,7 @@ from app.studio import content_types, consistency, graph, indexer, retrieval, su
 from app.studio.assembler import assemble
 from app.studio.jsonutil import parse_json_loose as _parse_json_loose
 from app.studio.prompting import node_instruction as _node_instruction
+from app.studio.store import BackupError
 
 router = APIRouter()
 
@@ -178,7 +180,11 @@ async def update_work(work_id: str, body: WorkUpdate, request: Request):
 @router.delete("/studio/works/{work_id}", dependencies=[Depends(verify_key)])
 async def delete_work(work_id: str, request: Request):
     await _require_work(request, work_id)
-    await _store(request).delete_work(work_id)
+    try:
+        await _store(request).delete_work(work_id)
+    except BackupError as exc:
+        # 整库副本没写成就不删：宁可不删，不能删了找不回
+        raise HTTPException(status_code=500, detail=f"备份失败，已拒绝删除：{exc}") from exc
     return {"ok": True}
 
 
@@ -241,7 +247,10 @@ async def move_node(node_id: str, body: NodeMove, request: Request):
 
 @router.delete("/studio/nodes/{node_id}", dependencies=[Depends(verify_key)])
 async def delete_node(node_id: str, request: Request):
-    ok = await _store(request).delete_node(node_id)
+    try:
+        ok = await _store(request).delete_node(node_id)
+    except BackupError as exc:
+        raise HTTPException(status_code=500, detail=f"备份失败，已拒绝删除：{exc}") from exc
     if not ok:
         raise HTTPException(status_code=404, detail="节点不存在")
     return {"ok": True}
@@ -273,6 +282,35 @@ async def restore_version(node_id: str, version_id: str, request: Request):
     if node is None:
         raise HTTPException(status_code=404, detail="版本不存在或不属于该节点")
     return node
+
+
+# ==================== 删除备份 ====================
+
+@router.get("/studio/backups", dependencies=[Depends(verify_key)])
+async def list_backups(request: Request):
+    """列出删除前的备份：节点 JSON 与整库副本。只读。"""
+    store = _store(request)
+    return {
+        "nodes": store.list_node_backups(),
+        "works": store.list_work_backups(),
+        "dir": str(store.backup_dir("nodes")),
+    }
+
+
+@router.post("/studio/backups/{filename}/restore", dependencies=[Depends(verify_key)])
+async def restore_backup_node(filename: str, request: Request):
+    """从一份节点备份找回那一节（连子树与历史版本）。
+
+    恢复后的节挂在原父节点下（父节点没了就挂作品根），`ordinal` 追到末尾：
+    要挪回原来的位置用上一节刚做完的上下移。本轮不做恢复 UI，入口就这两个接口
+    与 `scripts/restore_backup.py`。
+    """
+    if Path(filename).name != filename or not filename.endswith(".json"):
+        raise HTTPException(status_code=400, detail="备份文件名不合法")
+    out = await _store(request).restore_node_backup(filename)
+    if out is None:
+        raise HTTPException(status_code=404, detail="备份不存在、读不懂，或那本书已整本删除")
+    return out
 
 
 # ==================== 素材 / 事实 / 术语 ====================

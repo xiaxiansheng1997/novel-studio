@@ -452,6 +452,7 @@ CREATE TABLE summaries (
     scope TEXT NOT NULL,              -- node/volume/work（单篇只用到 node/work）
     ref_id TEXT NOT NULL,             -- node_id / volume node_id / work_id
     ref_ordinal INTEGER DEFAULT 0,
+    ref_hash TEXT DEFAULT '',         -- v2.0 补：生成时的内容指纹，'' = 已知过期
     content TEXT NOT NULL,
     model TEXT DEFAULT '',
     created_at REAL NOT NULL,
@@ -467,6 +468,13 @@ CREATE TABLE index_state (
     updated_at REAL NOT NULL
 );
 ```
+
+> **`ref_hash` 是 v2.0 补的列**，旧库靠 `store._migrate()` 走 `ALTER TABLE`（`CREATE TABLE IF NOT EXISTS` 不会给已存在的表加列）。
+> 升级当天不能把所有记忆一夜判过期，所以历史行要回填：`scope='node'` 回填该节点的 `content_hash`（空正文用 `NULLIF` 跳过），
+> `container`/`work` 回填 `'legacy'`。**口径只有一条：指纹按未 strip 的原文算**（`_hash(node["content"] or "")`，
+> 与 `store.update_node` 里维护的 `nodes.content_hash` 同一口径）。按 strip 后的文本算会让每次保存都判过期，
+> 等于每次白烧一次模型——这一条已有回归测着（正文只加尾部空格不判过期）。
+> 容器/全书摘要是多节拼出来的，没有单一源文本：生成时写 `_hash(拼接后的子摘要)`，子节改动时由失效传播置成 `''`。
 
 ### 5.4 运行记录与任务队列
 
@@ -521,7 +529,12 @@ CREATE INDEX idx_jobs_status ON jobs(status, priority DESC, created_at);
 
 ### 5.5 正文与索引的解耦约定
 
-1. `nodes.content_hash` 变化 → 该节点分块/摘要/图谱标记失效
+1. `nodes.content_hash` 变化 → 该节点分块/摘要/图谱标记失效。**v2.0 才真正接上「摘要」这一路**：原先 `summaries` 只比 `ref_ordinal`，
+   重写第 7 章后拿回的仍是上一版摘要——记忆不是旧了，是假的。现在 `update_node` 在正文实际变化时（改标题/状态不算）
+   于同一事务内调 `store._mark_stale_locked()`，把该节点父链上的 container 摘要与全书摘要的 `ref_hash` 置空；
+   节摘要不显式标，它的 `ref_hash` 与新 `content_hash` 自然对不上。读取侧 `get_summary`/`list_summaries` 带 `fresh` 布尔，
+   assembler 的 S3/S4 与 `tasks._prev_summary` 只取新鲜的，被跳过的数量写进 `warnings`（右栏「上下文」页直接看得到）。
+   失效只置标记不重算：重算是模型调用，得人点「重算过期摘要」或后处理链路才会发生
 2. `index_state.dirty = 1` → 后台 worker 增量重建，不阻塞写作
 3. 重建顺序：分块 → 摘要 → 图谱抽取（前者失败不阻塞后者）
 4. 删节点 → 级联删 chunks/summaries（`vectors` 尚未建表，见 15.3）；`events`/`relations` 按 `ordinal` 清理，实体保留（可能在其他章出现）。**已修**：原先 `delete_node()` 只删节点，`chunks` 靠 `node_id` 级联掉了，但 `chunks_fts` 里的行留着（同一个坑的另一条路径，见 5.4），`index_units` 台账与节点摘要同样没人清。现在删节点前会按整棵子树的 id 把这三类一起清掉——摘要这一条不只是虚胖：S4「最近节摘要」按 `work_id` 全量取，不删的话已删章节会以摘要的形式继续回到每次生成的上下文里。删素材同理（`delete_source()` 清 `chunks_fts` + `index_units`）。历史上的残留用 `--sweep-orphans` 清
@@ -1086,12 +1099,18 @@ PATCH  /studio/works/{id}                   # 标题/主旨/文风/预算
 DELETE /studio/works/{id}
 
 # 结构（小说与文档共用节点树）
-GET    /studio/works/{id}/tree              # 卷/章 或 节大纲（含状态、字数）
+GET    /studio/works/{id}/tree              # 卷/章 或 节大纲（含状态、字数）；树序来自 path
 POST   /studio/works/{id}/nodes             # {parent_id, kind, title}
 GET    /studio/nodes/{id}
-PATCH  /studio/nodes/{id}                   # 正文保存、状态流转
-GET    /studio/nodes/{id}/versions
-POST   /studio/nodes/{id}/restore
+PATCH  /studio/nodes/{id}                   # 正文保存、状态流转（snapshot=true 另存一版）
+POST   /studio/nodes/{id}/move              # {direction: up|down} 与同层紧邻兄弟互换，章号一起对调
+GET    /studio/nodes/{id}/versions          # 列表只给 版本号/时间/来源/字数
+GET    /studio/nodes/{id}/versions/{vid}    # 读回那一版全文（v2.0 补）
+POST   /studio/nodes/{id}/versions/{vid}/restore  # 回滚：先把当下正文存一版再写回（v2.0 补）
+DELETE /studio/nodes/{id}                   # 删前自动写节点备份；备份写不成 → 500 拒绝删除
+DELETE /studio/works/{id}                   # 删前先拷整库副本
+GET    /studio/backups                      # 删除前的备份清单（节点 JSON + 整库副本）
+POST   /studio/backups/{name}/restore       # 找回那一节（连子树与历史版本）
 
 # 生成（已实现，SSE）
 POST   /studio/nodes/{id}/generate           # {task_type, instruction, save, variant}
@@ -1224,6 +1243,7 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | **M3 图谱**（已完成 2026-10-25） | 实体/关系/事件/状态/伏笔抽取与合并、设定卡（权威注入）、Python 侧 BFS 子图、S6 注入、小说 5 条硬规则 + 文档 4 条硬规则、告警面板与正文定位 | 改稿触发冲突能准确报出：已死角色出场、物品双持、时间倒退、伏笔超期三类均命中；回忆里提到死人不误报 | 已完成 |
 | **M4 流水线**（已完成 2026-10-25） | 任务队列（单 worker/优先级/幂等）、断点与启动自恢复、风控暂停与退避重试、六种执行器（beats/draft/polish/summarize/extract/check）、5 维自动打分、抽检卡点、队列面板 | 一次提交 N 章无人值守跑完：3 章 90 秒；抽检卡点可停可续；重启后自动续跑 | 已完成 |
 | **插在 M4 与 M5 之间**（已完成 2026-10-25） | 四条软规则（称呼漂移/设定冲突/绝对化表述/数字无出处，零 LLM）、告警分「硬/待确认」两组、图谱力导向可视化与实体详情 | 真实语料 + 全部历史作品离线扫描 0 误报（`scripts/smoke_soft_rules.py`）；打开图谱能看到谁和谁连着、谁已死、哪条关系过期 | 已完成 |
+| **插在 M5 之前 · 改稿的四条退路**（已完成 2026-10-26） | 摘要按内容指纹过期（`summaries.ref_hash` + 失效传播，S3/S4 只注入新鲜的，右栏报「N 节摘要待重算」）、版本历史读得回也点得回去（`source`/`run_id` 标注 + 右栏「历史」并排比对 + 回滚）、章节同层上下移（`store.move_node`，章号在库里的十份拷贝一起对调）、删除前自动备份（节点 JSON + 整库副本，写不成即拒绝删除，`scripts/restore_backup.py` 找回） | 全量 163 passed，**零真实模型调用**（测试内用假 gateway）：改完正文摘要真的重算、没改则跳过；回滚不吃未保存改动；交换后图谱章号正确且唯一约束不炸；备份失败时删不掉 | 已完成 |
 | **M5 向量（可选）** | fastembed 接入、向量召回、RRF 融合、检索评测 | 语义查询召回优于纯关键词 | 3-4 天 |
 
 总计约 **4-5 周**（连续开发）；业余时间按 8-10 周估。M1 结束时系统就可用（能写单篇与单章），后续都是增强。
@@ -1255,7 +1275,7 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | 告警太吵 | 作者整组关掉告警，连带硬规则也没人看 | 每条规则每节封顶 3 条；误报基线用真实语料离线跑（`scripts/smoke_soft_rules.py`），新规则先验证「不报」再接线 |
 | 改稿引发连锁重算 | 索引雪崩 | `stale` 标记延迟重算，不级联 |
 | 模型文风不一致 | 多章割裂 | S1 固定文风卡 + 最近 2 章原文做 few-shot |
-| 数据丢失 | 心血白费 | SQLite 每日自动备份到 `storage/backups/`，保留 30 天 |
+| 数据丢失 | 心血白费 | 旧版写的「SQLite 每日自动备份到 `storage/backups/`，保留 30 天」**没实现**（v2.0 更正）：实际做的是删除前自动留备份——删节/删卷写 `storage/backups/nodes/*.json`（正文 + 全部历史版本，留最近 20 份），删作品拷一份整库副本到 `storage/backups/works/`（留最近 5 份），**备份写不成就拒绝删除**；找回走 `scripts/restore_backup.py`。定时快照仍是空的：库本身坏了（文件损坏/磁盘没了）没有退路 |
 | 草稿质量不达标，改稿成本高于自写 | 批量产出全部作废 | 质量分级 + 每 10 节点抽检，连续两次重写即停 |
 
 ## 15. fastembed + bge-small-zh 评估
@@ -1339,6 +1359,7 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | 25 | 软规则误报基线 | `python scripts/smoke_soft_rules.py`：离线扫真实语料与全部历史作品，只调纯函数、不写 `issues` 表、不调模型 | 软规则能否日常开着 | 已测：单本 3 章 5,261 字 **0 命中**；17 本约 2.2 万字按各自 `checks` 跑 **0 命中**；强开两条文档规则时 `absolute_claim` 0 命中、`number_unsourced` 仅剩 5 条技术数值（120MB / 20ms / 8.4MB 这类，且这些作品本就不开这条） |
 | 26 | 力导向布局稳定性 | 把 `GraphMap.vue` 里真实的 `tick()` 源码切片出来在 Node 里跑 N=17/60/160 | 打开图谱要不要等、会不会飞 | 已测：三档均 0 NaN、0 节点重叠，关系长度中位 137/198/272；据此把参数从 3400/96/0.014 调成 7200/104/0.006 并加上自适应向心力 |
 | 27 | 软规则回归覆盖 | `tests/test_soft_rules.py`；全量 pytest | 规则改动是否退化 | 已测：35 用例（一半是「第一步」「唯一凭据」「8000 / `503` / 1.18.0」这类**不该报**的回归）；全量 125 passed（含 `tests/test_store_delete.py` 8 例） |
+| 28 | 改稿四条退路 | `tests/test_studio_memory.py` / `test_studio_versions.py` / `test_studio_reorder.py` / `test_studio_backup.py`，全部假 gateway、零网络 | 改完稿子记忆是否还可信、删错了能不能找回 | 已测：4 个文件共 38 例，全量 163 passed。三条关键回归：正文没变时第二次摘要调用被跳过（不因哈希口径白烧调用）、同一实体在第 2/3 章各有一条 `entity_states` 时交换不炸 UNIQUE 约束（两步取负法的存在理由）、备份写失败时删除被拒绝且库里一个字没少 |
 
 ## 17. 与现有代码的接入点
 
@@ -1351,8 +1372,10 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | `app/runtime.py` | — | 组装 `JobQueue`，随 `teardown()` 关停 |
 | `content-types.yaml`（根目录） | — | 新增文件 |
 | `frontend/src/views/StudioView.vue`、`components/Studio*`、`GraphMap.vue`、`TransformDialog.vue` | 现有 AppNav / api.js / main.css 变量 | `router.js` 加两条路由；`AppNav` 加一个入口；`StudioPanel.vue` 加「图形视图」按钮与告警分组 |
-| `scripts/smoke_m1_tail.py` / `smoke_m2.py` / `smoke_m3.py` / `smoke_m4.py` / `smoke_soft_rules.py` / `cleanup_works.py`（含 `--sweep-orphans`）/ `shot_studio.py` | 无（验收/维护脚本，全部离线可跑） | 新增文件 |
+| `scripts/smoke_m1_tail.py` / `smoke_m2.py` / `smoke_m3.py` / `smoke_m4.py` / `smoke_soft_rules.py` / `cleanup_works.py`（含 `--sweep-orphans`）/ `restore_backup.py`（含 `--list` / `--name` / `--yes`）/ `shot_studio.py` | 无（验收/维护脚本，全部离线可跑） | 新增文件 |
 | `tests/test_store_delete.py` | `store.delete_work / delete_node / delete_source / orphan_counts / sweep_orphans`、`indexer.index_node / index_source` | 否（补的是无外键保护那几张表的漏清回归） |
+| `tests/test_studio_memory.py` / `test_studio_versions.py` / `test_studio_reorder.py` / `test_studio_backup.py` | `store.update_node / move_node / restore_version / delete_node / delete_work / restore_node_backup`、`summarizer.summarize_*`、`assembler`（S3/S4）、`indexer.index_status` | 否（全是 tmp 库 + 假 gateway，不发一次真实调用） |
+| `frontend/src/utils/diff.js` | 无（不引依赖，现有 deps 里没有 diff 库） | 新增文件；`StudioPanel.vue` 加「历史」页、`StudioTree.vue` 加上下移、`StudioView.vue` 接回滚与备份提示 |
 | `storage/studio.sqlite` | — | 新增文件 |
 | `docs/reverse-proxy.md` | — | 新增文件：README 里的纯反代内容搬过去（`/v1` 用法、四模式与文案校准、风控排查细则、底座侧已知限制），README 只讲写作主线 |
 
@@ -1366,4 +1389,4 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 
 ---
 
-*文档版本：v1.9 · README 重写为写作主线（H1 改成「写作工作室（Novel Studio）」），纯反代那一半拆到 `docs/reverse-proxy.md`（含 `m0-baseline.md` 里那条「常见问题第 1 条」的指向修正）；M0 已完成（`docs/m0-baseline.md`）；M1 已完成（建表/网关/内容类型外置/大纲流水线/拼装导出/加工多候选/新 UI）；M2 已完成（分块/FTS5+jieba/三段式摘要/S3-S4-S5 注入/证据面板）；M3 已完成（图谱抽取与合并/设定卡/BFS 子图/S6/9 条硬规则/告警定位）；M4 已完成（任务队列/断点与启动自恢复/风控暂停/六种执行器/5 维打分/抽检卡点/队列面板）；v1.7 补上四条软规则（零 LLM、只出 info、不参与打分，见 9.4/9.5）、图谱力导向可视化（见 12.1）、清掉书架上的测试作品，以及三处文档与实现的偏差处理（`chunk_vectors` 尚未建表，见 15.3；告警不阻塞定稿——未实现，已如实写明，见 9.5；`delete_work` 漏清 `jobs`/`runs`/`index_units`/`chunks_fts` 已修并补回归测试，见 5.4）；v1.8 把同一个坑的另两条路径一并修完（`delete_node`/`delete_source` 清 `chunks_fts`/`index_units`/`summaries`，`orphan_counts`/`sweep_orphans` 改成按「指向的节点/素材还在不在」判，见 5.4/5.5）。待实测 #1/#5 已交接给作者在实际写作中判断。下一步 M5 向量（可选）：fastembed + 向量召回 + RRF，届时要从建表开始。*
+*文档版本：v2.0 · README 重写为写作主线（H1 改成「写作工作室（Novel Studio）」），纯反代那一半拆到 `docs/reverse-proxy.md`（含 `m0-baseline.md` 里那条「常见问题第 1 条」的指向修正）；M0 已完成（`docs/m0-baseline.md`）；M1 已完成（建表/网关/内容类型外置/大纲流水线/拼装导出/加工多候选/新 UI）；M2 已完成（分块/FTS5+jieba/三段式摘要/S3-S4-S5 注入/证据面板）；M3 已完成（图谱抽取与合并/设定卡/BFS 子图/S6/9 条硬规则/告警定位）；M4 已完成（任务队列/断点与启动自恢复/风控暂停/六种执行器/5 维打分/抽检卡点/队列面板）；v1.7 补上四条软规则（零 LLM、只出 info、不参与打分，见 9.4/9.5）、图谱力导向可视化（见 12.1）、清掉书架上的测试作品，以及三处文档与实现的偏差处理（`chunk_vectors` 尚未建表，见 15.3；告警不阻塞定稿——未实现，已如实写明，见 9.5；`delete_work` 漏清 `jobs`/`runs`/`index_units`/`chunks_fts` 已修并补回归测试，见 5.4）；v1.8 把同一个坑的另两条路径一并修完（`delete_node`/`delete_source` 清 `chunks_fts`/`index_units`/`summaries`，`orphan_counts`/`sweep_orphans` 改成按「指向的节点/素材还在不在」判，见 5.4/5.5）。v2.0 补上「改完稿子的四条退路」（分阶段路线表里「插在 M5 之前」那一行，回归见第 16 章 #28）：①**摘要按内容指纹过期**——旧版只比 `ref_ordinal`，改完正文拿回的仍是上一版摘要，那不是旧记忆是假记忆；新列 `summaries.ref_hash` 的口径是**未 strip 的原文**（与 `nodes.content_hash` 同源），这一条是个陷阱：按 strip 后的文本算会让每次保存都判过期，等于每次白烧一次模型，所以有专门的回归测着；容器/全书摘要没有单一源文本，靠失效传播把 `ref_hash` 置成 `''`，读取侧带 `fresh` 布尔，S3/S4 只注入新鲜的、被跳过的写进 `warnings`；②**版本历史读得回也点得回去**——`source` 不再写死 `'human'`（`ai_draft`/`ai_polish`/`human` 与 `run_id` 按调用方标注），`get_version`/`restore_version` 补上读回与回滚，回滚前必先把「当下还没进版本表的正文」存一版，否则那不是回滚是删稿；③**章节同层上下移**——`move_node` 不只换 `nodes.ordinal`：「第几章」在库里一共存了十份拷贝（跨 `entities`/`relations`/`events`/`entity_states`/`foreshadows` 五张表），对调统一走「先取负再 CASE」两步，否则 `entity_states UNIQUE(entity_id, ordinal)` 与 `relations` 的复合唯一键会在中间态炸；**同时换 `nodes.path`**（含子树前缀重挂）——计划原本写「不动 path」，但树序读 `path`、生成序读 `ordinal`，只换一头两者就分裂；内容没变所以不重算索引与摘要，只把 `index_state.dirty` 置 1；④**删除前自动备份**——`node_versions` 是 `ON DELETE CASCADE`、`delete_node` 按 path 前缀物理删整棵子树，三次点击之内没有任何一步能反悔，而那是用户的稿子；现在删节写 `storage/backups/nodes/*.json`（留 20 份）、删作品拷整库副本（留 5 份），**备份写不成即拒绝删除**（宁可删不掉，不能删了找不回），找回走 `scripts/restore_backup.py` 与 `GET /studio/backups` / `POST /studio/backups/{name}/restore`。四条全部**零真实模型调用可验证**（测试内假 gateway + tmp 库），全量 163 passed。待实测 #1/#5 已交接给作者在实际写作中判断。下一步 M5 向量（可选）：fastembed + 向量召回 + RRF，届时要从建表开始。*
