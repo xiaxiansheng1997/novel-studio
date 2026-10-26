@@ -555,8 +555,13 @@ function connect() {
     else if (d.t === 'record_result') {
       const r = d.result
       if (!r) appendLog('录制结束：未录制到数据')
-      else if (r.skipped) appendLog('录制结束：未抓到对话请求，已保留原 fixtures')
-      else appendLog(`录制完成：识别到 ${r.count} 个请求，端点=${r.endpoint || '未识别'}，已写入 ${r.file}`)
+      // 后端的 message 会区分「只抓到风控/滑块流量」和「压根没发请求」，
+      // 这两者的处理办法完全不同，不能笼统成一句「未抓到对话请求」
+      else if (r.skipped) appendLog('录制结束：' + (r.message || '未抓到对话请求，已保留原 fixtures'), 'err')
+      else {
+        appendLog(`录制完成：识别到 ${r.count} 个请求，端点=${r.endpoint || '未识别'}，已写入 ${r.file}`)
+        if (r.risk_skipped) appendLog(`  · 已顺带排除 ${r.risk_skipped} 条风控/滑块流量（不会被当成对话接口）`)
+      }
       recording.value = false
     }
   }
@@ -873,47 +878,116 @@ async function clearCooldown() {
   }
 }
 
-function toLogical(e) {
+/**
+ * 画面像素 -> 远端视口坐标。
+ * drag=true（拖拽中）时不夹在画面边界：手拖出去还在往前推，这正是站点需要的
+ * 「仍在移动」信号；夹回去会变成一堆重复坐标，轨迹看着像停顿，对风控是坏信号。
+ */
+function toLogical(e, drag = false) {
   const el = stageEl.value?.querySelector('img')
   if (!el) return { x: 0, y: 0 }
   const r = el.getBoundingClientRect()
   let fx = (e.clientX - r.left) / r.width
   let fy = (e.clientY - r.top) / r.height
-  fx = Math.max(0, Math.min(1, fx))
-  fy = Math.max(0, Math.min(1, fy))
+  if (drag) {
+    fx = Math.max(-0.25, Math.min(1.25, fx))
+    fy = Math.max(-0.25, Math.min(1.25, fy))
+  } else {
+    fx = Math.max(0, Math.min(1, fx))
+    fy = Math.max(0, Math.min(1, fy))
+  }
   return { x: fx * (logicalW / dsf), y: fy * (logicalH / dsf) }
+}
+
+function sendMouse(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
 }
 
 function onMouseDown(e) {
   e.preventDefault()
   imeEl.value?.focus() // 焦点给它，中文输入法才能正常工作
   dragging = true
-  const p = toLogical(e)
-  if (ws) ws.send(JSON.stringify({ t: 'mouse', action: 'down', x: p.x, y: p.y, button: 'left', clickCount: 1 }))
+  // 拖拽中把移动挂到 window：绑在 <img> 上时手一快拖出画面就彻底断流，
+  // 远端再也收不到后续移动，手柄僵在半路直到抬手 —— 手动过滑块就是这么失败的。
+  window.addEventListener('mousemove', onDragMove)
+  lastPointer = { clientX: e.clientX, clientY: e.clientY }
+  const p = toLogical(e, true)
+  sendMouse({ t: 'mouse', action: 'down', x: p.x, y: p.y, button: 'left', clickCount: 1 })
 }
 
 let dragging = false
 function onMouseUp(e) {
   if (!dragging) return
-  dragging = false
-  const p = toLogical(e)
-  if (ws) ws.send(JSON.stringify({ t: 'mouse', action: 'up', x: p.x, y: p.y, button: 'left', clickCount: 1 }))
+  endDrag(e)
 }
 
+function endDrag(e) {
+  dragging = false
+  window.removeEventListener('mousemove', onDragMove)
+  lastPointer = { clientX: e.clientX, clientY: e.clientY }
+  flushMove() // 先把攒着没发的最后一帧补出去，否则 up 的坐标比手慢一帧
+  const p = toLogical(e, true)
+  sendMouse({ t: 'mouse', action: 'up', x: p.x, y: p.y, button: 'left', clickCount: 1 })
+}
+
+// 在窗口外松手时页面收不到 mouseup，远端会一直以为左键按着（滑块卡在拖住状态，
+// 之后的操作全都跟着坏）；失焦时兜底补一次抬手。
+function onBlur() {
+  if (dragging) endDrag(lastPointer)
+}
+
+// ---- 移动上报：按帧合批 ----
+// 原来用 Date.now() 卡 16ms，既和屏幕刷新率不同步，又会把收尾那几个点直接丢掉。
+let moveRaf = 0
+let pendingMove = null
 let lastMove = 0
-function onMouseMove(e) {
-  const now = Date.now()
-  if (now - lastMove < (dragging ? 16 : 50)) return // 拖拽时高频上报，保证滑块轨迹连续
-  lastMove = now
-  const p = toLogical(e)
-  if (!ws) return
-  const msg = { t: 'mouse', action: 'move', x: p.x, y: p.y }
-  if (dragging) {
+// 最后一次已知的指针位置：失焦兜底抬手要用它，不能退到 (0,0) 去点一个无关的地方
+let lastPointer = { clientX: 0, clientY: 0 }
+
+function emitMove(x, y, drag) {
+  const q = toLogical({ clientX: x, clientY: y }, drag)
+  const msg = { t: 'mouse', action: 'move', x: q.x, y: q.y }
+  if (drag) {
     // 关键：拖拽时必须标记左键按住，否则 CDP 不认为是拖动，滑块不跟手
     msg.button = 'left'
     msg.clickCount = 1
   }
-  ws.send(JSON.stringify(msg))
+  sendMouse(msg)
+}
+
+function queueMove(e, drag) {
+  lastPointer = { clientX: e.clientX, clientY: e.clientY }
+  pendingMove = { x: e.clientX, y: e.clientY, drag }
+  if (moveRaf) return // 本帧已有待发的，只把坐标换成最新的
+  moveRaf = requestAnimationFrame(() => {
+    moveRaf = 0
+    const p = pendingMove
+    pendingMove = null
+    if (p) emitMove(p.x, p.y, p.drag)
+  })
+}
+
+function flushMove() {
+  if (!moveRaf) return
+  cancelAnimationFrame(moveRaf)
+  moveRaf = 0
+  const p = pendingMove
+  pendingMove = null
+  if (p) emitMove(p.x, p.y, p.drag)
+}
+
+function onDragMove(e) {
+  if (dragging) queueMove(e, true)
+}
+
+// 悬停（没按住）保持原来的低频上报；拖拽中的移动由 window 上的 onDragMove 接手，
+// 同一次移动会冒到这里，必须让开，否则一帧发两份、轨迹里多出没有的抖动
+function onMouseMove(e) {
+  if (dragging) return
+  const now = Date.now()
+  if (now - lastMove < 50) return
+  lastMove = now
+  queueMove(e, false)
 }
 
 function onWheel(e) {
@@ -966,13 +1040,20 @@ function onKeyDown(e) {
 
 onMounted(() => {
   window.addEventListener('mouseup', onMouseUp)
+  window.addEventListener('blur', onBlur)
   // 带 ?provider= 进来（管理页跳转）或上次会话还开着：直接恢复连接
   if (route.query.provider || wantReconnect()) {
     appendLog('自动恢复上次连接：' + provider.value)
     connect()
   }
 })
-onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocket() })
+onUnmounted(() => {
+  window.removeEventListener('mouseup', onMouseUp)
+  window.removeEventListener('mousemove', onDragMove)
+  window.removeEventListener('blur', onBlur)
+  if (moveRaf) cancelAnimationFrame(moveRaf)
+  closeSocket()
+})
 </script>
 
 <style scoped>
@@ -980,6 +1061,8 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocke
   display: flex;
   height: 100vh;
   height: 100dvh;
+  /* 兜住 dvh：它算错时整块只剩上半截。100% 走 main.css 的 html/body/#app 高链 */
+  height: 100%;
   overflow: hidden;
   background: #0b0c0f;
 }

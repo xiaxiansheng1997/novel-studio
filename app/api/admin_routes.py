@@ -87,6 +87,12 @@ async def reload_config(request: Request):
     reg = request.app.state.registry
     summary = reg.apply_config(cfg)
     request.app.state.config = cfg
+    # LiveBrowserManager 在构造时就持住了 config 引用，apply_config 不会递到它：
+    # 漏了这一句，/live 建页面时读的还是旧的 headless，和后台聊天那条链路（已走
+    # adapter.cfg）各说各话，谁先建 context 谁定 —— 改了 headless 看着像没生效。
+    live = getattr(request.app.state, "live", None)
+    if live is not None:
+        live.config = cfg
     # 新增的 provider 需要跑一次 start()（默认空实现，保留钩子语义）
     for key in summary["added"]:
         adapter = reg.get(key)

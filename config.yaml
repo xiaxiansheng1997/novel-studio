@@ -17,7 +17,10 @@ providers:
     model_prefix: "qwen-"
     # 千问已迁到 qianwen.com（旧 tongyi.aliyun.com 会跳转，但登录判定按域名匹配，直接写新地址更稳）
     home_url: "https://www.qianwen.com/"
-    headless: true         # 千问反爬门槛低：无头运行→内嵌登录与聊天都不弹独立窗口（若登录被拦，改回 false）
+    # 有头跑：千问前面是阿里云 WAF 的 Baxia/x5sec（RGV587），风控看的是整台浏览器的
+    # 环境分而不是滑块轨迹画得像不像。无头下人只能靠 /live 的 CDP 注入事件去拖，
+    # 既添合成事件失真又看不见真窗口；有头才能直接在 Chrome 窗口里用真鼠标过。
+    headless: false
     # 抓取真实接口前，endpoint 留空 -> 运行时报错提示执行 recon；recon 会把结果写入 fixtures/qwen.json
     endpoint: ""
     # label 是网页端模型下拉里的文案；留空 = 不驱动模型切换。
@@ -38,7 +41,8 @@ providers:
     max_concurrency: 1
     # 相邻两次请求的最小间隔（秒，从上一次回复结束算起）。
     # 刚答完就立刻发下一条最容易触发 RGV587 人机验证；0 表示不限制。
-    min_interval_sec: 3
+    # 3 秒实测会被 Baxia 计成机器行为（一旦判否，滑块怎么拖都过不去），挂机跑批留足余量。
+    min_interval_sec: 30
     # 多轮策略：site = 用站点自己的会话（默认）；prompt = 每轮把 system+历史拼成一段发（每次新开会话）
     history_mode: site
     # 站点会话直链（{id} = 站点会话 id）。切回历史会话要靠它；留空只能新开会话（丢站点上下文）。
