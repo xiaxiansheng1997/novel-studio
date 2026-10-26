@@ -36,6 +36,14 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
+  /* 100% 高链：整屏布局靠这条链把视口高度一级级传下去。
+     不能只靠 100dvh —— 它在个别环境里会把视口算成一半，页面就只剩上半截、
+     下面全空（内容确实不满一屏时看不出来，写作台这种整屏布局一眼就露）。 */
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
   body {
     @apply bg-ink-950 text-txt font-sans;
     margin: 0;

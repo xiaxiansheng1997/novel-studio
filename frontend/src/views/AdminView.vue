@@ -298,6 +298,8 @@ function alignClass(p) {
   display: flex;
   height: 100vh;
   height: 100dvh;
+  /* 兜住 dvh：它算错时整块只剩上半截。100% 走 main.css 的 html/body/#app 高链 */
+  height: 100%;
   overflow: hidden;
   background: radial-gradient(1000px 500px at 80% -10%, rgba(217, 164, 91, 0.05), transparent 60%), #0b0c0f;
 }

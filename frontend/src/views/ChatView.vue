@@ -410,6 +410,8 @@ function handleContentClick(e) {
   display: flex;
   height: 100vh;
   height: 100dvh;
+  /* 兜住 dvh：它算错时整块只剩上半截。100% 走 main.css 的 html/body/#app 高链 */
+  height: 100%;
   overflow: hidden;
   background: radial-gradient(1200px 600px at 70% -10%, rgba(217, 164, 91, 0.06), transparent 60%),
     #0b0c0f;
