@@ -73,7 +73,7 @@ text='你好，我无法回答这个问题，我们换一个话题聊聊吧。'
 
 同时 CDP 流式接管失败（`Request with the provided ID has already finished loading`），回落整段读取，body 仅 380 字节。
 
-**结论：这是账号/设备指纹级风控，不是长度限制。** 需要到 `/live?provider=qwen` 检查登录态与页面状态，必要时删 profile 重登（见 README「常见问题」第 1 条）。
+**结论：这是账号/设备指纹级风控，不是长度限制。** 需要到 `/live?provider=qwen` 检查登录态与页面状态，必要时删 profile 重登（排查细则见 `docs/reverse-proxy.md`「`/v1` 或 `/live` 里提问被固定文案拒绝」一节）。
 
 ### 4.2 doubao 长输入触发滑块
 
