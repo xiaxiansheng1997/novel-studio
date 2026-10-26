@@ -95,7 +95,11 @@
           @select="store.selectNode"
           @create="quickCreate"
           @remove="removeNode"
+          @move="moveNode"
         />
+
+        <!-- 上下移的结果：到边了不是报错，给一条会自己消掉的提示 -->
+        <div v-if="moveNote" class="move-note" role="status">{{ moveNote }}</div>
 
         <main class="editor">
           <header class="ed-top">
@@ -450,6 +454,7 @@ onMounted(() => window.addEventListener('keydown', onKeydown))
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
   stopQueuePoll()
+  clearTimeout(moveNoteTimer)
 })
 
 async function openWork(id) {
@@ -503,6 +508,36 @@ async function quickCreate(parent) {
 async function removeNode(node) {
   if (!window.confirm(`删除「${node.title}」及其子节点？此操作不可撤销。`)) return
   await store.deleteNode(node.id)
+}
+
+// ---- 同层上下移 ----
+const moveNote = ref('')
+let moveNoteTimer = 0
+
+function showMoveNote(text) {
+  moveNote.value = text
+  clearTimeout(moveNoteTimer)
+  moveNoteTimer = setTimeout(() => (moveNote.value = ''), 2600)
+}
+
+/**
+ * 上下移一节：与紧邻的前/后兄弟互换位置。
+ *
+ * 先 flushSave：交换会把两节的章号连同图谱上的章号引用一起对调，编辑器里那份
+ * 还没落盘的正文不先存上，刷出来的树会与库里对不上。
+ * 移完重跑一次一致性检查——那套规则按章号判定（伏笔超期、死后还出场），
+ * 顺序一变结论就可能变，纯本地比对不调模型。告警里的章号文本要等下一次检查才刷新。
+ */
+async function moveNode(node, direction) {
+  await flushSave()
+  const r = await store.moveNode(node.id, direction)
+  if (!r.moved) {
+    showMoveNote(r.reason || '移动失败')
+    return
+  }
+  showMoveNote(`已与「${r.swapped_with_title}」交换位置`)
+  await store.runCheck()
+  await panelRef.value?.refreshContext()
 }
 
 function onInput() {
@@ -980,6 +1015,23 @@ function onTransformAdopt(text) {
   font-family: theme('fontFamily.sans');
   font-size: 13.5px;
   line-height: 1.7;
+}
+
+/* ---------- 上下移结果提示（浮在树外角，不插进布局，不然行高会跳） ---------- */
+.move-note {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 90;
+  max-width: 240px;
+  padding: 7px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
 }
 
 /* ---------- 生成预览 ---------- */

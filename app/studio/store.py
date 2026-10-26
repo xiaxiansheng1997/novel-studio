@@ -42,6 +42,23 @@ _ORPHAN_WHERE = {
     "summaries": "scope IN ('node', 'container') AND ref_id NOT IN (SELECT id FROM nodes)",
 }
 
+# 章号（ordinal）在库里不止 nodes 一处：图谱的时间线、事件顺序、伏笔超期判定各存了一份，
+# 而且这些地方只存章号、不存节点 id，没得跟着 nodes 一起查。
+# 重排时这些列必须跟着对调，否则「某人第 2 章死了」会留在第 3 章的位置上，
+# 一致性检查照着章号比对，排一次序就把设定搞乱。
+_ORDINAL_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("entities", "first_ordinal"),
+    ("entities", "status_ordinal"),
+    ("relations", "since_ordinal"),
+    ("relations", "until_ordinal"),
+    ("relations", "evidence_ordinal"),
+    ("events", "ordinal"),
+    ("entity_states", "ordinal"),
+    ("foreshadows", "planted_ordinal"),
+    ("foreshadows", "planned_payoff_ordinal"),
+    ("foreshadows", "resolved_ordinal"),
+)
+
 
 def _now() -> float:
     return time.time()
@@ -486,6 +503,135 @@ class StudioStore:
                 node_id, content, source=source, run_id=run_id, now=now)
             await self._db.commit()
         return {"version_no": vno, "source": source, "chars": len(content), "created_at": now}
+
+    async def _swap_ordinals_locked(
+        self, work_id: str, table: str, col: str, a: int, b: int,
+    ) -> None:
+        """把某一列上的两个章号对调。
+
+        **调用方必须已持有 self._lock**。
+
+        不能直接写 `CASE col WHEN a THEN b WHEN b THEN a`：SQLite 逐行更新，
+        把 2 改成 3 的那一行稍后又被 3 → 2 的条件命中；同一列上还带着
+        `entity_states UNIQUE(entity_id, ordinal)`、`relations UNIQUE(src, rel, dst, since_ordinal)`
+        这种约束，中间态会直接撞唯一索引。所以分两步：先整体取负
+        （负值与任何真实章号都不冲突，彼此也不相同），再翻回目标值。
+        章号为 0 或 NULL 的行不参与（`IN (?, ?)` 本身就把 NULL 排除在外）。
+        """
+        assert self._db is not None
+        await self._db.execute(
+            f"UPDATE {table} SET {col} = -{col} WHERE work_id = ? AND {col} IN (?, ?)",
+            (work_id, a, b),
+        )
+        await self._db.execute(
+            f"UPDATE {table} SET {col} = CASE {col} WHEN ? THEN ? WHEN ? THEN ? END "
+            f"WHERE work_id = ? AND {col} IN (?, ?)",
+            (-a, b, -b, a, work_id, -a, -b),
+        )
+
+    async def _repath_locked(self, work_id: str, prefix: str, new_prefix: str) -> None:
+        """把一整棵子树的 path 前缀换掉（含节自己）。**调用方必须已持有 self._lock**。
+
+        子节点的 path 是以父节点 path 为前缀存的，换了一个有子节点的节就必须连子树一起换，
+        不然树上的层级会和 parent_id 说不上。
+
+        谓词写成「等于前缀或以 `前缀.` 开头」而不是 `前缀%`：真拿 `0001.0002%` 去 LIKE，
+        `0001.0002` 的兄弟 `0001.0002x` 也会被误伤（当前 path 定长 4 位撞不上，
+        但没理由让这一句的正确性依赖那个补零假设）。
+        """
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE nodes SET path = ? || substr(path, ?) "
+            "WHERE work_id = ? AND (path = ? OR path LIKE ?)",
+            (new_prefix, len(prefix) + 1, work_id, prefix, f"{prefix}.%"),
+        )
+
+    async def move_node(self, node_id: str, direction: str) -> dict[str, Any]:
+        """同层上下移：和紧邻的前/后兄弟互换位置。
+
+        返回 `{moved, ordinal, swapped_with_title, reason}`。只在同一个 parent 里找邻居：
+        跨卷搬动要重写 path/depth、还要决定卷里空了一节怎么补，那些边界靠猜意图是猜不准的。
+
+        两节名下凡是跟章号有关的东西都得跟着对调：
+        - `nodes` 的 `ordinal` 和 `path`。树上的顺序来自 path（`list_tree ORDER BY path`），
+          生成顺序来自 ordinal（`list_readable ORDER BY ordinal`）——只换 ordinal
+          会让树上的位置一动不动、而正文的先后已经变了，两边对不上。
+        - `summaries.ref_ordinal` 与 `chunks.ordinal` 按节点 id 精确改。
+        - `_ORDINAL_COLUMNS` 里那些只存章号的列按值对调。
+        内容没动，所以索引台账与摘要的哈希戳都不重算（重算没有意义、白烧调用），
+        只把 `index_state.dirty` 置 1。
+        """
+        if direction not in ("up", "down"):
+            raise ValueError(f"方向只能是 up / down: {direction}")
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT id, work_id, parent_id, path, ordinal, title FROM nodes WHERE id = ?",
+                (node_id,),
+            )
+            me = await cur.fetchone()
+            if not me:
+                return {"moved": False, "reason": "节点不存在"}
+            mine = int(me["ordinal"] or 0)
+            if mine <= 0:
+                return {"moved": False, "reason": "容器节点不参与排序"}
+
+            parent = me["parent_id"]
+            args: list[Any] = [me["work_id"]]
+            link = "parent_id = ?" if parent else "parent_id IS NULL"
+            if parent:
+                args.append(parent)
+            # up 拿紧邻的前一个，down 拿紧邻的后一个
+            op, order = ("<", "DESC") if direction == "up" else (">", "ASC")
+            cur = await self._db.execute(
+                f"SELECT id, ordinal, path, title FROM nodes "
+                f"WHERE work_id = ? AND {link} AND ordinal > 0 AND ordinal {op} ? "
+                f"ORDER BY ordinal {order} LIMIT 1",
+                [*args, mine],
+            )
+            other = await cur.fetchone()
+            if not other:
+                return {"moved": False, "reason": "已到边界"}
+            theirs = int(other["ordinal"])
+            now = _now()
+
+            # path 先换。中间那一步需要一个不与任何真实 path 冲突的临时前缀：
+            # 真实 path 只有数字和点，所以拿 `~` 开顶，再把节点 id 里的 `_` 抹掉
+            # （`_` 在 LIKE 里是单字符通配符，留着会让下一步误伤别的行）。
+            tmp = f"~{me['id'].replace('_', '')}"
+            await self._repath_locked(me["work_id"], me["path"], tmp)
+            await self._repath_locked(me["work_id"], other["path"], me["path"])
+            await self._repath_locked(me["work_id"], tmp, other["path"])
+
+            await self._db.execute(
+                "UPDATE nodes SET ordinal = CASE id WHEN ? THEN ? WHEN ? THEN ? END, "
+                "updated_at = ? WHERE id IN (?, ?)",
+                (me["id"], theirs, other["id"], mine, now, me["id"], other["id"]),
+            )
+            for nid, new_ord in ((me["id"], theirs), (other["id"], mine)):
+                await self._db.execute(
+                    "UPDATE summaries SET ref_ordinal = ? WHERE scope = 'node' AND ref_id = ?",
+                    (new_ord, nid),
+                )
+                await self._db.execute(
+                    "UPDATE chunks SET ordinal = ? WHERE node_id = ?", (new_ord, nid)
+                )
+            for table, col in _ORDINAL_COLUMNS:
+                await self._swap_ordinals_locked(me["work_id"], table, col, mine, theirs)
+
+            await self._db.execute(
+                "UPDATE works SET updated_at = ? WHERE id = ?", (now, me["work_id"])
+            )
+            await self._db.execute(
+                "INSERT INTO index_state(work_id, dirty, updated_at) VALUES(?,1,?) "
+                "ON CONFLICT(work_id) DO UPDATE SET dirty = 1, updated_at = excluded.updated_at",
+                (me["work_id"], now),
+            )
+            await self._db.commit()
+        return {
+            "moved": True, "direction": direction, "ordinal": theirs,
+            "swapped_with_title": other["title"], "reason": "",
+        }
 
     async def _drop_unit_rows(self, ref_kind: str, ref_ids: list[str]) -> None:
         """清掉一个节点/素材被删后不受外键保护的那些行。**调用方必须已持有 self._lock**。

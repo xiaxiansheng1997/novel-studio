@@ -87,6 +87,11 @@ class NodeUpdate(BaseModel):
     snapshot: bool = False
 
 
+class NodeMove(BaseModel):
+    # 同层上/下移：只与紧邻的前/后兄弟互换，不支持跨父搬动
+    direction: Literal["up", "down"]
+
+
 class SourceCreate(BaseModel):
     title: str = ""
     url: str = ""
@@ -222,6 +227,16 @@ async def update_node(node_id: str, body: NodeUpdate, request: Request):
     if not ok:
         raise HTTPException(status_code=404, detail="节点不存在或无更新")
     return await _store(request).get_node(node_id)
+
+
+@router.post("/studio/nodes/{node_id}/move", dependencies=[Depends(verify_key)])
+async def move_node(node_id: str, body: NodeMove, request: Request):
+    """同层上下移一节，与返回体里 `swapped_with_title` 那一节互换位置。
+
+    不报 404 也不报 400：「已到边界」是正常分支（树上的首/末行点了上下移），
+    前端按 `moved` 判断，把 `reason` 当提示语显示就行。
+    """
+    return await _store(request).move_node(node_id, body.direction)
 
 
 @router.delete("/studio/nodes/{node_id}", dependencies=[Depends(verify_key)])

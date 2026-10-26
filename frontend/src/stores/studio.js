@@ -182,6 +182,33 @@ export const useStudioStore = defineStore('studio', () => {
     if (node.value?.id === id) node.value = null
   }
 
+  /**
+   * 同层上下移：把这一节和紧邻的前/后兄弟互换。返回接口的响应体
+   * （`{moved, ordinal, swapped_with_title, reason}`），「已到边界」不是错误，
+   * 由调用方拿 reason 当提示语显示。
+   *
+   * 树上的顺序来自 path、生成顺序来自 ordinal，两头都换了，所以整棵树只能重拉；
+   * 当前节还是原来那一节，重新 select 一次把章号/字数带回来，不然编辑器顶部
+   * 显示的还是旧 ordinal。
+   */
+  async function moveNode(id, direction) {
+    const r = await apiFetch(`/studio/nodes/${id}/move`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ direction }),
+    })
+    if (!r.ok) {
+      error.value = '移动失败'
+      return { moved: false, reason: `移动失败（HTTP ${r.status}）` }
+    }
+    const res = await r.json()
+    if (res.moved && work.value) {
+      tree.value = await (await apiFetch(`/studio/works/${work.value.id}/tree`)).json()
+      if (node.value?.id === id) await selectNode(id)
+    }
+    return res
+  }
+
   async function loadSources() {
     if (!work.value) return
     const r = await apiFetch(`/studio/works/${work.value.id}/sources`)
@@ -864,7 +891,7 @@ export const useStudioStore = defineStore('studio', () => {
     generating, genText, genMeta, genError,
     activeWorkId, activeNodeId, template,
     loadTemplates, fetchWorks, createWork, selectWork, selectNode, deleteWork,
-    saveNode, createNode, deleteNode,
+    saveNode, createNode, deleteNode, moveNode,
     loadSources, addSource, deleteSource,
     loadFacts, addFact, deleteFact,
     loadTerms, addTerm, deleteTerm,

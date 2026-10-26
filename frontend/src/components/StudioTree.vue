@@ -29,6 +29,24 @@
         <span v-if="n.ordinal != null && n.word_count" class="tree-words">{{ fmt(n.word_count) }}</span>
         <span class="tree-dot" :class="n.status"></span>
         <span class="tree-ops">
+          <button
+            v-if="n.ordinal != null"
+            class="op"
+            title="上移"
+            :disabled="rankOf(n.id).first"
+            @click.stop="$emit('move', n, 'up')"
+          >
+            <AppIcon name="chevronUp" :size="12" />
+          </button>
+          <button
+            v-if="n.ordinal != null"
+            class="op"
+            title="下移"
+            :disabled="rankOf(n.id).last"
+            @click.stop="$emit('move', n, 'down')"
+          >
+            <AppIcon name="chevronDown" :size="12" />
+          </button>
           <button class="op" title="在此节点下新建" @click.stop="$emit('create', n)">
             <AppIcon name="plus" :size="12" />
           </button>
@@ -48,15 +66,39 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import AppIcon from './AppIcon.vue'
 
-defineProps({
+const props = defineProps({
   tree: { type: Array, default: () => [] },
   activeId: { type: String, default: '' },
   title: { type: String, default: '结构' },
   stats: { type: Object, default: null },
 })
-defineEmits(['select', 'create', 'remove'])
+defineEmits(['select', 'create', 'remove', 'move'])
+
+// 同层上下移只能跟同一个父节点下的兄弟换：后端也是这么找邻居的（只在同 parent_id 里取
+// 紧邻的前/后一个），所以「首/末行该不该置灰」也按同一套分组算。
+// 树是按 path 返回的，同一父节点的子节点会被孙节点隔开，因此不能按相邻行分组，
+// 得先按 parent_id 归堆。只统计参与排序的那些（容器节点 ordinal 为空，它不移动）。
+const ranks = computed(() => {
+  const groups = new Map()
+  for (const n of props.tree) {
+    if (n.ordinal == null) continue
+    const key = n.parent_id || ''
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(n.id)
+  }
+  const out = new Map()
+  for (const ids of groups.values()) {
+    ids.forEach((id, i) => out.set(id, { first: i === 0, last: i === ids.length - 1 }))
+  }
+  return out
+})
+
+function rankOf(id) {
+  return ranks.value.get(id) || { first: true, last: true }
+}
 
 function fmt(n) {
   if (!n) return '0'
@@ -196,6 +238,15 @@ function fmt(n) {
 .op:hover {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
+}
+/* 到边了不是出错：置灰但保留占位，不然一行宽度会随悬停跳动 */
+.op:disabled {
+  opacity: 0.28;
+  cursor: default;
+}
+.op:disabled:hover {
+  background: transparent;
+  color: var(--text-faint);
 }
 .tree-foot {
   display: flex;
