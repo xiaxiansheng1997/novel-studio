@@ -405,7 +405,17 @@ class StudioStore:
             row = await cur.fetchone()
         return dict(row) if row else None
 
-    async def update_node(self, node_id: str, *, snapshot: bool = False, **fields: Any) -> bool:
+    async def update_node(
+        self, node_id: str, *, snapshot: bool = False,
+        snapshot_source: str = "human", run_id: Optional[str] = None, **fields: Any,
+    ) -> bool:
+        """改节点。`snapshot=True` 时把改后的正文另存为一个版本。
+
+        `snapshot_source` / `run_id` 是给「历史」页认人的：都是 `ai_draft` 生成的，
+        还是自己手敲的，回滚前得先看得懂那一版是什么来路（`run_id` 再追到哪一次生成）。
+        版本表里存的是**改后**的正文，所以最新版本与当前正文内容相同——
+        回滚时靠这一点判断「当下这份要不要先补一版」，见 `restore_version`。
+        """
         allowed = {"title", "content", "status", "summary"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
@@ -439,18 +449,43 @@ class StudioStore:
 
             # 只在显式要求时留版本：自动保存每几秒一次，全存会把库撑爆
             if snapshot and "content" in updates and (updates["content"] or "") != old:
-                cur = await self._db.execute(
-                    "SELECT COALESCE(MAX(version_no),0) AS v FROM node_versions WHERE node_id = ?",
-                    (node_id,),
-                )
-                vrow = await cur.fetchone()
-                await self._db.execute(
-                    "INSERT INTO node_versions(id, node_id, version_no, content, source, created_at) "
-                    "VALUES(?,?,?,?,'human',?)",
-                    (_new_id("v_"), node_id, int(vrow["v"]) + 1, updates["content"], now),
-                )
+                await self._append_version_locked(
+                    node_id, updates["content"] or "",
+                    source=snapshot_source, run_id=run_id, now=now)
             await self._db.commit()
         return True
+
+    async def _append_version_locked(
+        self, node_id: str, content: str, *, source: str,
+        run_id: Optional[str], now: float,
+    ) -> int:
+        """追加一个版本，返回它的 `version_no`。**调用方必须已持有 self._lock**。"""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "SELECT COALESCE(MAX(version_no),0) AS v FROM node_versions WHERE node_id = ?",
+            (node_id,),
+        )
+        row = await cur.fetchone()
+        vno = int(row["v"]) + 1
+        await self._db.execute(
+            "INSERT INTO node_versions(id, node_id, version_no, content, source, run_id, created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (_new_id("v_"), node_id, vno, content, source, run_id, now),
+        )
+        return vno
+
+    async def append_version(
+        self, node_id: str, content: str, *, source: str = "human",
+        run_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """对外的「存一版」入口（回滚前保住当下草稿用的）。"""
+        assert self._db is not None
+        now = _now()
+        async with self._lock:
+            vno = await self._append_version_locked(
+                node_id, content, source=source, run_id=run_id, now=now)
+            await self._db.commit()
+        return {"version_no": vno, "source": source, "chars": len(content), "created_at": now}
 
     async def _drop_unit_rows(self, ref_kind: str, ref_ids: list[str]) -> None:
         """清掉一个节点/素材被删后不受外键保护的那些行。**调用方必须已持有 self._lock**。
@@ -499,12 +534,53 @@ class StudioStore:
         assert self._db is not None
         async with self._lock:
             cur = await self._db.execute(
-                "SELECT id, version_no, source, created_at, length(content) AS chars "
+                "SELECT id, version_no, source, run_id, created_at, length(content) AS chars "
                 "FROM node_versions WHERE node_id = ? ORDER BY version_no DESC LIMIT ?",
                 (node_id, max(1, min(limit, _MAX_LIMIT))),
             )
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    async def get_version(self, version_id: str) -> Optional[dict[str, Any]]:
+        """读回一个版本的全文：列表接口只给字数，对比与回滚都要靠这里拿正文。"""
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute("SELECT * FROM node_versions WHERE id = ?", (version_id,))
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def _newest_version_content(self, node_id: str) -> str:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT content FROM node_versions WHERE node_id = ? "
+                "ORDER BY version_no DESC LIMIT 1", (node_id,))
+            row = await cur.fetchone()
+        return (row["content"] if row else "") or ""
+
+    async def restore_version(self, node_id: str, version_id: str) -> Optional[dict[str, Any]]:
+        """回滚到某个历史版本，返回更新后的节点；版本不属于这个节点时给 None。
+
+        顺序不能反：先把「当下这份还没进版本表的正文」存一版，再写回目标内容。
+        自动保存只写 nodes 不写版本，用户改到一半直接点回滚，不先补这一版
+        就把改动当场吞了——那不是回滚，是删稿。
+        已经存过的那份不重复塞：版本表只存不重复的状态，
+        否则「历史」页里会连着好几条一模一样的行，反而看不出改了什么。
+        写回走 `update_node`，所以正文一改，摘要失效传播自动跟上。
+        """
+        target = await self.get_version(version_id)
+        if not target or target["node_id"] != node_id:
+            return None
+        node = await self.get_node(node_id)
+        if not node:
+            return None
+        current = node.get("content") or ""
+        if current == (target.get("content") or ""):
+            return node
+        if current and current != await self._newest_version_content(node_id):
+            await self.append_version(node_id, current, source="human")
+        await self.update_node(node_id, content=target["content"] or "")
+        return await self.get_node(node_id)
 
     # ==================== 素材 / 事实 / 术语 ====================
 

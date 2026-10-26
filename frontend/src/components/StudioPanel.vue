@@ -262,6 +262,39 @@
         </details>
       </section>
 
+      <!-- 历史：每次「采用」与生成落库都存一版，比得了也回得去 -->
+      <section v-else-if="tab === 'versions'" class="section">
+        <div class="ctx-head">
+          <span class="hint inline">
+            {{ store.node ? (store.node.title || '当前节') : '未选中节点' }} · {{ store.versions.length }} 版
+          </span>
+          <button
+            class="btn btn-sm"
+            :disabled="!store.activeNodeId || store.versionsBusy"
+            @click="store.loadVersions()"
+          >
+            {{ store.versionsBusy ? '读取中…' : '刷新' }}
+          </button>
+        </div>
+        <p class="hint">
+          自动保存不留版（那会每几秒塞一条一模一样的）；「采用」、改状态、AI 草稿与润色落库时各存一版。
+        </p>
+        <div v-for="v in store.versions" :key="v.id" class="item">
+          <div class="item-main">
+            <span class="item-title">
+              版本 #{{ v.version_no }}
+              <span v-if="v.version_no === newestNo" class="tag">最新</span>
+            </span>
+            <span class="item-meta">{{ sourceLabel(v) }} · {{ v.chars }} 字 · {{ fmtTime(v.created_at) }}</span>
+          </div>
+          <button class="btn btn-sm" :disabled="!store.node" @click="openVersion(v)">对比</button>
+        </div>
+        <p v-if="!store.activeNodeId" class="empty">先在左边选中一节。</p>
+        <p v-else-if="!store.versions.length" class="empty">
+          这一节还没有版本。写几段后点「采用」，或把状态改成待审/定稿，就会存下第一版。
+        </p>
+      </section>
+
       <!-- 告警 -->
       <section v-else class="section">
         <div class="ctx-head">
@@ -315,6 +348,13 @@
       :graph="store.graphData"
       @locate="(t) => emit('locate', t)"
     />
+
+    <VersionDiff
+      v-model:open="diffOpen"
+      :version="diffVersion"
+      :current="store.node?.content || ''"
+      @restore="(id) => emit('restore', id)"
+    />
   </aside>
 </template>
 
@@ -322,12 +362,13 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import GraphMap from './GraphMap.vue'
+import VersionDiff from './VersionDiff.vue'
 import { useStudioStore } from '../stores/studio'
 
 const props = defineProps({
   task: { type: Object, default: () => ({ task_type: 'article_draft', instruction: '' }) },
 })
-const emit = defineEmits(['locate'])
+const emit = defineEmits(['locate', 'restore'])
 
 const store = useStudioStore()
 const tab = ref('sources')
@@ -368,6 +409,33 @@ const graphForeshadows = computed(() =>
 const graphCards = computed(() => store.graphData?.cards || [])
 const cardForm = ref({ kind: 'character', name: '', summary: '', status: '' })
 const graphOpen = ref(false)
+
+// ---- 历史（版本） ----
+// 来源标签必须与库里的 source 枚举对齐：都是 ai_draft，作者得分清哪条是模型抽风
+const SOURCE_LABEL = { ai_draft: 'AI 草稿', ai_polish: 'AI 润色', human: '手改' }
+const diffOpen = ref(false)
+const diffVersion = ref(null)
+const newestNo = computed(() => store.versions[0]?.version_no ?? -1)
+
+function sourceLabel(v) {
+  const base = SOURCE_LABEL[v.source] || v.source || '未知'
+  return v.run_id ? `${base}·可追生成` : base
+}
+
+function fmtTime(ts) {
+  if (!ts) return '—'
+  return new Date(ts * 1000).toLocaleString('zh-CN', {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  })
+}
+
+/** 列表不带正文（一节可能几万字），点开对比时再拉那一条的全文 */
+async function openVersion(v) {
+  const full = await store.loadVersionContent(v.id)
+  if (!full) return
+  diffVersion.value = full
+  diffOpen.value = true
+}
 
 // 告警直接显示 dead_character 这种内部名，作者看不出轻重；硬告警与待确认分开展示
 const RULE_LABEL = {
@@ -418,6 +486,7 @@ const tabs = computed(() => {
     { id: 'terms', label: '术语', count: store.terms.length },
     { id: 'graph', label: '图谱', count: graphEntities.value.length, novelOnly: true },
     { id: 'context', label: '上下文', count: 0 },
+    { id: 'versions', label: '历史', count: store.versions.length },
     { id: 'issues', label: '告警', count: store.issues.length },
   ]
   // 单篇文档不建图，隐藏而不是置灰：多一个永远没数据的面板只会让人困惑

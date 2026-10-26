@@ -172,7 +172,7 @@
                 </button>
                 <button class="btn btn-sm" @click="store.discardGenerated()">放弃</button>
                 <span class="gen-tip">
-                  采用后写入正文并保留一个版本，可回滚
+                  采用后会存为一个版本，可在右栏「历史」里对比并回滚
                 </span>
               </footer>
             </section>
@@ -258,7 +258,12 @@
           </template>
         </main>
 
-        <StudioPanel ref="panelRef" :task="{ task_type: taskType, instruction }" @locate="locateEvidence" />
+        <StudioPanel
+          ref="panelRef"
+          :task="{ task_type: taskType, instruction }"
+          @locate="locateEvidence"
+          @restore="onRestoreVersion"
+        />
       </template>
     </div>
 
@@ -296,6 +301,7 @@ const saveState = ref('saved') // saved | saving | dirty
 const taskType = ref('article_draft')
 const instruction = ref('')
 const editorEl = ref(null)
+const panelRef = ref(null)
 
 // 类型下拉来自 /studio/content-types（content-types.yaml），新增文种只改 YAML
 const kinds = computed(() =>
@@ -535,6 +541,20 @@ async function adopt() {
   const append = taskType.value === 'continue'
   await store.adoptGenerated({ append })
   contentDraft.value = store.node?.content || ''
+}
+
+/**
+ * 回滚到某个历史版本。先把编辑器里那份 flushSave 掉，再让服务端写回——
+ * 顺序反了的话，服务端看到的是上一版自动保存的正文，手里这份改动就直接丢了。
+ */
+async function onRestoreVersion(versionId) {
+  await flushSave()
+  const ok = await store.restoreVersion(versionId)
+  if (!ok) return
+  contentDraft.value = store.node?.content || ''
+  saveState.value = 'saved'
+  // 正文换了，上下文预览（含摘要过期提示）得跟着重装配一次，纯本地不调模型
+  await panelRef.value?.refreshContext()
 }
 
 // ==================== 大纲 / 整篇 / 加工 ====================

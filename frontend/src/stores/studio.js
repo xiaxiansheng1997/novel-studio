@@ -103,6 +103,7 @@ export const useStudioStore = defineStore('studio', () => {
       graphNote.value = ''
       issueSummary.value = null
       queue.value = null
+      versions.value = []
       // 右侧面板的数据按需再拉，避免切换作品时打四个请求
     } finally {
       loading.value = false
@@ -120,6 +121,9 @@ export const useStudioStore = defineStore('studio', () => {
     genText.value = ''
     genMeta.value = null
     genError.value = ''
+    // 版本跟节点走：先清空再拉，否则标签上的计数会停在上一节那个数字
+    versions.value = []
+    await loadVersions()
     // 告警跟节点走
     if (work.value) {
       const ir = await apiFetch(`/studio/works/${work.value.id}/issues?node_id=${id}`)
@@ -146,6 +150,8 @@ export const useStudioStore = defineStore('studio', () => {
           t.word_count = saved.word_count
           t.status = saved.status
         }
+        // 只有留了版本的写入才需要重拉：自动保存那点调用省下来给「历史」页换内容
+        if (snapshot) await loadVersions()
       }
     } finally {
       saving.value = false
@@ -300,6 +306,7 @@ export const useStudioStore = defineStore('studio', () => {
               // 服务端已经写了库，前端同步一次避免出现两套正文
               const r = await apiFetch(`/studio/nodes/${node.value.id}`)
               if (r.ok) node.value = await r.json()
+              await loadVersions()
             }
           }
         }
@@ -326,6 +333,60 @@ export const useStudioStore = defineStore('studio', () => {
     genText.value = ''
     genMeta.value = null
     genError.value = ''
+  }
+
+  // ==================== 版本历史 ====================
+
+  const versions = ref([])
+  const versionsBusy = ref(false)
+  const restoring = ref(false)
+
+  /** 列表只给版本号 / 来源 / 字数，正文靠 loadVersionContent 单独拉（一节可能几万字） */
+  async function loadVersions() {
+    if (!node.value) {
+      versions.value = []
+      return
+    }
+    versionsBusy.value = true
+    try {
+      const r = await apiFetch(`/studio/nodes/${node.value.id}/versions`)
+      if (r.ok) versions.value = await r.json()
+    } finally {
+      versionsBusy.value = false
+    }
+  }
+
+  async function loadVersionContent(versionId) {
+    if (!node.value) return null
+    const r = await apiFetch(`/studio/nodes/${node.value.id}/versions/${versionId}`)
+    return r.ok ? await r.json() : null
+  }
+
+  /**
+   * 回滚到某个版本。服务端会先把当前正文存一版，所以这里不需要额外传参数。
+   * 调用方（StudioView）得先把编辑器里没落盘的草稿 flushSave 掉，
+   * 否则那份改动既不在库里也到不了版本表，等于白打。
+   */
+  async function restoreVersion(versionId) {
+    if (!node.value || restoring.value) return false
+    restoring.value = true
+    error.value = ''
+    try {
+      const r = await apiFetch(`/studio/nodes/${node.value.id}/versions/${versionId}/restore`, {
+        method: 'POST',
+      })
+      if (!r.ok) {
+        error.value = `回滚失败：HTTP ${r.status}`
+        return false
+      }
+      node.value = await r.json()
+      const t = tree.value.find((n) => n.id === node.value.id)
+      if (t) t.word_count = node.value.word_count
+      await loadVersions()
+      return true
+    } finally {
+      restoring.value = false
+    }
   }
 
   // ==================== 内容类型（content-types.yaml） ====================
@@ -808,6 +869,9 @@ export const useStudioStore = defineStore('studio', () => {
     loadFacts, addFact, deleteFact,
     loadTerms, addTerm, deleteTerm,
     previewContext, generate, adoptGenerated, discardGenerated,
+    // 版本历史
+    versions, versionsBusy, restoring,
+    loadVersions, loadVersionContent, restoreVersion,
     // M2 记忆
     indexStatus, indexing, summarizing, memoryNote,
     loadIndexStatus, reindex, runSummarize,

@@ -237,6 +237,29 @@ async def list_versions(node_id: str, request: Request, limit: int = 30):
     return await _store(request).list_versions(node_id, limit=limit)
 
 
+@router.get("/studio/nodes/{node_id}/versions/{version_id}", dependencies=[Depends(verify_key)])
+async def get_version(node_id: str, version_id: str, request: Request):
+    """读回一个版本的全文：列表只给字数，对比与回滚都得先拿到正文。"""
+    row = await _store(request).get_version(version_id)
+    if not row or row["node_id"] != node_id:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    return row
+
+
+@router.post("/studio/nodes/{node_id}/versions/{version_id}/restore",
+             dependencies=[Depends(verify_key)])
+async def restore_version(node_id: str, version_id: str, request: Request):
+    """回滚到某个历史版本，返回回滚后的节点。
+
+    服务端会把「当下这份还没进版本表的正文」先存一版再写回，所以前端
+    必须在点之前把编辑器里的改动 flush 落库，不然那几秒的未保存内容依然会没。
+    """
+    node = await _store(request).restore_version(node_id, version_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="版本不存在或不属于该节点")
+    return node
+
+
 # ==================== 素材 / 事实 / 术语 ====================
 
 @router.get("/studio/works/{work_id}/sources", dependencies=[Depends(verify_key)])
@@ -458,7 +481,9 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
             if body.save and text and not error:
                 content = (node.get("content") or "") if body.task_type == "continue" else ""
                 merged = (content + ("\n\n" if content else "") + text) if content else text
-                await store.update_node(node_id, content=merged, snapshot=True)
+                # 续写合并进正文也是 AI 写的内容，来源记 ai_draft，不让人误以为是手改的
+                await store.update_node(node_id, content=merged, snapshot=True,
+                                        snapshot_source="ai_draft", run_id=run_id)
                 # 写库了就把这一节重建索引，下次续写能检索到
                 fresh = await store.get_node(node_id)
                 if fresh:
@@ -834,7 +859,8 @@ async def run_pipeline(work_id: str, body: PipelineRequest, request: Request):
                 output_chars=len(text), error=error, elapsed_ms=elapsed,
             )
             if text and not error:
-                await store.update_node(item["id"], content=text, snapshot=True)
+                await store.update_node(item["id"], content=text, snapshot=True,
+                                        snapshot_source="ai_draft", run_id=run_id)
                 generated += 1
                 total_chars += len(text)
                 yield _sse({"event": "node_done", "node_id": item["id"],

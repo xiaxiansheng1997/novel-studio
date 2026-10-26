@@ -194,7 +194,8 @@ async def run_draft(ctx: TaskContext) -> dict[str, Any]:
                 raise cause
             raise ValueError("模型返回空正文")
 
-    await store.update_node(node["id"], content=text, snapshot=True)
+    await store.update_node(node["id"], content=text, snapshot=True,
+                            snapshot_source="ai_draft", run_id=run_id)
     steps = await _post_process(ctx, node, text)
     score = (steps.get("score") or {}).get("score")
     await store.finish_run(run_id, status="ok", output_chars=len(text), elapsed_ms=elapsed,
@@ -224,7 +225,8 @@ async def run_polish(ctx: TaskContext) -> dict[str, Any]:
     text = (res.text or "").strip()
     if not text:
         raise ValueError("润色结果为空")
-    await store.update_node(node["id"], content=text, snapshot=True)
+    # 润色写的也是正文，来源必须标 ai_polish：历史页里分不出「AI 改的」和「我改的」就不敢回滚
+    await store.update_node(node["id"], content=text, snapshot=True, snapshot_source="ai_polish")
     steps = await _post_process(ctx, node, text)
     return {"chars": len(text), "elapsed_ms": res.elapsed_ms,
             "score": (steps.get("score") or {}).get("score"),
