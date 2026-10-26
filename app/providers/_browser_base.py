@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from typing import AsyncIterator, Optional
 
@@ -138,7 +139,8 @@ class BrowserStreamProvider(ProviderAdapter):
                 content=(
                     f"⚠️ 上游风控冷却中（剩余 {remain}s）：刚触发过人机验证，"
                     "请先在弹出的 Chrome 窗口（无头模式则 /live）里完成验证；冷却结束后会自动恢复"
-                )
+                ),
+                hint=True,
             )
             yield DeltaEvent(content=None, finish_reason="stop")
             return
@@ -260,7 +262,7 @@ class BrowserStreamProvider(ProviderAdapter):
                     else:
                         logger.info(f"[{self.key}] 验证完成后重发成功，继续等待回复")
             if not recovered:
-                yield DeltaEvent(content=hint)
+                yield DeltaEvent(content=hint, hint=True)
                 yield DeltaEvent(content=None, finish_reason="stop")
                 return
 
@@ -514,6 +516,21 @@ class BrowserStreamProvider(ProviderAdapter):
                 f"⚠️ {self.key} 页面上有弹窗盖住了输入框（常见于“下载电脑版”这类引导弹窗），"
                 "已尝试自动关闭但没成功。请在弹出的 Chrome 窗口里手动关掉弹窗后重试"
             )
+        if page is not None:
+            # 账号被禁言/封禁时站点会把输入框整个撤掉，页面只剩一行通知。
+            # 这种情况重试多少次都没用，必须给出明确原因，让队列整队停下。
+            try:
+                body = await page.inner_text("body")
+            except Exception:  # noqa: BLE001 - 读不到页面就按普通失败处理
+                body = ""
+            for marker in ("已被禁言", "账号已被封禁", "账号被封禁", "违反用户使用规范"):
+                if marker in body:
+                    tail = re.search(r"(?:禁言|封禁)至[^，。\n]{0,24}", body)
+                    when = f"（{tail.group(0)}）" if tail else ""
+                    return (
+                        f"⚠️ {self.key} 账号受限{when}：站点已撤掉输入框，"
+                        "重试不会恢复。请更换账号或等解封后再跑"
+                    )
         if "未找到对话输入框" in text:
             return (
                 f"⚠️ {self.key} 页面上没找到对话输入框：站点可能已改版或页面没加载完，"

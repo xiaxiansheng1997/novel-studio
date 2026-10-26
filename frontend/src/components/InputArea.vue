@@ -96,7 +96,7 @@ defineExpose({ setText, focus: () => textareaEl.value?.focus() })
 <style scoped>
 .composer-area {
   padding: 10px 20px 14px;
-  background: linear-gradient(180deg, rgba(7, 10, 16, 0) 0%, #070a10 42%);
+  background: linear-gradient(180deg, rgba(11, 12, 15, 0) 0%, #0b0c0f 42%);
 }
 .composer {
   display: flex;
@@ -125,11 +125,11 @@ defineExpose({ setText, focus: () => textareaEl.value?.focus() })
   padding: 0 2px 1px;
 }
 .composer:focus-within {
-  border-color: rgba(34, 197, 94, 0.55);
+  border-color: rgba(217, 164, 91, 0.55);
   box-shadow: var(--ring), inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 .composer.is-streaming {
-  border-color: rgba(34, 197, 94, 0.28);
+  border-color: rgba(217, 164, 91, 0.28);
 }
 textarea {
   flex: 1;
@@ -205,7 +205,7 @@ textarea::placeholder {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: #86efac;
+  color: #e8c48a;
 }
 @media (max-width: 720px) {
   .composer-area {

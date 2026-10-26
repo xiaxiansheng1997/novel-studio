@@ -1,0 +1,206 @@
+# ============================================================
+# 写作类型配置 · 唯一事实来源
+#
+# 改这个文件就能新增文种，不需要改代码。
+# 三层合并：kinds.<kind> 默认  →  scales.<scale> 覆盖  →  subtypes.<subtype> 覆盖
+#   - 标量字段：后者覆盖前者
+#   - 列表字段：一律「追加」（checks / buckets），同值自动去重
+#   - 需要整体替换时用 `checks`（覆盖）而不是 `checks_append`
+# 改完调 POST /studio/content-types/reload 生效，或重启服务。
+# ============================================================
+version: 1
+
+kinds:
+  # ---------------- 单篇 / 系列文档 ----------------
+  article:
+    label: 文档
+    budget_chars: 18000
+    # 装配时启用哪些桶（S0 模板 / S1 规范 / S2 圣经 / S3 前情 / S4 最近摘要 / S5 检索 / S_src 素材 / S7 正文 / S8 指令）
+    buckets: [S0, S1, S2, S4, S_src, S5, S7, S8]
+    style_prompt: >-
+      用书面中文写作。句子求短，具体名词优先，少用形容词堆砌。
+      禁止「随着……的发展」「众所周知」「不难发现」这类空转句。
+    checks: [structure_incomplete]
+    # 节点层级：readable=true 的是可读单元（占 ordinal、参与拼装）
+    layers:
+      - { kind: section, label: 节, readable: true }
+    scales:
+      single:
+        label: 单篇
+        budget_chars: 18000
+        target_words: 5000
+        layers:
+          - { kind: section, label: 节, readable: true }
+      series:
+        label: 系列（课程 / 报告 / 专栏）
+        budget_chars: 22000
+        target_words: 30000
+        buckets: [S0, S1, S2, S3, S4, S_src, S5, S7, S8]
+        layers:
+          - { kind: volume, label: 讲, readable: false }
+          - { kind: section, label: 节, readable: true }
+        note: 目录必须先人工确认再逐节生成，否则整篇跑偏
+        # 原列过一条 series_order_conflict，但没实现，判据也需要语义理解（「上一讲」指哪一讲），
+        # 先不占位：配置里挂一个不存在的规则名只会让人以为它在生效。
+        # 要加回来得先想清楚怎么在不读语义的前提下判准。
+    subtypes:
+      tech:
+        label: 技术
+        template: tpl_tech
+        checks_append: [term_inconsistent]
+        instructions: 代码块必须带语言标注；缩写首次出现给全称；术语按术语表统一
+      history:
+        label: 历史
+        template: tpl_history
+        checks_append: [citation_missing, number_unsourced]
+        requires_sources: true
+        instructions: 区分史料与推断；存疑处写「一说」「存疑」，不做无依据的因果断言
+      politics:
+        label: 时政
+        template: tpl_politics
+        checks_append: [fact_stale, number_unsourced]
+        requires_sources: true
+        fresh_days: 30
+        instructions: 事实与观点必须分栏；资料截止日期写进正文；不做价值判断
+      lifestyle:
+        label: 生活推荐
+        template: tpl_lifestyle
+        checks_append: [absolute_claim]
+        instructions: 第二人称、口语化，像朋友推荐而不是广告；禁「最好 / 第一 / 唯一 / 100%」
+      report:
+        label: 行业报告
+        template: tpl_report
+        checks_append: [citation_missing, number_unsourced]
+        requires_sources: true
+        fresh_days: 180
+        instructions: 每个判断后面跟依据；不确定处写「待验证」，不虚构数据
+      general:
+        label: 通用
+        template: tpl_general
+        instructions: 清楚、具体，避免空话套话
+
+  # ---------------- 长篇小说 ----------------
+  novel:
+    label: 小说
+    budget_chars: 28000
+    # S6 是图谱子图：谁是谁、什么关系、谁死了、哪条伏笔该收了
+    buckets: [S1, S2, S3, S4, S5, S6, S7, S8]
+    style_prompt: >-
+      第三人称叙事，多写动作、对话与可感知的细节，少写心理独白。
+      不解释人物动机，让行为自己说话；每章结尾留一个钩子。
+    # 前 5 条硬规则全部基于图谱结构化比对，零 LLM 成本（见 app/studio/consistency.py）；
+    # 后 2 条是软规则（app/studio/soft_rules.py）：只出 info、不参与打分，
+    # 报出来的是「请确认」而不是「你写错了」
+    checks: [dead_character, item_conflict, time_regression, location_destroyed, foreshadow_overdue,
+             address_drift, setting_conflict]
+    layers:
+      - { kind: volume, label: 卷, readable: false }
+      - { kind: chapter, label: 章, readable: true }
+    scales:
+      single:
+        label: 单本
+    subtypes:
+      fantasy:
+        label: 玄幻 / 仙侠
+        instructions: 境界体系与力量上限一旦定下就不要自相矛盾；打斗写招式的因果，不写数值堆砌
+      urban:
+        label: 都市
+        instructions: 日常细节要真实可核；职业与行业术语不能含糊
+      scifi:
+        label: 科幻
+        instructions: 技术设定先给规则再给应用，不允许「因为它是未来科技」搪塞
+      history:
+        label: 历史架空
+        instructions: 礼仪、称谓、器物、饮食按所借朝代处理；虚构人物不改变真实历史走向
+      mystery:
+        label: 悬疑
+        instructions: 线索必须提前埋下；真相揭晓时读者应能回看出伏笔
+
+# ============================================================
+# 模板：骨架 + 语气 + 检查项
+# outline[].target_words 是软约束（实测偏差 ±20%~40%）
+# ============================================================
+templates:
+  - id: tpl_tech
+    kind: article
+    subtype: tech
+    name: 技术方案 / 踩坑记录
+    outline:
+      - { heading: 背景与问题, prompt: 要解决什么问题、现状痛点是什么, target_words: 600 }
+      - { heading: 方案概述, prompt: 核心思路与选型理由，不展开细节, target_words: 800 }
+      - { heading: 落地步骤, prompt: 分步骤说明，每步含命令/配置/预期输出, target_words: 1500 }
+      - { heading: 常见坑, prompt: 3-5 个实际遇到的坑、现象与解决办法, target_words: 1000 }
+      - { heading: 结论, prompt: 适用边界，什么场景不要用这套, target_words: 400 }
+    style: 面向有经验的后端工程师；直接、不寒暄；代码块必须带语言标注
+    checks: [term_inconsistent, structure_incomplete, citation_missing]
+
+  - id: tpl_history
+    kind: article
+    subtype: history
+    name: 历史专题
+    outline:
+      - { heading: 时代背景, prompt: 政治/经济/社会背景，交代清楚时间坐标, target_words: 800 }
+      - { heading: 事件经过, prompt: 按时间顺序叙述，关键节点不省略, target_words: 1500 }
+      - { heading: 影响与后果, prompt: 短期与长期影响，区分确定与推测, target_words: 1000 }
+      - { heading: 史料辨析, prompt: 不同记载的差异、存疑处明确标注, target_words: 800 }
+      - { heading: 结语, prompt: 历史定位，不做过度的现实类比, target_words: 300 }
+    style: 书面、克制，不用现代网络用语；对存疑处写「一说」「存疑」
+    checks: [citation_missing, structure_incomplete]
+
+  - id: tpl_politics
+    kind: article
+    subtype: politics
+    name: 时政分析
+    outline:
+      - { heading: 事实陈述, prompt: 已确认的事实，标注来源与日期, target_words: 600 }
+      - { heading: 多方立场, prompt: 每种立场单独成段，标注来源, target_words: 1200 }
+      - { heading: 影响推演, prompt: 短期与长期，明确标注为分析/推测, target_words: 1000 }
+      - { heading: 结论, prompt: 回到事实层，不做价值判断, target_words: 300 }
+    style: 中性、陈述式；严格区分「事实」与「观点」；资料截止日期必须写进正文
+    checks: [fact_stale, citation_missing, structure_incomplete]
+
+  - id: tpl_lifestyle
+    kind: article
+    subtype: lifestyle
+    name: 生活推荐
+    outline:
+      - { heading: 场景切入, prompt: 什么情况下会遇到这个问题, target_words: 400 }
+      - { heading: 清单, prompt: 3-6 个具体选项，每个给适用场景, target_words: 1200 }
+      - { heading: 对比, prompt: 关键差异表，不堆参数, target_words: 600 }
+      - { heading: 建议, prompt: 怎么选、谁不适合，给明确结论, target_words: 500 }
+    style: 用第二人称、口语化表达，像朋友推荐而不是广告文案；禁止「最好/第一/唯一/100%」
+    checks: [absolute_claim, structure_incomplete]
+
+  - id: tpl_general
+    kind: article
+    subtype: general
+    name: 通用文章
+    outline:
+      - { heading: 引言, prompt: 提出问题，给读者一个继续读的理由, target_words: 400 }
+      - { heading: 主体, prompt: 展开论述，分 2-3 个小节, target_words: 1500 }
+      - { heading: 结论, prompt: 收束观点，给可执行的建议, target_words: 400 }
+    style: 清楚、具体，避免空话与套话
+    checks: [structure_incomplete]
+
+  - id: tpl_report
+    kind: article
+    subtype: report
+    name: 行业报告 / 白皮书
+    outline:
+      - { heading: 摘要, prompt: 核心结论 3 条，每条一句话, target_words: 400 }
+      - { heading: 现状, prompt: 市场规模、格局、关键数据, target_words: 1500 }
+      - { heading: 驱动因素, prompt: 技术/政策/需求三方面, target_words: 1200 }
+      - { heading: 趋势判断, prompt: 未来 1-3 年，标注置信度, target_words: 1200 }
+      - { heading: 建议, prompt: 面向不同角色分别给建议, target_words: 600 }
+    style: 数据优先，每个判断后面跟依据；不确定的地方写明「待验证」
+    checks: [citation_missing, structure_incomplete]
+
+  - id: tpl_novel
+    kind: novel
+    subtype: ""
+    name: 长篇小说
+    outline:
+      - { heading: 全书主线, prompt: 一句话核心冲突 + 三幕结构, target_words: 600 }
+      - { heading: 分卷规划, prompt: 每卷一句话梗概与关键转折, target_words: 800 }
+    style: 第三人称；多写动作与细节，少写心理独白；每章结尾留钩子
+    checks: [dead_character, item_conflict, time_regression, foreshadow_overdue]

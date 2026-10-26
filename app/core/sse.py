@@ -27,6 +27,9 @@ class DeltaEvent:
     content: Optional[str] = None
     reasoning_content: Optional[str] = None
     finish_reason: Optional[str] = None
+    # True 表示这段文字是「给人看的错误提示」（验证码/风控/找不到输入框），
+    # 不是模型回答。聊天接口可以直接展示；写作层必须报错，绝不能落进正文。
+    hint: bool = False
 
 
 def make_chunk(chat_id: str, model: str, event: DeltaEvent, *, first: bool = False) -> ChatCompletionChunk:

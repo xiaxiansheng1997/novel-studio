@@ -981,7 +981,7 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocke
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
-  background: #070a10;
+  background: #0b0c0f;
 }
 .live-main {
   flex: 1;
@@ -1069,7 +1069,7 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocke
   padding: 0 10px;
   border-radius: 8px;
   border: 1px solid var(--line-soft);
-  background: #0d131d;
+  background: #111318;
   color: var(--text);
   font-size: 12.5px;
   outline: none;
@@ -1096,7 +1096,7 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocke
   width: 13px;
   height: 13px;
   margin: 0;
-  accent-color: #22c55e;
+  accent-color: #d9a45b;
   cursor: pointer;
 }
 .auto-send.on {
@@ -1167,9 +1167,9 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocke
   color: #7dd3fc;
 }
 .probe-chip.on {
-  border-color: rgba(34, 197, 94, 0.35);
-  background: rgba(34, 197, 94, 0.08);
-  color: #86efac;
+  border-color: rgba(217, 164, 91, 0.35);
+  background: rgba(217, 164, 91, 0.08);
+  color: #e8c48a;
 }
 .probe-chip b {
   font-weight: 500;
@@ -1367,8 +1367,8 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocke
   overflow: hidden;
   border-radius: 16px;
   border: 1px solid var(--line);
-  background-color: #05080d;
-  background-image: radial-gradient(rgba(34, 197, 94, 0.08) 1px, transparent 1px);
+  background-color: #0b0c0f;
+  background-image: radial-gradient(rgba(217, 164, 91, 0.08) 1px, transparent 1px);
   background-size: 22px 22px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 30px 60px -40px rgba(0, 0, 0, 0.9);
 }
@@ -1474,7 +1474,7 @@ onUnmounted(() => { window.removeEventListener('mouseup', onMouseUp); closeSocke
   white-space: pre-wrap;
   word-break: break-word;
 }
-.log-line.ok .log-text { color: #86efac; }
+.log-line.ok .log-text { color: #84c79b; }
 .log-line.err .log-text { color: #fca5a5; }
 .log-empty {
   color: var(--text-faint);

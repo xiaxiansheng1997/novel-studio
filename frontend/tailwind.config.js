@@ -5,50 +5,53 @@ export default {
   theme: {
     extend: {
       colors: {
-        // 页面底色：由深到浅，用于分层而不是堆阴影
+        // 墨色分层：近黑到抬升，写作时长时间注视不刺眼
         ink: {
-          950: '#070A10',
-          900: '#0B1018',
-          800: '#0F1621',
-          700: '#141D2A',
-          600: '#1A2534',
-          500: '#223044',
+          950: '#0B0C0F',
+          900: '#111318',
+          800: '#15181E',
+          700: '#1B1F26',
+          600: '#22262F',
+          500: '#2A2F39',
         },
-        // 描边：soft 用于同层分隔，DEFAULT 用于卡片，strong 用于聚焦/悬浮
+        // 描边：soft 同层分隔，DEFAULT 卡片，strong 聚焦/悬浮
         line: {
-          soft: '#16202D',
-          DEFAULT: '#1E2A3A',
-          strong: '#2C3B50',
+          soft: '#1A1E25',
+          DEFAULT: '#262B34',
+          strong: '#363C48',
         },
+        // 文字：暖白而不是纯白，降低蓝光刺激
         txt: {
-          DEFAULT: '#E8EEF7',
-          muted: '#A3B0C2',
-          faint: '#6C7C92',
+          DEFAULT: '#ECE9E4',
+          muted: '#A9A6A0',
+          faint: '#6F6C67',
         },
-        // 主色：代码暗底 + 运行绿
+        // 主色：墨金。写作工具要安静、有质感，不用荧光绿
         run: {
-          DEFAULT: '#22C55E',
-          dim: '#16A34A',
-          soft: 'rgba(34, 197, 94, 0.12)',
+          DEFAULT: '#D9A45B',
+          dim: '#B8863F',
+          soft: 'rgba(217, 164, 91, 0.12)',
         },
-        info: '#38BDF8',
-        iris: '#8B5CF6',
-        warn: '#F59E0B',
-        danger: '#F87171',
+        info: '#7E9CF7',
+        iris: '#9B8CF0',
+        warn: '#E0A44A',
+        danger: '#E47878',
       },
       fontFamily: {
-        sans: ['"Fira Sans"', '"Segoe UI"', 'system-ui', '"Microsoft YaHei"', 'sans-serif'],
-        mono: ['"Fira Code"', 'Consolas', '"JetBrains Mono"', 'monospace'],
+        sans: ['Inter', '"Segoe UI"', 'system-ui', '"Microsoft YaHei"', 'sans-serif'],
+        // 写作正文与标题用衬线，中文用宋体兜底
+        serif: ['"Noto Serif SC"', '"Source Han Serif SC"', '"Songti SC"', 'SimSun', 'serif'],
+        mono: ['"JetBrains Mono"', 'Consolas', 'monospace'],
       },
       borderRadius: {
-        control: '10px',
-        panel: '14px',
-        stage: '18px',
+        control: '8px',
+        panel: '12px',
+        stage: '16px',
       },
       boxShadow: {
         card: 'inset 0 1px 0 rgba(255,255,255,0.03), 0 24px 48px -32px rgba(0,0,0,0.9)',
         pop: '0 18px 40px -16px rgba(0,0,0,0.85)',
-        focus: '0 0 0 2px rgba(34,197,94,0.35)',
+        focus: '0 0 0 2px rgba(217,164,91,0.32)',
       },
     },
   },

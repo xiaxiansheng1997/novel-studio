@@ -192,7 +192,7 @@ function clearKey() {
   padding: 0 11px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  background: #080d14;
+  background: #111318;
   color: var(--text);
   font-family: theme('fontFamily.mono');
   font-size: 12.5px;
@@ -234,12 +234,12 @@ function clearKey() {
   border-color: var(--line-strong);
 }
 .key-btn.primary {
-  border-color: rgba(34, 197, 94, 0.4);
-  background: rgba(34, 197, 94, 0.14);
-  color: #86efac;
+  border-color: rgba(217, 164, 91, 0.4);
+  background: rgba(217, 164, 91, 0.14);
+  color: #e8c48a;
 }
 .key-btn.primary:hover:not(:disabled) {
-  background: rgba(34, 197, 94, 0.22);
+  background: rgba(217, 164, 91, 0.22);
 }
 .key-btn:disabled {
   opacity: 0.55;

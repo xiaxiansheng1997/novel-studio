@@ -1,7 +1,7 @@
 <template>
   <nav class="rail" aria-label="主导航">
-    <router-link to="/chat" class="rail-logo" aria-label="Web2API 控制台首页">
-      <span class="logo-mark">W2</span>
+    <router-link to="/studio" class="rail-logo" aria-label="Novel Studio 写作台">
+      <span class="logo-mark">墨</span>
     </router-link>
 
     <div class="rail-items">
@@ -29,7 +29,7 @@
         <AppIcon name="key" :size="18" />
         <span v-if="hasKey" class="key-dot"></span>
       </button>
-      <span class="rail-version">v0.1</span>
+      <span class="rail-version">v0.2</span>
     </div>
   </nav>
 
@@ -47,14 +47,17 @@ const route = useRoute()
 const keyOpen = ref(false)
 const hasKey = ref(Boolean(getApiKey()))
 
+// 写作排第一：它是主入口；后三项是调试/备用通道，保留但降级
 const items = [
+  { to: '/studio', label: '写作', icon: 'book' },
   { to: '/chat', label: '对话', icon: 'chat' },
   { to: '/live', label: '浏览器', icon: 'monitor' },
   { to: '/admin', label: '管理', icon: 'sliders' },
 ]
 
 function isActive(item) {
-  if (item.to === '/chat') return route.path === '/' || route.path.startsWith('/chat')
+  if (item.to === '/studio') return route.path === '/' || route.path.startsWith('/studio')
+  if (item.to === '/chat') return route.path.startsWith('/chat')
   return route.path.startsWith(item.to)
 }
 
@@ -83,15 +86,16 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+/* 54px：写作时把横向空间还给正文，悬停才出文字 */
 .rail {
-  width: 76px;
+  width: 54px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 18px;
-  padding: 16px 0 14px;
-  background: linear-gradient(180deg, #0a0f17 0%, #070a10 100%);
+  gap: 14px;
+  padding: 14px 0 12px;
+  background: var(--panel);
   border-right: 1px solid var(--line-soft);
   z-index: 20;
 }
@@ -99,27 +103,31 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 12px;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
   text-decoration: none;
-  background: linear-gradient(135deg, rgba(34, 197, 94, 0.22), rgba(56, 189, 248, 0.14));
-  border: 1px solid rgba(34, 197, 94, 0.35);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  background: rgba(217, 164, 91, 0.1);
+  border: 1px solid rgba(217, 164, 91, 0.28);
+  transition: background-color 0.16s var(--ease), border-color 0.16s var(--ease);
+}
+.rail-logo:hover {
+  background: rgba(217, 164, 91, 0.16);
+  border-color: rgba(217, 164, 91, 0.45);
 }
 .logo-mark {
-  font-family: theme('fontFamily.mono');
-  font-size: 13px;
+  font-family: theme('fontFamily.serif');
+  font-size: 16px;
   font-weight: 600;
-  letter-spacing: -0.02em;
-  color: #86efac;
+  line-height: 1;
+  color: var(--run);
 }
 .rail-items {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   width: 100%;
-  padding: 0 10px;
+  padding: 0 7px;
 }
 .rail-item {
   position: relative;
@@ -127,32 +135,33 @@ onMounted(async () => {
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  padding: 9px 0 7px;
-  border-radius: 10px;
+  padding: 8px 0 6px;
+  border-radius: 8px;
   color: var(--text-faint);
   text-decoration: none;
-  transition: color 0.18s var(--ease), background-color 0.18s var(--ease);
+  cursor: pointer;
+  transition: color 0.16s var(--ease), background-color 0.16s var(--ease);
 }
 .rail-item:hover {
   color: var(--text);
-  background: rgba(34, 197, 94, 0.06);
+  background: rgba(217, 164, 91, 0.06);
 }
 .rail-item.is-active {
   color: var(--run);
-  background: rgba(34, 197, 94, 0.1);
+  background: rgba(217, 164, 91, 0.1);
 }
 .rail-item.is-active::before {
   content: '';
   position: absolute;
-  left: -10px;
-  top: 12px;
-  bottom: 12px;
+  left: -7px;
+  top: 10px;
+  bottom: 10px;
   width: 2px;
   border-radius: 2px;
   background: var(--run);
 }
 .rail-label {
-  font-size: 10.5px;
+  font-size: 10px;
   letter-spacing: 0.02em;
 }
 .rail-foot {
@@ -180,7 +189,7 @@ onMounted(async () => {
 .rail-key:hover {
   color: var(--text);
   border-color: var(--line);
-  background: rgba(34, 197, 94, 0.06);
+  background: rgba(217, 164, 91, 0.06);
 }
 .rail-key.is-set {
   color: var(--run);
@@ -193,7 +202,7 @@ onMounted(async () => {
   height: 6px;
   border-radius: 50%;
   background: var(--run);
-  box-shadow: 0 0 0 2px #080d14;
+  box-shadow: 0 0 0 2px var(--panel);
 }
 .rail-version {
   font-family: theme('fontFamily.mono');
@@ -203,23 +212,26 @@ onMounted(async () => {
 
 @media (max-width: 720px) {
   .rail {
-    width: 60px;
-    gap: 12px;
-    padding-top: 12px;
+    width: 46px;
+    gap: 10px;
+    padding-top: 10px;
   }
   .rail-logo {
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+  }
+  .logo-mark {
+    font-size: 14px;
   }
   .rail-items {
-    padding: 0 7px;
+    padding: 0 5px;
   }
   .rail-label {
     display: none;
   }
   .rail-item {
-    padding: 10px 0;
+    padding: 9px 0;
   }
   .rail-version {
     display: none;

@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from app import __version__
-from app.api import admin_routes, conversation_routes, live_routes, openai_routes
+from app.api import admin_routes, conversation_routes, live_routes, openai_routes, studio_routes
 from app.config import BASE_DIR, get_settings
 from app.core.auth import allowed_origins
 from app.core.errors import W2AError
@@ -63,6 +63,20 @@ async def lifespan(app: FastAPI):
     app.state.store = rt.store
     app.state.registry = rt.registry
     app.state.live = rt.live
+    # 写作业务（/studio/*）依赖：独立的作品库与 LLM 网关
+    app.state.studio_store = rt.studio
+    app.state.gateway = rt.gateway
+    app.state.studio_queue = rt.queue
+
+    # 队列自恢复：上次进程留下的 queued/running 任务在这里接上。
+    # 不能等「第一次入队」才起 worker——关掉服务过夜、第二天打开，
+    # 那批章应该自己继续写，而不是等用户再点一次。
+    pending = await rt.studio.job_counts()
+    if pending.get("queued") or pending.get("running"):
+        info = await rt.queue.start()
+        logger.info(
+            f"写作队列已恢复 | 待办={pending} | 回收 running={info.get('resumed', 0)}"
+        )
     logger.info(
         f"Web2API v{__version__} 已启动 | providers={list(rt.registry.adapters.keys())} "
         f"| http://{rt.settings.host}:{rt.settings.port}/v1 "
@@ -116,6 +130,7 @@ app.include_router(openai_routes.router)
 app.include_router(conversation_routes.router)
 app.include_router(admin_routes.router)
 app.include_router(live_routes.router)
+app.include_router(studio_routes.router)
 
 
 @app.get("/")
@@ -124,6 +139,7 @@ async def root():
         "name": "Web2API 对话反代",
         "version": __version__,
         "openai_base": "/v1",
+        "studio_ui": "/studio",
         "chat_ui": "/ui/chat.html",
         "admin_ui": "/admin",
         "live_ui": "/live",

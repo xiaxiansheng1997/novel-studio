@@ -1,7 +1,10 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
-  { path: '/', redirect: '/chat' },
+  { path: '/', redirect: '/studio' },
+  // 写作台是主入口；对话/浏览器/管理是「调试与备用通道」，退到次要位置
+  { path: '/studio', name: 'studio', component: () => import('./views/StudioView.vue') },
+  { path: '/studio/:id', name: 'studio-work', component: () => import('./views/StudioView.vue') },
   { path: '/chat', name: 'chat', component: () => import('./views/ChatView.vue') },
   { path: '/chat/:id', name: 'chat-conversation', component: () => import('./views/ChatView.vue') },
   { path: '/admin', name: 'admin', component: () => import('./views/AdminView.vue') },

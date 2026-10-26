@@ -4,29 +4,29 @@
 
 /* ============================================================
    Design tokens
-   风格：Code Dark + Run Green（仪表盘/开发者工具）
-   原则：用「底色分层 + 1px 描边」建立纵深，不堆阴影；文字对比度 ≥ 4.5:1
+   风格：墨与金（写作工作室）
+   原则：用「底色分层 + 1px 描边」建立纵深，不堆阴影；
+        暖白文字 + 墨金主色，长时间写作不刺眼；文字对比度 ≥ 4.5:1
    ============================================================ */
 :root {
-  --bg: #070a10;
-  --panel: #0b1018;
-  --panel-2: #0f1621;
-  --line: #1e2a3a;
-  --line-soft: #16202d;
-  /* 与 tailwind.config.js 的 line.strong 保持一致；focus/悬浮态用 */
-  --line-strong: #2c3b50;
-  --text: #e8eef7;
-  --text-muted: #a3b0c2;
-  --text-faint: #6c7c92;
-  --run: #22c55e;
-  --run-dim: #16a34a;
-  --info: #38bdf8;
-  --iris: #8b5cf6;
-  --warn: #f59e0b;
-  --danger: #f87171;
-  --radius-control: 10px;
-  --radius-panel: 14px;
-  --ring: 0 0 0 2px rgba(34, 197, 94, 0.35);
+  --bg: #0b0c0f;
+  --panel: #111318;
+  --panel-2: #15181e;
+  --line: #262b34;
+  --line-soft: #1a1e25;
+  --line-strong: #363c48;
+  --text: #ece9e4;
+  --text-muted: #a9a6a0;
+  --text-faint: #6f6c67;
+  --run: #d9a45b;
+  --run-dim: #b8863f;
+  --info: #7e9cf7;
+  --iris: #9b8cf0;
+  --warn: #e0a44a;
+  --danger: #e47878;
+  --radius-control: 8px;
+  --radius-panel: 12px;
+  --ring: 0 0 0 2px rgba(217, 164, 91, 0.32);
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
@@ -43,7 +43,7 @@
     line-height: 1.6;
   }
   ::selection {
-    background: rgba(34, 197, 94, 0.28);
+    background: rgba(217, 164, 91, 0.28);
     color: #f8fafc;
   }
   :focus-visible {
@@ -91,7 +91,7 @@
     font-weight: 600;
   }
   .btn-primary:hover {
-    @apply border-run-dim bg-run-dim text-white;
+    @apply border-run-dim bg-run-dim text-ink-950;
   }
   .btn-danger {
     border-color: rgba(248, 113, 113, 0.45);
@@ -172,9 +172,9 @@
     white-space: nowrap;
   }
   .pill--on {
-    border-color: rgba(34, 197, 94, 0.35);
-    background: rgba(34, 197, 94, 0.1);
-    color: #86efac;
+    border-color: rgba(217, 164, 91, 0.38);
+    background: rgba(217, 164, 91, 0.12);
+    color: #e8c48d;
   }
   .pill--off {
     @apply border-line bg-ink-800 text-txt-faint;
@@ -219,7 +219,7 @@
   }
   .status-dot.on {
     background: var(--run);
-    box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+    box-shadow: 0 0 0 3px rgba(217, 164, 91, 0.15);
   }
   .status-dot.off {
     background: var(--danger);
@@ -238,13 +238,13 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #223044;
+  background: #2a2f39;
   border-radius: 8px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #33435a;
+  background: #3a404c;
   background-clip: content-box;
 }
 
@@ -264,7 +264,7 @@
   margin: 0.45em 0;
 }
 .prose-chat pre {
-  background: #060910;
+  background: #0a0b0e;
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 12px 14px;
@@ -276,11 +276,11 @@
   font-size: 0.88em;
 }
 .prose-chat :not(pre) > code {
-  background: #16202d;
+  background: #1e222a;
   border: 1px solid var(--line-soft);
   padding: 1px 6px;
   border-radius: 5px;
-  color: #c7d2fe;
+  color: #d6c7f5;
 }
 .prose-chat ul,
 .prose-chat ol {
@@ -309,7 +309,7 @@
   text-align: left;
 }
 .prose-chat th {
-  background: #0f1621;
+  background: #15181e;
   font-weight: 600;
 }
 .prose-chat a {
@@ -383,7 +383,7 @@
   position: absolute;
   top: 8px;
   right: 8px;
-  background: #16202d;
+  background: #1e222a;
   border: 1px solid var(--line);
   border-radius: 6px;
   color: var(--text-muted);

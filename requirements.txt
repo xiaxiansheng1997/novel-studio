@@ -6,5 +6,7 @@ aiosqlite==0.20.0
 pydantic==2.10.4
 pydantic-settings==2.7.1
 PyYAML==6.0.2
+# M2：FTS5 的 unicode61 不切中文，靠 jieba 预分词后写入 text_tok
+jieba==0.42.1
 loguru==0.7.3
 python-dotenv==1.0.1

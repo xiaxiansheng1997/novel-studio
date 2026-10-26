@@ -411,8 +411,8 @@ function handleContentClick(e) {
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
-  background: radial-gradient(1200px 600px at 70% -10%, rgba(34, 197, 94, 0.06), transparent 60%),
-    #070a10;
+  background: radial-gradient(1200px 600px at 70% -10%, rgba(217, 164, 91, 0.06), transparent 60%),
+    #0b0c0f;
 }
 .chat-main {
   flex: 1;
@@ -491,13 +491,13 @@ function handleContentClick(e) {
   transition: border-color 0.18s var(--ease), background-color 0.18s var(--ease), color 0.18s var(--ease);
 }
 .mode-chip:hover:not(:disabled) {
-  border-color: rgba(34, 197, 94, 0.4);
+  border-color: rgba(217, 164, 91, 0.4);
   color: var(--text);
 }
 .mode-chip.on {
-  border-color: rgba(34, 197, 94, 0.55);
-  background: rgba(34, 197, 94, 0.14);
-  color: #86efac;
+  border-color: rgba(217, 164, 91, 0.55);
+  background: rgba(217, 164, 91, 0.14);
+  color: #e8c48a;
 }
 .mode-chip:disabled {
   opacity: 0.4;
@@ -542,9 +542,9 @@ function handleContentClick(e) {
   align-items: center;
   justify-content: center;
   border-radius: 13px;
-  border: 1px solid rgba(34, 197, 94, 0.35);
-  background: rgba(34, 197, 94, 0.1);
-  color: #86efac;
+  border: 1px solid rgba(217, 164, 91, 0.35);
+  background: rgba(217, 164, 91, 0.1);
+  color: #e8c48a;
 }
 .empty h2 {
   margin: 0 0 6px;
@@ -577,8 +577,8 @@ function handleContentClick(e) {
   transition: border-color 0.18s var(--ease), background-color 0.18s var(--ease), color 0.18s var(--ease);
 }
 .suggest:hover {
-  border-color: rgba(34, 197, 94, 0.4);
-  background: rgba(34, 197, 94, 0.06);
+  border-color: rgba(217, 164, 91, 0.4);
+  background: rgba(217, 164, 91, 0.06);
   color: var(--text);
 }
 .suggest-arrow {

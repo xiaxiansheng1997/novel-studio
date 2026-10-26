@@ -28,3 +28,9 @@ frontend/dist/
 # 本地临时测试产物（截图/临时脚本），防止误提交
 .tmp_*/
 .tmp_*.py
+
+# ui-ux-pro-max 生成的设计系统产物（本地参考，可随时重新生成）
+design-system/
+
+# qoder sklls
+.qoder/

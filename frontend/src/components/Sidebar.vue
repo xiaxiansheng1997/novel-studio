@@ -196,17 +196,17 @@ function formatTime(ts) {
   gap: 8px;
   padding: 0 12px;
   border-radius: 10px;
-  border: 1px solid rgba(34, 197, 94, 0.4);
-  background: rgba(34, 197, 94, 0.1);
-  color: #86efac;
+  border: 1px solid rgba(217, 164, 91, 0.4);
+  background: rgba(217, 164, 91, 0.1);
+  color: #e8c48a;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   transition: background-color 0.18s var(--ease), border-color 0.18s var(--ease);
 }
 .new-chat-btn:hover {
-  background: rgba(34, 197, 94, 0.16);
-  border-color: rgba(34, 197, 94, 0.6);
+  background: rgba(217, 164, 91, 0.16);
+  border-color: rgba(217, 164, 91, 0.6);
 }
 .new-chat-kbd {
   margin-left: auto;
@@ -233,7 +233,7 @@ function formatTime(ts) {
   padding: 0 28px 0 32px;
   border-radius: 9px;
   border: 1px solid var(--line-soft);
-  background: #0d131d;
+  background: #111318;
   color: var(--text);
   font-size: 12.5px;
   outline: none;
@@ -288,10 +288,10 @@ function formatTime(ts) {
   transition: background-color 0.16s var(--ease);
 }
 .conv-item:hover {
-  background: #101722;
+  background: #15181e;
 }
 .conv-item.active {
-  background: rgba(34, 197, 94, 0.08);
+  background: rgba(217, 164, 91, 0.08);
 }
 .conv-item.active::before {
   content: '';
@@ -393,8 +393,8 @@ function formatTime(ts) {
   height: 28px;
   padding: 0 8px;
   border-radius: 7px;
-  border: 1px solid rgba(34, 197, 94, 0.55);
-  background: #0d131d;
+  border: 1px solid rgba(217, 164, 91, 0.55);
+  background: #111318;
   color: var(--text);
   font-size: 13px;
   outline: none;
@@ -420,11 +420,11 @@ function formatTime(ts) {
   transition: background-color 0.16s var(--ease);
 }
 .hit-item:hover {
-  background: #101722;
+  background: #15181e;
 }
 .hit-title {
   font-size: 12px;
-  color: #86efac;
+  color: #e8c48a;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -473,7 +473,7 @@ function formatTime(ts) {
   padding: 1px 6px;
   border-radius: 5px;
   border: 1px solid var(--line-soft);
-  background: #0d131d;
+  background: #111318;
 }
 
 @media (max-width: 1024px) {

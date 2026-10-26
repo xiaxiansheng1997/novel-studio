@@ -1,7 +1,14 @@
-# Web2API 对话反代
+# Web2API 对话反代 + 写作工作室
 
-把 **DeepSeek / 通义千问 / 豆包** 的网页对话端，反向代理成 **OpenAI 兼容 API**，并自带极简聊天界面。
-用你自己的网页账号，接入 ChatBox / LobeChat / IDE 插件 / openai SDK 等任意 OpenAI 兼容客户端。
+一个仓库两块能力：
+
+| | 入口 | 做什么 |
+|---|---|---|
+| **写作工作室** | `/studio`（站点首页即跳这里） | 小说与单篇文档的写作台：大纲 → 逐节生成 → 拼装导出，带记忆层、图谱与一致性告警 |
+| **对话反代** | `/v1`、`/chat`、`/live`、`/admin` | 把 **DeepSeek / 通义千问 / 豆包** 的网页对话端，反向代理成 **OpenAI 兼容 API** |
+
+写作工作室的生成调用走的是同一个网关、同一批网页账号（见 `app/llm/gateway.py`），**不额外接官方 API**：
+也就是说下面所有的限流、风控与封号约束它一样都躲不开，适合低频、串行、过夜跑批。
 
 > ⚠️ 合规与安全：本项目通过逆向网页端实现，可能违反各家服务条款。**仅限个人学习、本机自用**；
 > 不要对公网暴露、不要分发、不要高并发刷量。DeepSeek 与豆包**有明确封号风险**，请低频使用。
@@ -27,17 +34,23 @@ recon（页面里的“录制接口”开关或 `scripts.recon`）仅用于启�
 ## 快速开始
 
 ```powershell
-# 1) 虚拟环境 + 依赖
+# 1) 虚拟环境 + 依赖（requirements-dev.txt 会连 pytest / ruff 一起装；只跑服务可以只装 requirements.txt）
 python -m venv .venv ; .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 playwright install chromium
 
 # 2) 复制环境变量（可选，改端口/口令）
 copy .env.example .env
 
-# 3) 启动服务
+# 3) 构建前端（后端托管 frontend/dist；没构建时只有 /ui 的旧静态页兜底）
+cd frontend ; npm install ; npm run build ; cd ..
+
+# 4) 启动服务
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
+
+开发时可以直接 `python dev.py all`（后端 :8000 + Vite :5173，热更新）；`build` / `backend` / `frontend` 三个子命令单独起。
+改完代码一键自检：`powershell -ExecutionPolicy Bypass -File scripts\check.ps1`（ruff → pytest → 前端构建）。
 
 然后打开 **内嵌浏览器页** <http://127.0.0.1:8000/live>：选站点 → **连接** → 在实时画面里直接登录（扫码/密码/滑块）→ **检测登录**。登录态持久化后长期复用，**全程无需命令行**。需要精修解析时，在同一页点**开始录制接口**、在画面里发一句“你好”、再**停止录制**即可写入 fixtures。
 
@@ -54,6 +67,51 @@ python -m scripts.recon qwen      # 抓取真实对话接口
 其他界面：
 - 对话：<http://127.0.0.1:8000/chat>
 - 管理面板（登录态/模型/模式概览）：<http://127.0.0.1:8000/admin>
+
+## 写作工作室（`/studio`）
+
+入口 <http://127.0.0.1:8000/studio>（就是站点首页）。生成靠的是网页账号，所以先按上面「快速开始」在 `/live` 里登录至少一个站点。
+
+两种形态共用一套节点树与编辑器，按作品的 `kind` 切换：
+
+| 形态 | 层级 | 长期记忆 | 专属能力 |
+|---|---|---|---|
+| `novel` 小说 | 卷 / 章 | 设定卡 + 实体/关系/事件/伏笔图谱 | 节拍卡、章纲；硬规则：死人复活 / 归属冲突（物品双持）/ 时间倒退 / 已毁地点 / 伏笔超期 |
+| `article` 文档 | 节（单篇）/ 讲 → 节（系列） | 素材 / 事实卡 / 术语 | 模板大纲；硬规则：事实过期 / 缺引用 / 术语不统一 / 结构不完整 |
+
+一条完整主线：
+
+1. 建作品（选 kind / subtype / 模板）→ 生成大纲 → 逐节生成（`POST /studio/works/{id}/pipeline` 走 SSE 看着它写，或 `POST …/batch` 落库入队关页面不管）
+2. 每节生成前按桶装配上下文（S0–S8 + S_src；novel 默认 28,000 字符、article 18,000）。`POST /studio/context/preview` 只装配不花钱，能看到每桶占多少、丢了什么——**调 prompt 靠这个，不然就是盲调**
+3. 生成后可选自动后处理：分块索引 → 三段式摘要（事件 / 变化 / 钩子）→ 图谱抽取 → 一致性检查 → 5 维打分
+4. 全文拼装 `POST …/assemble`，导出 `GET …/export`（Markdown）
+5. 选中任意段落可单独加工（重写 / 压缩 / 扩写 / 润色 / 翻译，`POST /studio/transform`），多候选横向比较
+
+无人值守那层：单 worker 串行队列 + 优先级 + 幂等入队；重启把 `running` 退回 `queued` 自动续跑；
+遇到风控或登录失效整队暂停；每 `triage_every` 节抽检一次，连续两次判「重写」就熔断停队。
+
+检索与记忆：正文/素材切成 700 字块进 FTS5（jieba 预分词），`index_units` 记内容哈希做增量重建（没改过的节点直接跳过）。
+**向量检索尚未接入**（`chunk_vectors` 表还没建，属可选的 M5）。
+
+检查规则分两类：
+
+- **硬规则 9 条**（小说 5 + 文档 4，即上表「专属能力」那串）：结构上必然错，报 `error/warn` 并参与「设定合规」扣分；
+- **软规则 4 条**（`address_drift` 称呼漂移 / `setting_conflict` 设定冲突（目前只判年龄）/ `absolute_claim` 绝对化表述 / `number_unsourced` 数字无出处）：
+  **零 LLM 调用**，一律 `info`、不扣分、不阻塞定稿，每节每规则封顶 3 条，措辞永远是「请确认」——改判交给人。
+  哪几条开在每个文种的 `checks` 里自己选：小说默认开前两条，文档按子类只开绝对化表述 / 数字无出处。
+
+告警在右栏分「硬 / 待确认」两组渲染，点「定位」会高亮正文对应片段；图谱除了列表还能开力导向视图
+（虚线圈 = 已死/已毁，虚线边 = 已过期关系）。
+
+内容类型全部配置化：`content-types.yaml`（`kinds → scales → subtypes` 三层合并；预算、启用的上下文桶、层级、`checks`/`checks_append`），**新增文种不改代码**；
+改完调 `POST /studio/content-types/reload` 立即生效，前端下拉框的数据源是 `GET /studio/content-types`。
+
+业务数据落 `storage/studio.sqlite`，与对话库 `sessions.sqlite` 分开。清书架/清孤儿行：`python -m scripts.cleanup_works`（默认试运行、删前自动备份）。
+
+设计与实测都写在 **`docs/novel-studio-tech-design.md`**（基线数据见 `docs/m0-baseline.md`，文种约定见 `docs/content-types.md`）。
+界面走深色「墨与金」：唯一强调色 `#D9A45B`、正文衬线 17px / 行高 1.9、编辑区宽度封顶 646px。
+完整规范由 `ui-ux-pro-max` 生成在本地 `design-system/`（已 gitignore，不入库，随时可重新生成）。
+其余章节都是反代部分。
 
 ## 接入 OpenAI 兼容客户端
 
@@ -134,9 +192,14 @@ client.chat.completions.create(
 ## 配置
 
 - `config.yaml`：provider 开关、首页地址、模型列表、并发上限、全局每分钟限流（非敏感）。
-- `.env`（由 `.env.example` 复制）：`W2A_HOST/PORT`、可选 `W2A_API_KEY`（同时保护 `/v1`、`/admin/*`（`/health` 除外）、`/live` 的 REST 与 WebSocket）、`W2A_STORAGE_DIR`。
-- 前端填口令：设了 `W2A_API_KEY` 后，SPA 左下角的「钥匙」按钮即为入口，填入后先拿 `/v1/models` 校验再保存（存 `localStorage`），此后 `/v1`、`/admin`、`/live` 的 REST 统一带 `Authorization: Bearer`，WS 带 `?token=`。服务端没设口令时留空即可。`GET /health` 返回 `auth_required` 用来判断要不要填。
+- `.env`（由 `.env.example` 复制）：`W2A_HOST/PORT`、可选 `W2A_API_KEY`（同时保护 `/v1`、`/admin/*`（`/health` 除外）、`/live` 与 `/studio/*` 的 REST 与 WebSocket）、`W2A_STORAGE_DIR`。
+- 前端填口令：设了 `W2A_API_KEY` 后，SPA 左下角的「钥匙」按钮即为入口，填入后先拿 `/v1/models` 校验再保存（存 `localStorage`），此后 `/v1`、`/admin`、`/live`、`/studio` 的 REST 统一带 `Authorization: Bearer`，WS 带 `?token=`。服务端没设口令时留空即可。`GET /health` 返回 `auth_required` 用来判断要不要填。
 - 浏览器跨域/WS 来源：默认只放行本机与 `5173` 开发端口，需要时用 `W2A_ALLOW_ORIGINS` 追加（逗号分隔，`*` 全放开）。
+- `content-types.yaml`（项目根）：写作工作室的文种与模板配置。启动时按它覆盖库内内置模板（`is_builtin=1`），用户自建模板不动；
+  写坏了不会让服务起不来（解析失败回落内置兜底，接口返回里带 `error`）。改完调 `POST /studio/content-types/reload` 就地生效。
+- 写作业务库：`<W2A_STORAGE_DIR>/studio.sqlite`（默认 `storage/studio.sqlite`），表结构见 `app/studio/schema.py`；
+  `DELETE /studio/works/{id}` 会连作品自己的数据一起清，但 `jobs`/`runs`/`index_units`/`chunks_fts` 四张不受外键保护，
+  由 `delete_work()` 手动清（历史残留用 `cleanup_works --sweep-orphans`）。
 - 页面绑定覆盖层：`storage/ui-bindings.yaml`（已 gitignore），由 `/live` 的「绑定」行写入；加载时覆盖 `config.yaml` 的 `ui` 与 `models[].label`，并按绑定的开关重建模式（标准四模式 + 每个自定义场景各一个同名模式；`body_patch`/`label` 仍沿用 `config.yaml`）。删掉该文件即完全回到 `config.yaml`。
 - 热加载：改完 `config.yaml` 后 `POST /admin/reload` 就地生效（模型/模式/并发/限流都会重建，无需重启；`GET` 会返回 405 提示），`/live` 的「页面模式」面板里也有同名按钮。保存页面绑定会自动触发同样的热加载。
 - 千问 HTTP 快路径开关：环境变量 `W2A_QWEN_HTTP=1`（需已 recon 出 `fixtures/qwen.json`）。
@@ -151,16 +214,35 @@ client.chat.completions.create(
 ```
 app/
   main.py runtime.py config.py
-  api/      openai_routes.py  admin_routes.py  live_routes.py  schemas.py
+  api/      openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  studio_routes.py  schemas.py
   core/     base.py modes.py registry.py sse.py store.py ratelimit.py errors.py blocked.py control_tokens.py
-  browser/  playwright_pool.py session_manager.py stream_capture.py cdp_stream.py live_browser.py network_recorder.py ui_modes.py
+            auth.py alerts.py cut.py request_log.py ui_bindings.py
+  browser/  playwright_pool.py session_manager.py stream_capture.py cdp_stream.py live_browser.py network_recorder.py ui_modes.py site_session.py
   providers/ _replay.py _browser_base.py  qwen.py doubao.py deepseek.py
-frontend/   Vue 3 + Vite（/chat /admin /live，构建产物 dist 由后端托管）
+  llm/      gateway.py        # 写作流程与 provider 解耦，复用上面的 registry 与限流
+  studio/   schema.py store.py content_types.py assembler.py prompting.py tokenize.py chunker.py
+            indexer.py retrieval.py summarizer.py graph.py consistency.py soft_rules.py
+            scoring.py tasks.py jobs.py jsonutil.py
+frontend/   Vue 3 + Vite（/studio /chat /admin /live，首页重定向到 /studio；构建产物 dist 由后端托管）
+design-system/  本地生成，已 gitignore（写作台的界面规范：颜色 / 字体 / 布局 / 组件 / 交付前检查）
 web/        旧版静态页 chat.html admin.html live.html（前端未构建时兜底）
-scripts/    login.py  recon.py
+docs/       novel-studio-tech-design.md  m0-baseline.md  content-types.md
+content-types.yaml   文种配置（kinds → scales → subtypes + 模板）
+dev.py      frontend / backend / build / all
+scripts/    login.py  recon.py  check.ps1
+            smoke_studio.py  smoke_m1_tail.py  smoke_m2.py  smoke_m3.py  smoke_m4.py  smoke_soft_rules.py
+            measure_baseline.py  shot_studio.py  cleanup_works.py
+tests/      pytest（全量 125 例；反代与写作两侧都有覆盖，写作相关的用 tmp_path 建临时库，不碰 storage/）
 fixtures/   <由 recon 生成，已 gitignore>
-storage/    <浏览器 profile / 票据 / 会话库，已 gitignore>
+storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite / backups，已 gitignore>
 ```
+
+`scripts/` 下的验收脚本分两类，账号被风控时别看错：
+
+- **完全离线**（不起服务、不发起任何生成调用）：`smoke_soft_rules.py`（只读正文跑软规则）、`cleanup_works.py`（清书架 / 清孤儿行，默认试运行）；
+- **要先起服务**（跑本机 HTTP 接口）：`smoke_studio.py`（默认只读，`--generate` 才真生成）、`smoke_m3.py`（默认不调模型，`--llm` 才真实抽取）、
+  `smoke_m1_tail.py` 与 `smoke_m2.py`（默认会真跑一次，`--skip-llm` 只验不调模型的部分）、`smoke_m4.py`（走队列，会生成）、
+  `measure_baseline.py`（M0 基线实测，`--dry-run` 只看计划）、`shot_studio.py`（Playwright 截图，不发消息）。
 
 ## 常见问题
 
@@ -195,8 +277,8 @@ storage/    <浏览器 profile / 票据 / 会话库，已 gitignore>
 | `710022002` | 当前服务访问频繁，请稍后重试 | 游客态（全新 profile）发不出对话，页面同时弹登录框 |
 | `710022004` | `rate limited`（extra 里 `type=verify`） | 该 profile/设备被风控，要求人机验证 |
 
-以前这些载荷解析不出文本就被当成“没有增量”，最后返回一条 `content: ""` 的 200 响应，调用方什
-么线索都拿不到。现在 `app/core/blocked.py:find_upstream_error()` 会认出业务错误，报 `type=upstream_error`
+以前这些载荷解析不出文本就被当成“没有增量”，最后返回一条 `content: ""` 的 200 响应，调用方什么线索都拿不到。
+现在 `app/core/blocked.py:find_upstream_error()` 会认出业务错误，报 `type=upstream_error`
 并把 `error_code` 和上游原文带在 `message` 里。另外：
 
 - 豆包网页端**不登录不能聊**（已用全新 profile 验证：输入后立刻回 `710022002`，页面随后被踢回 `https://www.doubao.com/chat/?from_logout=1`），请先在 `/live` 里登录；
@@ -247,6 +329,16 @@ data: {"v":"植物"}                                                            
 - 你在 `/live` 画面里按下鼠标的瞬间，后端会给该 provider 发一个**让位信号**，正在跑的自动拖动（不管是 /live 按钮触发的还是后台聊天触发的）会在一个采样周期内停下并抬起左键，日志写「已让位给手动操作」；人手接管时不会再跟机器抢同一个手柄。一个页面只有一只鼠标，所以后端还会等它**真的松开左键**（最多 0.8 秒）才把你的按下事件送进去 —— 否则机器的 `mouse up` 会落在你按下之后，把这次拖拽抬掉，表现为「手动拖也不跟手」；
 - 正确处置是**停手**：等几分钟、或换网络/换出口 IP 后再在 `/live` 里手动过一次，然后点「已验证·清除风控冷却」。同 IP 反复重试只会让风控等级越来越高。
 
+### /studio 批量生成整队暂停（或一直报「作品不存在」）
+
+队列只在两种情况下主动停：**风控/登录失效** 与 **抽检连续两次判「重写」**。
+前者处置与聊天侧一样：`GET /live/debug/<key>` 看登录判定 → 去 `/live` 手动过一次验证 →
+点「已验证·清除风控冷却」→ `POST /studio/queue/resume`（页面底部队列条上也有按钮）。
+后者是止损阀，先把那一节正文改顺再 `resume`；已标 `failed` 的任务用 `POST /studio/jobs/{id}/retry` 重排（会把 attempts 清零）。
+
+如果日志里反复出现「作品不存在」，那是 `delete_work()` 修好之前删掉的作品留下的孤儿 job 行：
+跑一次 `python -m scripts.cleanup_works --sweep-orphans --yes` 清掉（默认试运行，加 `--yes` 才动手，动手前先备份）。
+
 ## 已知限制
 
 - `stream:false` 请求仍会缓冲全部增量后合成一条完整响应；`stream:true` 走 CDP 逐块下发。
@@ -265,6 +357,17 @@ data: {"v":"植物"}                                                            
 - 豆包 2026-10 改版后输入区只剩「豆包 快速 / 豆包 专家」模型档位，原来的「深度思考 / 联网搜索」开关已不存在：`doubao-pro` 映射「豆包 专家」、`doubao-lite` 映射「豆包 快速」，联网由站点自行决定；「更多技能」里的视频生成/帮我写作/PPT 等是一次性技能入口，没有开/关状态，**不能**当自定义场景绑定（不是盲点又无法判定状态，除非站点将来补上 `aria-pressed`）。
 - DeepSeek 页面只有「深度思考」与「智能搜索」两枚开关，没有场景 chip；这两个已按标准开关绑定，不需要再用「场景」行另加。
 - 参考项目 `LLM-Red-Team/qwen-free-api` 曾被曝供应链投毒，本项目未使用其代码，仅参考协议思路。
+
+写作工作室这边：
+
+- **告警不阻塞定稿**：`PATCH /studio/nodes/{id}` 不查 `issues`，下拉框改成 `final` 就直接过（设计文档 9.5 已如实注明“没实现”）。
+- **软规则只给 `info`**：不改正文也不扣分，到底算不算问题要人判；且只在作品 `checks` 里显式开着时才跑。
+- 删节点（`delete_node()`）与删素材（`delete_source()`）现在会把 `chunks_fts` / `index_units`（以及节点相关的 `summaries`）一起清掉；
+  在这之前删下的历史残留用 `python -m scripts.cleanup_works --sweep-orphans` 清（旧版只按 work_id 判，认不出「作品还活着、节点已没」的那些行）。
+- **向量检索未接入**：换个说法的语义查询仍只能靠 jieba + FTS5 的关键词召回。
+- 自动打分为 5 维，**不做多候选盲评**；`/transform` 的候选只并排列出来给人比。
+- 模板里的 `target_words` 是软约束，实测偏差约 ±20%~40%。
+- 写作与聊天共用同一个网页账号与**同一个标签页**：`/studio` 正在批量生成时去 `/live` 退出登录，写作会跟着掉进游客态。
 
 ## 免责声明
 

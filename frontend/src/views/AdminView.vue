@@ -299,7 +299,7 @@ function alignClass(p) {
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
-  background: radial-gradient(1000px 500px at 80% -10%, rgba(34, 197, 94, 0.05), transparent 60%), #070a10;
+  background: radial-gradient(1000px 500px at 80% -10%, rgba(217, 164, 91, 0.05), transparent 60%), #0b0c0f;
 }
 .admin-main {
   flex: 1;
@@ -336,7 +336,7 @@ function alignClass(p) {
 }
 .reload-msg {
   font-size: 12px;
-  color: #86efac;
+  color: #e8c48a;
 }
 .reload-msg.is-bad {
   color: #fca5a5;
@@ -474,7 +474,7 @@ function alignClass(p) {
   min-height: 16px;
 }
 .pc-align.is-ok {
-  color: #86efac;
+  color: #e8c48a;
 }
 .pc-align.is-bad {
   color: #fca5a5;
@@ -534,7 +534,7 @@ function alignClass(p) {
   height: 30px;
   border-radius: 9px;
   border: 1px solid var(--line-soft);
-  background: #0a0f17;
+  background: #111318;
   color: var(--text-muted);
   flex-shrink: 0;
 }
@@ -577,7 +577,7 @@ function alignClass(p) {
   text-transform: uppercase;
   color: var(--text-faint);
   border-bottom: 1px solid var(--line-soft);
-  background: #0a0f17;
+  background: #111318;
 }
 .req-table td {
   padding: 8px 14px;
@@ -611,9 +611,9 @@ function alignClass(p) {
   border: 1px solid;
 }
 .status-code.good {
-  color: #86efac;
-  border-color: rgba(34, 197, 94, 0.3);
-  background: rgba(34, 197, 94, 0.08);
+  color: #e8c48a;
+  border-color: rgba(217, 164, 91, 0.3);
+  background: rgba(217, 164, 91, 0.08);
 }
 .status-code.bad {
   color: #fca5a5;

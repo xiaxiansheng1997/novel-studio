@@ -109,11 +109,13 @@ async def strip_control_tokens(
                 yield DeltaEvent(
                     content=(content + tail_c) or None,
                     reasoning_content=(reasoning + tail_r) or None,
+                    hint=ev.hint,
                 )
             yield DeltaEvent(content=None, finish_reason=ev.finish_reason)
             continue
         if content or reasoning:
-            yield DeltaEvent(content=content or None, reasoning_content=reasoning or None)
+            yield DeltaEvent(content=content or None, reasoning_content=reasoning or None,
+                            hint=ev.hint)
     tail_c = clean.flush()
     tail_r = clean_reason.flush()
     if tail_c or tail_r:

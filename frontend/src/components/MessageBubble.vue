@@ -183,9 +183,9 @@ async function copyText() {
   color: #7dd3fc;
 }
 .avatar.assistant {
-  border-color: rgba(34, 197, 94, 0.35);
-  background: rgba(34, 197, 94, 0.1);
-  color: #86efac;
+  border-color: rgba(217, 164, 91, 0.35);
+  background: rgba(217, 164, 91, 0.1);
+  color: #e8c48a;
 }
 .avatar-ai {
   font-family: theme('fontFamily.mono');
@@ -228,7 +228,7 @@ async function copyText() {
   align-items: center;
   gap: 5px;
   font-size: 11px;
-  color: #86efac;
+  color: #e8c48a;
 }
 
 /* 气泡 */
