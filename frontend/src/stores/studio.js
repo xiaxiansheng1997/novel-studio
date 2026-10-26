@@ -2,6 +2,9 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { apiFetch } from '../utils/api'
 
+/** 写作台的模型选择单独存一份 key：和聊天页的 w2a_model 互不干扰 */
+const STUDIO_MODEL_KEY = 'w2a_studio_model'
+
 /** 后端错误体是 FastAPI 的 `{detail: "..."}`，删除被备份拦住那句就在里面 */
 async function errDetail(r, fallback) {
   try {
@@ -41,11 +44,65 @@ export const useStudioStore = defineStore('studio', () => {
   const genMeta = ref(null)
   const genError = ref('')
 
+  // 写作台用哪个模型。空串 = 请求里不带 model，交给后端 pick_model 落到它的默认主力；
+  // 所以「自动」这一档永远有效，即使配置里把那家关掉了也不会报错。
+  const genModel = ref(localStorage.getItem(STUDIO_MODEL_KEY) || '')
+  const modelGroups = ref([])
+
   const activeWorkId = computed(() => work.value?.id || '')
   const activeNodeId = computed(() => node.value?.id || '')
   const template = computed(() =>
     templates.value.find((t) => t.id === work.value?.template_id) || null
   )
+
+  const allGenModels = computed(() => modelGroups.value.flatMap((g) => g.models))
+
+  /** 下拉框上显示的名字；真正用了哪个模型以服务端返回的 meta 为准。 */
+  const genModelLabel = computed(() => {
+    if (!genModel.value) return '自动'
+    return allGenModels.value.find((m) => m.id === genModel.value)?.label || genModel.value
+  })
+
+  function setGenModel(id) {
+    genModel.value = id
+    if (id) localStorage.setItem(STUDIO_MODEL_KEY, id)
+    else localStorage.removeItem(STUDIO_MODEL_KEY)
+  }
+
+  /**
+   * 模型目录来自 /v1/capabilities（三家 + 模式别名）。
+   * 别名（deepseek-chat-think 这类）也列出来：写作接口没有思考/联网开关，
+   * 想要这些档位只能靠模型名后缀表达。
+   */
+  async function loadGenModels() {
+    const r = await apiFetch('/v1/capabilities')
+    if (r.ok) {
+      const j = await r.json()
+      const groups = []
+      for (const p of j.providers || []) {
+        const models = (p.models || []).map((m) => ({ id: m.id, label: m.label || m.id }))
+        for (const alias of p.aliases || []) models.push({ id: alias, label: alias })
+        if (models.length) groups.push({ key: p.key, name: p.display_name || p.key, models })
+      }
+      modelGroups.value = groups
+    } else {
+      // 老后端没有能力矩阵，退回 /v1/models：只有 id，按 owned_by 分组
+      const fb = await apiFetch('/v1/models')
+      if (!fb.ok) return
+      const byOwner = new Map()
+      for (const m of (await fb.json()).data || []) {
+        const owner = m.owned_by || '其他'
+        if (!byOwner.has(owner)) byOwner.set(owner, [])
+        byOwner.get(owner).push({ id: m.id, label: m.id })
+      }
+      modelGroups.value = [...byOwner].map(([key, models]) => ({ key, name: key, models }))
+    }
+    // 存过的模型可能已经不在配置里（config.yaml 关掉了某一家）：清回自动，
+    // 否则下拉框显示的是 id、发出去的却是个无效值
+    if (genModel.value && !allGenModels.value.some((m) => m.id === genModel.value)) {
+      setGenModel('')
+    }
+  }
 
   async function loadTemplates(kind, subtype) {
     const q = new URLSearchParams()
@@ -310,7 +367,7 @@ export const useStudioStore = defineStore('studio', () => {
    * 流式生成：读 fetch 的 ReadableStream（EventSource 不支持 POST）。
    * 中途出错只记 genError，不抛异常——UI 还要保留已生成的部分。
    */
-  async function generate({ task_type, instruction, save = false, model = '' }) {
+  async function generate({ task_type, instruction, save = false, model = genModel.value }) {
     if (!node.value || generating.value) return
     generating.value = true
     genText.value = ''
@@ -456,7 +513,7 @@ export const useStudioStore = defineStore('studio', () => {
   const outlineBusy = ref(false)
 
   /** 生成目录并落成节点树；已有节点时服务端会 409，需要 append=true */
-  async function generateOutline({ instruction = '', sections = 0, append = false, model = '' } = {}) {
+  async function generateOutline({ instruction = '', sections = 0, append = false, model = genModel.value } = {}) {
     if (!work.value || outlineBusy.value) return null
     outlineBusy.value = true
     error.value = ''
@@ -490,19 +547,19 @@ export const useStudioStore = defineStore('studio', () => {
   const pipeline = ref({
     running: false, total: 0, index: 0, title: '', chars: 0,
     done: 0, failed: [], elapsed: 0, error: '', preview: '',
-    indexed: 0, summarized: 0,
+    indexed: 0, summarized: 0, model: '',
   })
 
   /**
    * 逐节生成。用 fetch 读流（EventSource 不支持 POST），
    * 每节完成就刷一次树，用户能看到进度而不是干等。
    */
-  async function runPipeline({ only_empty = true, limit = 0, instruction = '', model = '' } = {}) {
+  async function runPipeline({ only_empty = true, limit = 0, instruction = '', model = genModel.value } = {}) {
     if (!work.value || pipeline.value.running) return null
     pipeline.value = {
       running: true, total: 0, index: 0, title: '', chars: 0,
       done: 0, failed: [], elapsed: 0, error: '', preview: '',
-      indexed: 0, summarized: 0,
+      indexed: 0, summarized: 0, model: '',
     }
     try {
       const resp = await apiFetch(`/studio/works/${work.value.id}/pipeline`, {
@@ -552,6 +609,8 @@ export const useStudioStore = defineStore('studio', () => {
     const p = pipeline.value
     if (ev.event === 'plan') {
       p.total = ev.total || 0
+      // 服务端报的是它实际选定的模型（「自动」时前端事先猜不到）
+      p.model = ev.model || ''
       p.preview = ''
     } else if (ev.event === 'node_start') {
       p.index = ev.index || 0
@@ -614,7 +673,7 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function runSummarize({ scope = 'all', force = false } = {}) {
+  async function runSummarize({ scope = 'all', force = false, model = genModel.value } = {}) {
     if (!work.value || summarizing.value) return null
     summarizing.value = true
     memoryNote.value = '正在生成摘要…'
@@ -622,7 +681,7 @@ export const useStudioStore = defineStore('studio', () => {
       const r = await apiFetch(`/studio/works/${work.value.id}/summarize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scope, force }),
+        body: JSON.stringify({ scope, force, model }),
       })
       if (!r.ok) {
         memoryNote.value = `摘要失败：HTTP ${r.status}`
@@ -695,6 +754,7 @@ export const useStudioStore = defineStore('studio', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text, action, candidates, instruction, lang,
+          model: genModel.value,
           work_id: work.value?.id || '',
         }),
       })
@@ -731,7 +791,7 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   /** 抽取设定。整本用 all=true 分批推进，直到 remaining 为 0。 */
-  async function extractGraph({ nodeId = '', all = false, force = false, limit = 5 } = {}) {
+  async function extractGraph({ nodeId = '', all = false, force = false, limit = 5, model = genModel.value } = {}) {
     if (!work.value || graphBusy.value) return null
     graphBusy.value = true
     graphNote.value = ''
@@ -739,7 +799,7 @@ export const useStudioStore = defineStore('studio', () => {
       const r = await apiFetch(`/studio/works/${work.value.id}/graph/extract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ node_id: nodeId, all, force, limit }),
+        body: JSON.stringify({ node_id: nodeId, all, force, limit, model }),
       })
       if (!r.ok) {
         graphNote.value = `抽取失败：HTTP ${r.status} ${(await r.text()).slice(0, 160)}`
@@ -844,7 +904,7 @@ export const useStudioStore = defineStore('studio', () => {
   /** 批量入队：把「写哪些节」交给队列，关页面也能继续跑。 */
   async function enqueueBatch({
     taskType = 'draft', onlyEmpty = true, limit = 0, nodeIds = [],
-    instruction = '', priority = 9, triageEvery = 0,
+    instruction = '', priority = 9, triageEvery = 0, model = genModel.value,
   } = {}) {
     if (!work.value || queueBusy.value) return null
     queueBusy.value = true
@@ -854,7 +914,7 @@ export const useStudioStore = defineStore('studio', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           task_type: taskType, only_empty: onlyEmpty, limit,
-          node_ids: nodeIds, instruction, priority, triage_every: triageEvery,
+          node_ids: nodeIds, instruction, priority, triage_every: triageEvery, model,
         }),
       })
       if (!r.ok) {
@@ -910,6 +970,7 @@ export const useStudioStore = defineStore('studio', () => {
     works, work, tree, node, stats, templates, sources, facts, terms, issues,
     loading, saving, error,
     generating, genText, genMeta, genError,
+    genModel, genModelLabel, modelGroups, allGenModels, setGenModel, loadGenModels,
     activeWorkId, activeNodeId, template,
     loadTemplates, fetchWorks, createWork, selectWork, selectNode, deleteWork,
     saveNode, createNode, deleteNode, moveNode,

@@ -132,7 +132,24 @@
               <button class="btn btn-sm" title="拼装成 Markdown 并下载" @click="store.downloadExport()">
                 <AppIcon name="download" :size="13" /> 导出
               </button>
-              <span class="ed-model">deepseek-chat</span>
+              <select
+                class="ed-model"
+                :value="store.genModel"
+                :title="modelHint"
+                aria-label="生成用的模型"
+                @change="store.setGenModel($event.target.value)"
+              >
+                <option value="">自动（后端默认）</option>
+                <!-- 目录还没回来时先保住已选中的那一项，否则下拉框会显示成空白 -->
+                <option v-if="store.genModel && !knownModel(store.genModel)" :value="store.genModel">
+                  {{ store.genModel }}
+                </option>
+                <optgroup v-for="g in store.modelGroups" :key="g.key" :label="g.name">
+                  <option v-for="m in g.models" :key="m.id" :value="m.id">
+                    {{ m.label === m.id ? m.id : `${m.label} · ${m.id}` }}
+                  </option>
+                </optgroup>
+              </select>
             </div>
           </header>
 
@@ -195,6 +212,7 @@
                   {{ pipeTitle }}
                 </span>
                 <span class="pipe-meta">
+                  <template v-if="store.pipeline.model">{{ store.pipeline.model }} · </template>
                   已完成 {{ store.pipeline.done }}/{{ store.pipeline.total }} 节 · {{ store.pipeline.chars }} 字
                   <template v-if="store.pipeline.indexed"> · 索引 {{ store.pipeline.indexed }}</template>
                   <template v-if="store.pipeline.summarized"> · 摘要 {{ store.pipeline.summarized }}</template>
@@ -251,12 +269,15 @@
                 <option value="continue">续写</option>
                 <option value="polish">润色</option>
               </select>
-              <input
+              <!-- 提示词：单行 input 写长了只看得到尾巴，换成随内容长高的多行框 -->
+              <textarea
+                ref="instrEl"
                 v-model="instruction"
                 class="field gen-input"
-                placeholder="可选：这一节要写什么（大纲/整篇也用这句）"
-                @keydown.enter.prevent="runGenerate"
-              />
+                rows="2"
+                placeholder="可选：这一节要写什么（大纲/整篇也用这句）。Enter 生成，Shift+Enter 换行"
+                @keydown="onInstructionKeydown"
+              ></textarea>
               <button class="btn btn-sm" title="对选中文字改写/压缩/扩写，多候选对比" @click="openTransform">
                 <AppIcon name="pen" :size="13" /> 加工
               </button>
@@ -287,7 +308,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppNav from '../components/AppNav.vue'
 import AppIcon from '../components/AppIcon.vue'
@@ -311,6 +332,7 @@ const saveState = ref('saved') // saved | saving | dirty
 const taskType = ref('article_draft')
 const instruction = ref('')
 const editorEl = ref(null)
+const instrEl = ref(null)
 const panelRef = ref(null)
 
 // 类型下拉来自 /studio/content-types（content-types.yaml），新增文种只改 YAML
@@ -391,12 +413,25 @@ const genStatus = computed(() => {
 })
 
 const genMetaText = computed(() => {
+  // 服务端在 meta 事件里报了它实际用的模型，比下拉框选的值可信（「自动」时尤其如此）
+  const used = store.genMeta?.model
   const n = store.genText.length
-  if (!store.generating) return `${n} 字`
+  if (!store.generating) return [used, `${n} 字`].filter(Boolean).join(' · ')
   // 实测约 140 字/秒，给用户一个可预期的剩余时间
   const remain = Math.max(1, Math.round((2800 - n) / 140))
-  return `${n} 字 · 约 ${remain}s`
+  return [used, `${n} 字`, `约 ${remain}s`].filter(Boolean).join(' · ')
 })
+
+/** 下拉框的悬停说明：「自动」到底是什么意思，得写清楚 */
+const modelHint = computed(() =>
+  store.genModel
+    ? `生成用 ${store.genModel}（大纲 / 整篇 / 排队 / 加工都跟着走）；该站点的账号要先在 /live 登录上`
+    : '不指定模型，由后端落到它的默认主力模型；生成后看进度条上的实际模型',
+)
+
+function knownModel(id) {
+  return store.allGenModels.some((m) => m.id === id)
+}
 
 function fmt(n) {
   if (!n) return '0'
@@ -428,7 +463,13 @@ function kindLabel(w) {
 }
 
 onMounted(async () => {
-  await Promise.all([store.fetchWorks(), store.loadTemplates('article'), store.loadContentTypes()])
+  // 模型目录拉不到只影响下拉框选项，不能把整个写作台卡住，所以单独吞掉错误
+  await Promise.all([
+    store.fetchWorks(),
+    store.loadTemplates('article'),
+    store.loadContentTypes(),
+    store.loadGenModels().catch(() => {}),
+  ])
   if (!kinds.value.some((k) => k.id === form.value.kind)) form.value.kind = kinds.value[0]?.id || 'article'
   applyScaleDefaults()
   const id = route.params.id
@@ -575,6 +616,35 @@ async function saveTitle() {
 
 async function changeStatus(e) {
   await store.saveNode({ status: e.target.value }, { snapshot: true })
+}
+
+// 提示词框最多长到几行，再往上就自己滚；CSS 里 .gen-input 的 max-height 要和它对齐
+const INSTR_MAX_ROWS = 6
+
+/**
+ * 提示词框按内容长高。先复位成 auto 再量 scrollHeight，
+ * 不然删字之后高度只会停在最高处，回不去。
+ */
+function autosizeInstruction() {
+  const el = instrEl.value
+  if (!el) return
+  el.style.height = 'auto'
+  const line = parseFloat(getComputedStyle(el).lineHeight) || 21
+  const max = Math.round(line * INSTR_MAX_ROWS + 16)
+  el.style.height = Math.min(el.scrollHeight, max) + 'px'
+}
+
+watch(instruction, () => nextTick(autosizeInstruction))
+
+/**
+ * 回车生成、Shift+回车换行。
+ * 输入法选词时那个回车不能当提交：打中文时按一下就把整节跑掉，很难受。
+ */
+function onInstructionKeydown(e) {
+  if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.metaKey) return
+  if (e.isComposing) return
+  e.preventDefault()
+  runGenerate()
 }
 
 async function runGenerate() {
@@ -728,6 +798,9 @@ function onTransformAdopt(text) {
   display: flex;
   height: 100vh;
   height: 100dvh;
+  /* 最后一行兜住 dvh：它在个别环境里会把视口算成一半，整块就只剩上半截、下面全空。
+     100% 走的是 main.css 里 html/body/#app 那条高链，不依赖视口单位的实现。 */
+  height: 100%;
   overflow: hidden;
   background: var(--bg);
 }
@@ -938,13 +1011,37 @@ function onTransformAdopt(text) {
   font-size: 11.5px;
   gap: 4px;
 }
+/* 模型选择：沿用原来的胶囊观感，但它现在是真的能改的 */
 .ed-model {
   font-family: theme('fontFamily.mono');
   font-size: 10.5px;
   color: var(--text-faint);
-  padding: 3px 8px;
+  padding: 3px 19px 3px 8px;
+  height: 26px;
   border: 1px solid var(--line-soft);
   border-radius: 999px;
+  background-color: var(--panel-2);
+  /* 与 main.css 里 select.field 同一枚箭头，只是更小 */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23A3B0C2' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  appearance: none;
+  max-width: 186px;
+  cursor: pointer;
+  transition: color 0.18s var(--ease), border-color 0.18s var(--ease);
+}
+.ed-model:hover,
+.ed-model:focus {
+  color: var(--text-muted);
+  border-color: var(--line);
+  outline: none;
+}
+/* 弹层由系统画，不显式给背景的话在深色主题下会白底白字 */
+.ed-model option,
+.ed-model optgroup {
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: theme('fontFamily.sans');
 }
 .ed-empty {
   flex: 1;
@@ -1251,7 +1348,8 @@ function onTransformAdopt(text) {
 /* ---------- 生成工具条 ---------- */
 .gen-bar {
   display: flex;
-  align-items: center;
+  /* 提示词框会长高，按钮贴底对齐，不跟着上下跳 */
+  align-items: flex-end;
   gap: 8px;
   padding: 10px 32px 14px;
   border-top: 1px solid var(--line-soft);
@@ -1261,8 +1359,13 @@ function onTransformAdopt(text) {
   width: 108px;
   flex-shrink: 0;
 }
+/* 两行起步，写到 6 行封顶后自己滚（上限与 script 里的 INSTR_MAX_ROWS 对齐） */
 .gen-input {
   flex: 1;
+  min-width: 0;
+  min-height: 56px;
+  max-height: 140px;
+  overflow-y: auto;
 }
 .gen-bar .btn {
   flex-shrink: 0;
