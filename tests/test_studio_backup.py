@@ -28,7 +28,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import studio_routes
-from app.studio.store import BackupError, StudioStore
+from app.studio.store import BackupError, StudioStore, check_node_bundle
 
 A = "第一章正文：雪落了满山。" * 30
 
@@ -500,3 +500,72 @@ def test_route_reports_backup_failure_without_local_paths(tmp_path) -> None:
         assert denied2.status_code == 500
         assert str(tmp_path) not in denied2.json()["detail"]
         assert client.get(f"/studio/works/{work['id']}").status_code == 200
+
+
+async def test_prune_only_counts_real_backups(store) -> None:
+    """.part 与顺手丢进这个目录的东西都不该占用保留名额。
+
+    半截文件是写坏了或进程被杀留下的，mtime 最新：算进「留最近 N 份」就会把一份
+    真备份挤出去——那份「最近」恰恰是人最可能需要的那一份。反过来，不属于备份的
+    文件更不该被清理当成旧备份删掉。
+    """
+    node = await one_node(store)
+    real = []
+    for i in range(3):
+        n = await store.create_node(work_id=node["work_id"], kind="chapter",
+                                    title=f"第{i}章", content="字。" * 10, ordinal=i + 2)
+        await store.delete_node(n["id"])
+        real.append(next(p for p in bundle_files(store) if n["id"] in p.name))
+    assert len(real) == 3
+    folder = store.backup_dir("nodes")
+    base = time.time()
+    for i, p in enumerate(real):
+        os.utime(p, (base + i, base + i))
+    half = folder / f"{real[-1].name}.part"      # 比最新一份还新的半截文件
+    half.write_text('{"work_id": "w_1", "nodes": [', encoding="utf-8")
+    os.utime(half, (base + 99, base + 99))
+    note = folder / "note.txt"                   # 不是备份的东西
+    note.write_text("顺手丢进来的", encoding="utf-8")
+    os.utime(note, (base + 50, base + 50))
+
+    gone = store.prune_backups("nodes", 1)
+
+    assert sorted(gone) == sorted(p.name for p in real[:2]), gone
+    assert real[2].is_file(), "最新的那一份真备份不该被半截文件挤出名额"
+    assert half.is_file() and note.is_file(), "名单之外的文件轮不到清理来删"
+    assert [r["name"] for r in store.list_node_backups()] == [real[2].name], \
+        "列举与清理必须认同一套名单"""
+
+
+async def test_the_script_and_restore_share_one_bundle_check(store) -> None:
+    """脚本替恢复先校验结构，两处的判据必须是同一个来源。
+
+    `peek` 原来只查「顶层是对象 + nodes 是列表」，比 `restore_node_backup` 的拒绝
+    条件松：`nodes` 是空的、条目不是对象、没写 work_id 都能放行，于是真恢复时
+    `restore` 返回 None，脚本却报「这本书已经整本删除」——本轮要消灭的就是这种谎。
+    """
+    from scripts.restore_backup import peek
+
+    node = await one_node(store)
+    await store.delete_node(node["id"])
+    good = bundle_files(store)[0]
+    valid = json.loads(good.read_text(encoding="utf-8"))
+    assert check_node_bundle(valid) == ""
+    assert peek(store, good.name) is not None
+
+    broken = [
+        {**valid, "nodes": []},
+        {**valid, "nodes": ["不是对象"]},
+        {k: v for k, v in valid.items() if k != "work_id"},
+        {**valid, "nodes": {"a": 1}},
+    ]
+    folder = store.backup_dir("nodes")
+    before = len(await store.list_tree(node["work_id"]))
+    for i, bad in enumerate(broken):
+        name = f"odd{i}__{good.name}"
+        (folder / name).write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+        assert check_node_bundle(bad), name
+        assert peek(store, name) is None, f"脚本没拦住：{name} —— {check_node_bundle(bad)}"
+        assert await store.restore_node_backup(name) is None, name
+
+    assert len(await store.list_tree(node["work_id"])) == before, "坏备份一个节点都不该进库"

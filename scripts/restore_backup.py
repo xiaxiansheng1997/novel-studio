@@ -65,7 +65,10 @@ def peek(store, name: str) -> Optional[dict]:
 
     这里校验过的东西，后面 `restore_node_backup` 返回 None 时才可以说得出原因——
     否则「文件是坏的」与「那本书整本删了」都长成一个样子，脚本报的错就是谎话。
+    所以判据不自己写一套：直接用 `store.check_node_bundle`，与恢复那边同一个来源。
     """
+    from app.studio.store import check_node_bundle
+
     path = store.backup_dir("nodes") / name
     if not path.is_file():
         return None
@@ -73,7 +76,7 @@ def peek(store, name: str) -> Optional[dict]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or not isinstance(data.get("nodes"), list):
+    if check_node_bundle(data):
         return None
     return data
 
@@ -119,8 +122,8 @@ async def main() -> int:
                 return 0
             r = await store.restore_node_backup(args.name)
             if r is None:
-                # peek 已经确认过文件读得懂，所以这里唯一剩下的原因是：备份里那个 work_id
-                # 在库里查不到了（整本书也删了）。别把它说成「文件坏了」，那是另一回事
+                # peek 按 store 的同一套判据校验过结构，所以这里唯一剩下的原因是：
+                # 备份里那个 work_id 在库里查不到了（整本书也删了）。别说成「文件坏了」
                 out("FAIL: 这本书已经整本删除，节点备份没法单独挂回来；只能走整库副本")
                 return 1
             for item in r["restored"]:

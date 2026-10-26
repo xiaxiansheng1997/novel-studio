@@ -67,6 +67,9 @@ _ORDINAL_COLUMNS: tuple[tuple[str, str], ...] = (
 # 节点备份是一份 JSON，整库副本是一份 .sqlite（单作品级精准恢复做不了，不那个意）。
 BACKUP_NODE_KEEP = 20
 BACKUP_WORK_KEEP = 5
+# 备份目录里什么算「一份备份」：列举与清理共用这一条口径。
+# 写临时名留下的 `.part`、别人顺手丢进来的东西都不在名单里。
+_BACKUP_GLOB: dict[str, str] = {"nodes": "*.json", "works": "*.sqlite"}
 
 
 class BackupError(RuntimeError):
@@ -96,6 +99,29 @@ def _backup_stat(p: Path) -> Optional[tuple[float, int]]:
     except OSError:
         return None
     return st.st_mtime, st.st_size
+
+
+def check_node_bundle(data: Any) -> str:
+    """节点备份的结构校验：返回空串表示这份能恢复，否则给出「哪儿不对」。
+
+    判据必须与 `restore_node_backup` 的拒绝条件同源，而且脚本也用它——
+    `scripts/restore_backup.py` 要先替 store 把文件校验过，才敢说
+    「restore 返回 None 时唯一剩下的原因是那本书整本没了」。两处各写一套、
+    脚本这一套只要松一分，`nodes` 是空的 / 条目不是对象 / 没写 work_id 这类
+    坏文件就会被报成「书没了」，那正是本轮要消灭的那类谎话。
+    """
+    if not isinstance(data, dict):        # 人手工改过的备份可能是数组或一个字符串
+        return "备份顶层不是对象"
+    rows = data.get("nodes") or []
+    if not isinstance(rows, list):
+        return "备份里的 nodes 不是列表"
+    if not all(isinstance(r, dict) for r in rows):
+        return "备份里的 nodes 有不是对象的条目"
+    if not rows:
+        return "备份里没有任何一个节点"
+    if not data.get("work_id"):
+        return "备份里没写 work_id"
+    return ""
 
 
 def _count_words(text: str) -> int:
@@ -822,7 +848,7 @@ class StudioStore:
     def list_work_backups(self) -> list[dict[str, Any]]:
         """整库副本列举（新在前）：名字 / 大小 / 时间。找回靠 `scripts/restore_backup.py`。"""
         rows: list[dict[str, Any]] = []
-        for p in self._backup_dir("works").glob("*.sqlite"):
+        for p in self._backup_dir("works").glob(_BACKUP_GLOB["works"]):
             st = _backup_stat(p)
             if st is None:
                 continue     # 正好被并发清理摸掉了：少一行列表，不该让整个请求报错
@@ -834,9 +860,12 @@ class StudioStore:
         """只留最近 `keep` 份，返回被清掉的文件名。
 
         按修改时间排而不是按文件名：节点备份名以 work id 开头，字典序不等于时间序。
-        本目录只存备份，不往里扫非备份文件；当前库本体在上一层目录，摸不到。"""
+        只扫 `_BACKUP_GLOB` 里那一种后缀，与列举口径保持一致：临时名留下的 `.part` 是
+        没写成或进程被杀剩的半截文件，mtime 最新，算进「留最近 N 份」就会把一份真备份
+        挤出去；而别人顺手丢进这个目录的东西更不该被清理当成旧备份删掉。
+        当前库本体在上一层目录，摸不到。"""
         timed: list[tuple[float, Path]] = []
-        for p in self._backup_dir(kind).iterdir():
+        for p in self._backup_dir(kind).glob(_BACKUP_GLOB.get(kind, "*")):
             st = _backup_stat(p)
             if st is not None:
                 timed.append((st[0], p))
@@ -864,7 +893,7 @@ class StudioStore:
     def list_node_backups(self) -> list[dict[str, Any]]:
         """只读列举节点备份（新在前），不抛异常也不改任何东西。"""
         rows: list[dict[str, Any]] = []
-        for f in self._backup_dir("nodes").glob("*.json"):
+        for f in self._backup_dir("nodes").glob(_BACKUP_GLOB["nodes"]):
             st = _backup_stat(f)
             if st is None:
                 continue
@@ -907,15 +936,12 @@ class StudioStore:
         except (OSError, ValueError) as exc:
             logger.warning(f"[studio] 备份读不了 {name}: {exc}")
             return None
-        if not isinstance(bundle, dict):   # 人手工改过的备份可能是数组或一个字符串
-            logger.warning(f"[studio] 备份结构不对（顶层不是对象）：{name}")
+        # 判据与脚本共用同一个 `check_node_bundle`：两处各写一套，脚本报的原因就会说谎
+        reason = check_node_bundle(bundle)
+        if reason:
+            logger.warning(f"[studio] 备份结构不对（{reason}）：{name}")
             return None
-        rows = bundle.get("nodes") or []
-        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
-            logger.warning(f"[studio] 备份里的 nodes 不成形：{name}")
-            return None
-        if not rows or not bundle.get("work_id"):
-            return None
+        rows = bundle["nodes"]
         assert self._db is not None
         async with self._lock:
             cur = await self._db.execute("SELECT 1 FROM works WHERE id = ?", (bundle["work_id"],))
