@@ -134,6 +134,12 @@ async def list_templates(request: Request, kind: str = "", subtype: str = ""):
     return await _store(request).list_templates(kind=kind, subtype=subtype)
 
 
+# 备份失败时回给前端的那一句：固定文案。
+# 前端会把 `detail` 直接显示出来，而 `BackupError` 的原话里带着本机库文件与备份目录的位置，
+# 那句只该进日志。
+_BACKUP_DENIED = "备份失败，已拒绝删除，详见服务端日志"
+
+
 # ==================== 作品 ====================
 
 @router.get("/studio/works", dependencies=[Depends(verify_key)])
@@ -184,7 +190,8 @@ async def delete_work(work_id: str, request: Request):
         await _store(request).delete_work(work_id)
     except BackupError as exc:
         # 整库副本没写成就不删：宁可不删，不能删了找不回
-        raise HTTPException(status_code=500, detail=f"备份失败，已拒绝删除：{exc}") from exc
+        logger.error(f"[studio] 删作品被备份拦住 {work_id}: {exc}")
+        raise HTTPException(status_code=500, detail=_BACKUP_DENIED) from exc
     return {"ok": True}
 
 
@@ -250,7 +257,8 @@ async def delete_node(node_id: str, request: Request):
     try:
         ok = await _store(request).delete_node(node_id)
     except BackupError as exc:
-        raise HTTPException(status_code=500, detail=f"备份失败，已拒绝删除：{exc}") from exc
+        logger.error(f"[studio] 删节点被备份拦住 {node_id}: {exc}")
+        raise HTTPException(status_code=500, detail=_BACKUP_DENIED) from exc
     if not ok:
         raise HTTPException(status_code=404, detail="节点不存在")
     return {"ok": True}
@@ -293,7 +301,9 @@ async def list_backups(request: Request):
     return {
         "nodes": store.list_node_backups(),
         "works": store.list_work_backups(),
-        "dir": str(store.backup_dir("nodes")),
+        # 只给「相对存储目录」的写法：绝对路径会原样显示到界面上，把部署位置说出去。
+        # 想看完整位置用 `scripts/restore_backup.py --list`，那才是给人用的入口。
+        "dir": f"{store.db_path.parent.name}/backups/nodes",
     }
 
 

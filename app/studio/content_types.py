@@ -140,7 +140,7 @@ def resolve(kind: str, scale: str = "", subtype: str = "") -> dict[str, Any]:
     merged = _merge(sc, subtypes.get(subtype) or {})
 
     layers = merged.get("layers") or [{"kind": "section", "label": "节", "readable": True}]
-    readable = [l for l in layers if l.get("readable", True)]
+    readable = [layer for layer in layers if layer.get("readable", True)]
     checks = list(merged.get("checks") or [])
     # 检查规则去重但不排序：顺序按「重要的先报」
     seen: list[str] = []
@@ -162,7 +162,7 @@ def resolve(kind: str, scale: str = "", subtype: str = "") -> dict[str, Any]:
         "layers": layers,
         "leaf_kind": (readable[0] if readable else {}).get("kind", "section"),
         "container_kind": next(
-            (l.get("kind") for l in layers if not l.get("readable", True)), None
+            (layer.get("kind") for layer in layers if not layer.get("readable", True)), None
         ),
         "template": merged.get("template") or "",
         "requires_sources": bool(merged.get("requires_sources")),

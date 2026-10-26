@@ -504,7 +504,6 @@ async def subgraph(
     """按种子实体的 N 跳邻域取子图。种子可以给名字，也可以给一段文本自动链接。"""
     g = await load_graph(store, work_id)
     entities: list[dict] = g["entities"]
-    by_id: dict[str, dict] = g["entities_by_id"]
 
     seed_entities: list[dict] = []
     for name in seeds or []:

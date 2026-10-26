@@ -9,15 +9,18 @@
 assembler 等所有查询，风险远大于收益。改成删之前把内容落到文件里：
 节点备份一份 JSON（含正文与全部版本），整库副本一份 `.sqlite`。
 
-一条底线：**备份写成就该拒绝删除**（宁可删不掉，不能删了找不回），
+一条底线：**备份写不成才该中止删除**（宁可删不掉，不能删了找不回），
 所以这一份落盘放在删除动作之前，失败直接抛 `BackupError`。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import sqlite3
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -195,14 +198,21 @@ async def test_delete_work_copies_the_database(store) -> None:
     work = await store.create_work(kind="novel", title="要整本删掉的书")
     await store.create_node(work_id=work["id"], kind="chapter", title="第一章",
                             content="正文。" * 50, ordinal=1)
-    live_size = store.db_path.stat().st_size
-
     assert await store.delete_work(work["id"]) is True
 
     copies = sorted(store.backup_dir("works").glob("*.sqlite"))
     assert len(copies) == 1
     assert copies[0].name.startswith(f"studio-before-delete-work-{work['id']}-")
-    assert copies[0].stat().st_size >= live_size, "副本是删除之前的库，只会更大不会更小"
+    # 这份文件唯一的用处是「出事时盖回去」，所以验的是它能不能用，而不是它有多大：
+    # VACUUM INTO 产出的是压实过的新库，体积比带着空闲页的当前库小是完全正常的
+    con = sqlite3.connect(copies[0])
+    try:
+        assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        got = con.execute("SELECT title, content FROM nodes").fetchall()
+    finally:
+        con.close()
+    assert [g[0] for g in got] == ["第一章"], "副本里应当有被删掉的那一章"
+    assert got[0][1] == "正文。" * 50, "稿子内容必须与删除前一字不差"
     # 副本目录之外的那个当前库本体不在保留策略的射程里，绝不能被清理掉
     assert store.db_path.is_file()
 
@@ -263,7 +273,7 @@ async def test_failed_backup_refuses_the_delete(store, monkeypatch) -> None:
 
 
 async def test_delete_work_refuses_when_copy_fails(store, monkeypatch) -> None:
-    """整库副本同理：`shutil.copy2` 抛 OSError 要翻成 BackupError，库里的书保持原样。"""
+    """整库副本同理：取时间戳或写副本出错要翻成 BackupError，库里的书保持原样。"""
     work = await store.create_work(kind="novel", title="不让删的书")
     monkeypatch.setattr(StudioStore, "_stamp",
                         lambda self: (_ for _ in ()).throw(OSError("盘坏了")))
@@ -314,6 +324,179 @@ def test_backup_routes_list_and_restore(tmp_path) -> None:
         restored = back.json()["root_id"]
         assert client.get(f"/studio/nodes/{restored}").json()["content"] == A
 
-        # 路径穿越与整库副本都不受理；不存在的那份给 404
-        assert client.post("/studio/backups/..%2Fstudio.sqlite/restore").status_code in (400, 404)
+        # 第一道闸：`%2F` 解码后多出路径段，路由的 `[^/]+` 不匹配 → 请求进不了 handler
+        assert client.post("/studio/backups/..%2Fstudio.sqlite/restore").status_code == 404
+        # 第二道闸：反斜杠不切路径段，能走到 handler，由文件名校验拦下（大小写扩展名也一样）
+        for bad in ("..%5C..%5Cstudio.db", "..%5Cx.json", "x.JSON"):
+            assert client.post(f"/studio/backups/{bad}/restore").status_code == 400, bad
+        # 名字合法但没有这一份备份
         assert client.post("/studio/backups/x.json/restore").status_code == 404
+        # 界面上不该看到本机路径
+        listing = client.get("/studio/backups").json()["dir"]
+        assert not os.path.isabs(listing) and str(tmp_path) not in listing, listing
+
+
+async def test_backup_covers_exactly_the_subtree_that_got_deleted(store, monkeypatch) -> None:
+    """备份里的子树必须与真删掉的那一套完全一致，插队挤进来的那节也不例外。
+
+    这条盯的是「快照与删除分两次持锁」那个写法：锁一放，已经在等锁的 `create_node`
+    就能挤进这棵子树里，接着被 path 前缀连带删掉 —— 备份里没有它，等于删了还宣称备份过。
+    这里直接盯住快照这个接缝（它现在与删除同在一次持锁里），并把删除真正带走的 id 抓下来对账。
+    """
+    work = await store.create_work(kind="novel", title="并发删", scale="series")
+    vol = await store.create_node(work_id=work["id"], kind="volume", title="第一卷")
+    ch = await store.create_node(work_id=work["id"], kind="chapter", parent_id=vol["id"],
+                                 title="第一章", content="雪。" * 20, ordinal=1)
+    before = {n["id"] for n in await store.list_tree(work["id"])}
+
+    original = store._node_backup_bundle_locked
+    drop = store._drop_unit_rows
+    started: list = []
+    removed: list[str] = []
+
+    async def spy(node_id: str):
+        bundle = await original(node_id)
+        # 快照已经拿到手、删除还没开始：放一个「往这棵子树里加一节」过来抢同一把锁
+        started.append(asyncio.create_task(store.create_node(
+            work_id=work["id"], kind="chapter", parent_id=ch["id"],
+            title="插队的一节", content="不该被吃掉。" * 10, ordinal=2)))
+        for _ in range(2):
+            await asyncio.sleep(0)   # 让它跑到取锁处挂住
+        return bundle
+
+    async def spy_drop(ref_kind: str, ref_ids: list[str]):
+        # 这次删除真正带走的那几个 id。验的是「带走的每一节都在备份里」，
+        # 只比备份与删之前的快照相等是抓不住的：挤进来的那一节两边都不在
+        if ref_kind == "node":
+            removed.extend(ref_ids)
+        return await drop(ref_kind, ref_ids)
+
+    monkeypatch.setattr(store, "_node_backup_bundle_locked", spy)
+    monkeypatch.setattr(store, "_drop_unit_rows", spy_drop)
+    assert await store.delete_node(vol["id"]) is True
+
+    if started:
+        try:
+            await started[0]
+        except ValueError:
+            pass   # 新写法下它只能排在删除之后：父节点已经没了，创建直接被拒
+    backed = {n["id"] for n in read_bundle(store, bundle_files(store)[0].name)["nodes"]}
+    assert backed == before, "备份应当正好是删之前那棵子树，不多不少"
+    assert set(removed) == backed, "被这次删除带走的那一节，备份里必须都有"
+    assert await store.orphan_counts() == {}
+
+
+async def test_restore_marks_upstream_summaries_stale(store) -> None:
+    """找回一节 = 库里多出整段正文：卷摘要与全书摘要必须重新判过期。
+
+    不判的话它们还停留在「没有这一节」的那一版上却自称新鲜：assembler 的 S3 照原样注入，
+    右栏「N 节摘要待重算」也看不见 —— 那正是第 1 条刚堵死的那类假记忆，别再开一条口子。
+    """
+    from app.studio import indexer
+
+    work = await store.create_work(kind="novel", title="找回要过期", scale="series")
+    vol = await store.create_node(work_id=work["id"], kind="volume", title="第一卷")
+    ch = await store.create_node(work_id=work["id"], kind="chapter", parent_id=vol["id"],
+                                 title="第一章", content="雪落了满山。" * 20, ordinal=1)
+    await store.delete_node(ch["id"])
+    # 这一卷在「少了那一章」之后重算过，指纹与当时的内容是一致的
+    await store.upsert_summary(work["id"], scope="container", ref_id=vol["id"],
+                               content="这一卷是空的", ref_hash="hash-at-the-time")
+    await store.upsert_summary(work["id"], scope="work", ref_id=work["id"],
+                               content="全书是空的", ref_hash="hash-at-the-time")
+    assert (await store.get_summary("container", vol["id"]))["fresh"], "重算过就该是新鲜的"
+
+    assert await store.restore_node_backup(bundle_files(store)[0].name) is not None
+
+    assert not (await store.get_summary("container", vol["id"]))["fresh"], \
+        "章找回来了，卷摘要不能还自称新鲜"
+    assert not (await store.get_summary("work", work["id"]))["fresh"]
+    status = await indexer.index_status(store, work["id"])
+    assert status["stale_upstream"] == 2, "过期计数要在右栏看得见，不然人不知道该重算"
+    # 结构变了、内容没变：不重算索引，但要把库标脏（口径与上下移那条一致）
+    assert (await store.index_state(work["id"]))["dirty"] == 1
+
+
+async def test_failed_backup_leaves_no_half_file(store, monkeypatch) -> None:
+    """写失败不能留下半截 JSON：它 mtime 最新，会被保留策略当成「最近一份」留在盘上。"""
+    node = await one_node(store)
+
+    def boom(self, *args, **kwargs):
+        raise OSError("盘满了")
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    with pytest.raises(BackupError):
+        await store.delete_node(node["id"])
+
+    assert [q.name for q in store.backup_dir("nodes").iterdir()] == []
+    assert await store.get_node(node["id"]) is not None, "备份失败时一个字都不能少"
+
+
+async def test_prune_failure_does_not_block_delete(store, monkeypatch) -> None:
+    """清理旧备份是记账，不该有拦住删除的权力：它失败也不能让删除失败。"""
+    node = await one_node(store)
+
+    def boom(kind: str, keep: int):
+        raise OSError("这个目录扫不动")
+
+    monkeypatch.setattr(store, "prune_backups", boom)
+    assert await store.delete_node(node["id"]) is True
+    assert len(bundle_files(store)) == 1
+
+
+async def test_restore_rejects_a_bundle_that_is_not_a_dict(store) -> None:
+    """人手工改过的备份可能是数组、字符串或 `nodes` 不是列表：读不懂就返回 None，不能抛异常。"""
+    node = await one_node(store)
+    await store.delete_node(node["id"])
+    folder = store.backup_dir("nodes")
+    good = bundle_files(store)[0]
+
+    for i, text in enumerate(('[1, 2]', '"just a string"',
+                              '{"work_id": "w_1", "nodes": {"a": 1}}')):
+        name = f"broken{i}__{good.name}"
+        (folder / name).write_text(text, encoding="utf-8")
+        assert await store.restore_node_backup(name) is None, name
+
+    assert await store.list_tree(node["work_id"]) == [], "坏备份不该往库里塞出半个节点"
+    rows = {r["name"]: r for r in store.list_node_backups()}
+    assert rows[good.name]["node_count"] == 1, "坏文件混在列表里也不能把好的那份挤掉"
+
+
+def test_route_reports_backup_failure_without_local_paths(tmp_path) -> None:
+    """备份失败的 500 只回固定文案：`detail` 会被前端直接显示，不能把本机路径说出去。"""
+    store = StudioStore(tmp_path / "studio.db")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await app.state.studio_store.init()
+        yield
+        await app.state.studio_store.close()
+
+    app = FastAPI(lifespan=lifespan)
+    app.state.settings = SimpleNamespace(api_key="", allow_origins="", host="127.0.0.1", port=8000)
+    app.state.studio_store = store
+    app.include_router(studio_routes.router)
+
+    with TestClient(app) as client:
+        work = client.post("/studio/works", json={
+            "kind": "novel", "title": "备份失败", "scale": "single"}).json()
+        node = client.post(f"/studio/works/{work['id']}/nodes", json={
+            "kind": "chapter", "title": "第一章", "content": A}).json()
+
+        def boom(bundle):
+            raise BackupError(f"备份目录不可用 {store.backup_dir('nodes')}: 权限不够")
+
+        store._write_node_backup = boom
+        denied = client.delete(f"/studio/nodes/{node['id']}")
+        assert denied.status_code == 500
+        assert str(tmp_path) not in denied.json()["detail"], "界面不该看到本机路径"
+        assert client.get(f"/studio/nodes/{node['id']}").json()["content"] == A
+
+        async def boom_copy(label: str) -> None:
+            raise BackupError(f"整库副本没写成：{store.db_path}")
+
+        store._copy_db_backup = boom_copy
+        denied2 = client.delete(f"/studio/works/{work['id']}")
+        assert denied2.status_code == 500
+        assert str(tmp_path) not in denied2.json()["detail"]
+        assert client.get(f"/studio/works/{work['id']}").status_code == 200

@@ -15,6 +15,9 @@
 
 整库副本（`*.sqlite`）这里只列不改：那种找回是「把整个库盖回去」，
 得先停服务再替换文件，在本脚本里顺手做等于偷偷回滚别人这段时间写的东西。
+
+`--list` 与不带 `--yes` 的试运行**完全不碰数据库**（只读备份目录里的文件），
+所以服务开着也能放心跑；真恢复才开连接。
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "storage" / "studio.sqlite"
@@ -56,15 +60,22 @@ def list_backups(store) -> int:
     return 0
 
 
-def peek(store, name: str) -> dict | None:
-    """读一份备份的内容摘要给试运行用；读不懂就返回 None。"""
+def peek(store, name: str) -> Optional[dict]:
+    """读一份备份的内容摘要给试运行用；读不懂或结构不对就返回 None。
+
+    这里校验过的东西，后面 `restore_node_backup` 返回 None 时才可以说得出原因——
+    否则「文件是坏的」与「那本书整本删了」都长成一个样子，脚本报的错就是谎话。
+    """
     path = store.backup_dir("nodes") / name
     if not path.is_file():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(data, dict) or not isinstance(data.get("nodes"), list):
+        return None
+    return data
 
 
 async def main() -> int:
@@ -80,8 +91,14 @@ async def main() -> int:
 
     from app.studio.store import StudioStore
 
+    # 只有真要往库里写时才开连接：`init()` 会建表、跑迁移、拿 YAML 覆盖内置模板，
+    # 全是要写库的动作。而这份脚本的典型用法恰恰是「人刚删错、服务还开着」时跑一行 --list，
+    # 那种时候抢同一张库既没必要，也可能被 `database is locked` 挡回来。
+    # 列举与试运行都只读备份目录里的文件，不碰数据库。
     store = StudioStore(DB_PATH)
-    await store.init()
+    opened = bool(args.name and args.yes)
+    if opened:
+        await store.init()
     try:
         if args.name:
             if args.name.endswith(".sqlite"):
@@ -92,16 +109,18 @@ async def main() -> int:
             if bundle is None:
                 out(f"FAIL: 备份不存在或读不懂：{args.name}（--list 看有哪些）")
                 return 1
-            chars = sum(len(n.get("content") or "") for n in bundle["nodes"])
-            vers = sum(len(n.get("versions") or []) for n in bundle["nodes"])
-            out(f"将恢复「{bundle['title']}」：{len(bundle['nodes'])} 节 / {chars} 字 / "
-                f"{vers} 个历史版本，作品 {bundle['work_id']}")
+            rows = bundle["nodes"]
+            chars = sum(len(n.get("content") or "") for n in rows if isinstance(n, dict))
+            vers = sum(len(n.get("versions") or []) for n in rows if isinstance(n, dict))
+            out(f"将恢复「{bundle.get('title') or '（没有标题）'}」：{len(rows)} 节 / {chars} 字 / "
+                f"{vers} 个历史版本，作品 {bundle.get('work_id') or '（未知）'}")
             if not args.yes:
                 out("\n（试运行：什么也没写。加 --yes 真恢复）")
                 return 0
             r = await store.restore_node_backup(args.name)
             if r is None:
-                # 唯一还会失败的原因：那本书已经整本删了（备份里的 work_id 查不到）
+                # peek 已经确认过文件读得懂，所以这里唯一剩下的原因是：备份里那个 work_id
+                # 在库里查不到了（整本书也删了）。别把它说成「文件坏了」，那是另一回事
                 out("FAIL: 这本书已经整本删除，节点备份没法单独挂回来；只能走整库副本")
                 return 1
             for item in r["restored"]:
@@ -115,7 +134,8 @@ async def main() -> int:
 
         return list_backups(store)
     finally:
-        await store.close()
+        if opened:
+            await store.close()
 
 
 if __name__ == "__main__":

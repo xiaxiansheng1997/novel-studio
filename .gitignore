@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
 
 # 环境与敏感数据
 .env
@@ -12,10 +14,12 @@ storage/
 # recon 抓取的接口样本含真实结构与样例，默认不入库
 fixtures/*.json
 
-# 浏览器 profile / 票据 / 会话库
-storage/**
+# 浏览器 profile / 票据 / 会话库（都在 storage/ 下，上面那条已经盖住）
+# 稿子备份另说一句：备份目录是跟着 W2A_STORAGE_DIR 走的，按名字再兜一层。
+# 节点备份是明文 JSON 的正文，只靠 storage/ 那一条就漏掉了「存储目录改到别处」的部署。
 *.sqlite
 *.db
+backups/
 
 # IDE
 .idea/

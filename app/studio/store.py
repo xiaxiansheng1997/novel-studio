@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
+import os
 import time
 import uuid
 from datetime import datetime
@@ -83,6 +83,19 @@ def _new_id(prefix: str = "") -> str:
 
 def _hash(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _backup_stat(p: Path) -> Optional[tuple[float, int]]:
+    """取备份文件的 (mtime, 字节数)。
+
+    列举与清理只是给人看「还留着哪几份」，不该因为某个文件恰好在这次扫描中途被清掉
+    就整条命令报错。
+    """
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    return st.st_mtime, st.st_size
 
 
 def _count_words(text: str) -> int:
@@ -286,17 +299,19 @@ class StudioStore:
         return (cur.rowcount or 0) > 0
 
     async def delete_work(self, work_id: str, *, backup: bool = True) -> bool:
-        """删作品。**先用 shutil.copy2 拷一份整库再动手**。本项无回滚入口，找回靠
+        """删作品。**先取一份一致快照的整库副本，再动手**。本项无回滚入口，找回靠
         `scripts/restore_backup.py` 或直接把副本盖回去。
 
         为什么不做「单作品级备份」：一个作品的数据摊在 12 张表里（还含图谱、索引、
         生成记录），拼一份能准确回填的子集是个比 `delete_work` 本身更大的活，
         而且写错就是「看起来能恢复、恢复出来是半本」。整库副本不体面但真能回去。
         """
-        if backup:
-            self._copy_db_backup(f"work-{work_id}")
         assert self._db is not None
         async with self._lock:
+            if backup:
+                # 副本要在锁内做：它要的是「按下快门那一刻库是完整的」，
+                # 锁外做等于跟后台队列的写事务抢同一张表，见 `_copy_db_backup`
+                await self._copy_db_backup(f"work-{work_id}")
             # _NO_FK_TABLES 与 chunks_fts 都没有外键兜底，必须手动清：
             # jobs 留着会让队列领到旧任务、连续报「作品不存在」；runs 留着会让成本与
             # 质量统计里混入不存在作品的分数；index_units 留着会让重建时误判
@@ -644,11 +659,7 @@ class StudioStore:
             await self._db.execute(
                 "UPDATE works SET updated_at = ? WHERE id = ?", (now, me["work_id"])
             )
-            await self._db.execute(
-                "INSERT INTO index_state(work_id, dirty, updated_at) VALUES(?,1,?) "
-                "ON CONFLICT(work_id) DO UPDATE SET dirty = 1, updated_at = excluded.updated_at",
-                (me["work_id"], now),
-            )
+            await self._mark_index_dirty_locked(me["work_id"])
             await self._db.commit()
         return {
             "moved": True, "direction": direction, "ordinal": theirs,
@@ -687,23 +698,23 @@ class StudioStore:
         删之前先把这一子树连同全部历史版本写一份 JSON。备份写不成就直接拒绝删除：
         宁可删不掉（重试、或者去把目录权限改对），不能删了找不回。
         备份落在 `storage/backups/nodes/`，目录由库路径推出来，不另开配置项。
+
+        快照、落盘、删除必须放在**同一次持锁**里做完。锁一放，等锁的后台队列或另一个
+        标签页的 `create_node` 就能插进这棵子树里，接着被 `path LIKE` 前缀连带删掉——
+        备份里没有它，等于删了还宣称备份过。单机低频，持锁写一个本地小文件不心疼。
         """
-        # 先在锁外把快照读出来：锁内那份要删的 id 是 `_drop_unit_rows` 用的，
-        # 两件事插队容易把「备份里的子树」与「真删掉的子树」对不上。
-        bundle = await self._node_backup_bundle(node_id)
-        if bundle is None:
-            return False
-        if backup:
-            self._write_node_backup(bundle)
         assert self._db is not None
         async with self._lock:
-            cur = await self._db.execute("SELECT work_id, path FROM nodes WHERE id = ?", (node_id,))
-            row = await cur.fetchone()
-            if not row:
+            bundle = await self._node_backup_bundle_locked(node_id)
+            if bundle is None:
                 return False
+            if backup:
+                self._write_node_backup(bundle)
+            # 删除谓词直接用刚才那份快照里的 work_id / path：同一次锁内它们不会变，
+            # 再查一遍反而多给一次「查到的子树与备份里的不是一套」的机会
             where = "work_id = ? AND (id = ? OR path LIKE ?)"
-            params = (row["work_id"], node_id, f"{row['path']}.%")
-            # 子树 id 要和下面删节点的谓词完全一致，不然清掉的行和删掉的节点对不上
+            params = (bundle["work_id"], node_id, f"{bundle['path']}.%")
+            # 子树 id 要和上面删节点的谓词完全一致，不然清掉的行和删掉的节点对不上
             cur = await self._db.execute(f"SELECT id FROM nodes WHERE {where}", params)
             await self._drop_unit_rows("node", [r["id"] for r in await cur.fetchall()])
             await self._db.execute(f"DELETE FROM nodes WHERE {where}", params)
@@ -718,43 +729,68 @@ class StudioStore:
         try:
             target.mkdir(parents=True, exist_ok=True)
         except OSError as exc:  # 包一层：调用方只需要知道「备份写不成」
-            raise BackupError(f"备份目录不可用 {target}: {exc}") from exc
+            # 完整原因进日志：detail 会显示到界面上，不能把库在本机的位置说出去
+            logger.error(f"[studio] 备份目录不可用 {target}: {exc}")
+            raise BackupError("备份目录不可用，已拒绝删除") from exc
         return target
 
     def _stamp(self) -> str:
         return datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    def _copy_db_backup(self, label: str) -> Path:
-        """删作品前的整库副本，与 `scripts/cleanup_works.py` 同一手法。"""
+    async def _copy_db_backup(self, label: str) -> Path:
+        """删作品前的整库副本，用 `VACUUM INTO` 取一份一致快照。
+
+        不学 `scripts/cleanup_works.py` 用 `shutil.copy2`：那条只是维护脚本顺手做，
+        这一份却是稿子的唯一退路。本库是默认的 rollback journal 模式，热拷贝既不参与
+        SQLite 的文件锁协议、也不会把 `-journal` 一起拷走，撞上在途写事务时拷出来那份
+        要么打不开、要么少了最近几笔——比没有备份更坏，它把人的心理保险买走了。
+        """
+        assert self._db is not None
+        dest: Optional[Path] = None
         try:
-            # 文件名也要在 try 里拼：时间戳取不到同样是「备份写不成」，不能漏成 OSError 冒出去
-            dest = self._backup_dir("works") / f"studio-before-delete-{label}-{self._stamp()}.sqlite"
-            shutil.copy2(self.db_path, dest)
-        except OSError as exc:
-            raise BackupError(f"整库副本没写成，已拒绝删除：{exc}") from exc
-        self.prune_backups("works", BACKUP_WORK_KEEP)
+            folder = self._backup_dir("works")
+            stamp = self._stamp()
+            dest = folder / f"studio-before-delete-{label}-{stamp}.sqlite"
+            # `VACUUM INTO` 遇同名文件会报错，而时间戳只到秒：同一秒连着删两本就撞上了
+            n = 1
+            while dest.exists():
+                dest = folder / f"studio-before-delete-{label}-{stamp}_{n}.sqlite"
+                n += 1
+            # 文件名也要在 try 里拼：时间戳取不到同样是「备份没写成」，不能漏成裸 OSError 冒出去
+            await self._db.commit()   # VACUUM 不能在事务里跑：先把在途改动落盘
+            await self._db.execute("VACUUM INTO ?", (str(dest),))
+        except BackupError:
+            raise                          # _backup_dir 已经把话说清楚了，不再套一层
+        except Exception as exc:           # 不止 OSError：SQL 报错、磁盘满都算「备份没写成」
+            logger.error(f"[studio] 整库副本没写成 {dest}: {exc}")
+            raise BackupError("整库副本没写成，删除已中止") from exc
+        self._prune_quietly("works", BACKUP_WORK_KEEP)
         return dest
 
-    async def _node_backup_bundle(self, node_id: str) -> Optional[dict[str, Any]]:
-        """读一份删除前的完整快照：这一节 + 整棵子树 + 每个节点的全部历史版本。"""
+    async def _node_backup_bundle_locked(self, node_id: str) -> Optional[dict[str, Any]]:
+        """读一份删除前的完整快照：这一节 + 整棵子树 + 每个节点的全部历史版本。
+
+        **调用方必须已持有 self._lock**，而且要与真正的删除在同一次持锁里，理由见 `delete_node`。
+        历史版本逐节点全量取、不限量不采样：`node_versions` 挂在 `ON DELETE CASCADE` 上，
+        这一份 JSON 是它们在这个世界上剩下的唯一一份。
+        """
         assert self._db is not None
-        async with self._lock:
-            cur = await self._db.execute("SELECT * FROM nodes WHERE id = ?", (node_id,))
-            root = await cur.fetchone()
-            if not root:
-                return None
-            cur = await self._db.execute(
-                "SELECT * FROM nodes WHERE work_id = ? AND (id = ? OR path LIKE ?) ORDER BY path",
-                (root["work_id"], node_id, f"{root['path']}.%"))
-            rows = await cur.fetchall()
-            nodes: list[dict[str, Any]] = []
-            for r in rows:
-                d = dict(r)
-                vc = await self._db.execute(
-                    "SELECT version_no, content, source, run_id, created_at "
-                    "FROM node_versions WHERE node_id = ? ORDER BY version_no", (d["id"],))
-                d["versions"] = [dict(v) for v in await vc.fetchall()]
-                nodes.append(d)
+        cur = await self._db.execute("SELECT * FROM nodes WHERE id = ?", (node_id,))
+        root = await cur.fetchone()
+        if not root:
+            return None
+        cur = await self._db.execute(
+            "SELECT * FROM nodes WHERE work_id = ? AND (id = ? OR path LIKE ?) ORDER BY path",
+            (root["work_id"], node_id, f"{root['path']}.%"))
+        rows = await cur.fetchall()
+        nodes: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            vc = await self._db.execute(
+                "SELECT version_no, content, source, run_id, created_at "
+                "FROM node_versions WHERE node_id = ? ORDER BY version_no", (d["id"],))
+            d["versions"] = [dict(v) for v in await vc.fetchall()]
+            nodes.append(d)
         return {
             "work_id": root["work_id"], "node_id": node_id, "title": root["title"],
             "kind": root["kind"], "path": root["path"], "parent_id": root["parent_id"],
@@ -766,11 +802,17 @@ class StudioStore:
         name = (f"{bundle['work_id']}__{bundle['node_id']}__"
                 f"{datetime.fromtimestamp(bundle['deleted_at']).strftime('%Y%m%d_%H%M%S')}.json")
         target = self._backup_dir("nodes") / name
+        # 先写临时名再换：直接写最终文件名时，盘满或进程被杀会留下半截 JSON，
+        # 而它 mtime 最新，会被保留策略当成「最近一份」留在盘上，到恢复时才发现是坏的
+        part = Path(f"{target}.part")
         try:
-            target.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError as exc:
-            raise BackupError(f"备份没写成，已拒绝删除：{exc}") from exc
-        self.prune_backups("nodes", BACKUP_NODE_KEEP)
+            part.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(part, target)
+        except Exception as exc:   # 不止 OSError：正文里有异常内容时 json.dumps 会抛 TypeError
+            part.unlink(missing_ok=True)
+            logger.error(f"[studio] 节点备份没写成 {target}: {exc}")
+            raise BackupError("备份没写成，已拒绝删除") from exc
+        self._prune_quietly("nodes", BACKUP_NODE_KEEP)
         return target
 
     def backup_dir(self, kind: str) -> Path:
@@ -779,23 +821,28 @@ class StudioStore:
 
     def list_work_backups(self) -> list[dict[str, Any]]:
         """整库副本列举（新在前）：名字 / 大小 / 时间。找回靠 `scripts/restore_backup.py`。"""
-        folder = self._backup_dir("works")
-        out: list[dict[str, Any]] = []
-        for p in sorted(folder.glob("*.sqlite"),
-                        key=lambda x: (x.stat().st_mtime, x.name), reverse=True):
-            out.append({"name": p.name, "bytes": p.stat().st_size,
-                        "created_at": p.stat().st_mtime})
-        return out
+        rows: list[dict[str, Any]] = []
+        for p in self._backup_dir("works").glob("*.sqlite"):
+            st = _backup_stat(p)
+            if st is None:
+                continue     # 正好被并发清理摸掉了：少一行列表，不该让整个请求报错
+            rows.append({"name": p.name, "bytes": st[1], "created_at": st[0]})
+        rows.sort(key=lambda r: (r["created_at"], r["name"]), reverse=True)
+        return rows
 
     def prune_backups(self, kind: str, keep: int) -> list[str]:
         """只留最近 `keep` 份，返回被清掉的文件名。
 
         按修改时间排而不是按文件名：节点备份名以 work id 开头，字典序不等于时间序。
         本目录只存备份，不往里扫非备份文件；当前库本体在上一层目录，摸不到。"""
-        folder = self._backup_dir(kind)
-        files = sorted(folder.iterdir(), key=lambda p: (p.stat().st_mtime, p.name))
+        timed: list[tuple[float, Path]] = []
+        for p in self._backup_dir(kind).iterdir():
+            st = _backup_stat(p)
+            if st is not None:
+                timed.append((st[0], p))
+        timed.sort(key=lambda x: (x[0], x[1].name))
         gone: list[str] = []
-        for stale in files[: max(0, len(files) - max(1, keep))]:
+        for _, stale in timed[: max(0, len(timed) - max(1, keep))]:
             try:
                 stale.unlink()
                 gone.append(stale.name)
@@ -803,27 +850,40 @@ class StudioStore:
                 logger.warning(f"[studio] 旧备份删不掉，先留着：{stale}")
         return gone
 
+    def _prune_quietly(self, kind: str, keep: int) -> None:
+        """删除路径上的清理：这是记账，不该有拦住删除的权力。
+
+        备份明明已经写成，却因为它扫目录或某个文件摸不到而抛错，用户看到的是「删不掉」，
+        而那恰好是我们最不想要的结果。失败就留在日志里，旧备份多躺一轮不伤任何人。
+        """
+        try:
+            self.prune_backups(kind, keep)
+        except Exception as exc:
+            logger.warning(f"[studio] 旧备份清理失败，先留着不管：{exc}")
+
     def list_node_backups(self) -> list[dict[str, Any]]:
         """只读列举节点备份（新在前），不抛异常也不改任何东西。"""
-        out: list[dict[str, Any]] = []
-        for f in sorted(self._backup_dir("nodes").iterdir(),
-                        key=lambda p: (p.stat().st_mtime, p.name), reverse=True):
-            if f.suffix != ".json":
+        rows: list[dict[str, Any]] = []
+        for f in self._backup_dir("nodes").glob("*.json"):
+            st = _backup_stat(f)
+            if st is None:
                 continue
             row: dict[str, Any] = {
-                "name": f.name, "bytes": f.stat().st_size,
-                "created_at": f.stat().st_mtime,
+                "name": f.name, "bytes": st[1], "created_at": st[0],
                 "title": "", "work_id": "", "kind": "", "node_count": 0,
             }
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("备份顶层不是对象")
                 row.update(title=data.get("title") or "", work_id=data.get("work_id") or "",
                            kind=data.get("kind") or "",
                            node_count=len(data.get("nodes") or []))
             except (OSError, ValueError):
                 row["title"] = "（读不了，文件可能坏了）"
-            out.append(row)
-        return out
+            rows.append(row)
+        rows.sort(key=lambda r: (r["created_at"], r["name"]), reverse=True)
+        return rows
 
     async def restore_node_backup(self, name: str) -> Optional[dict[str, Any]]:
         """从备份 JSON 找回一节（连子树与历史版本一起）。
@@ -832,6 +892,12 @@ class StudioStore:
         节点一律用新 id，旧 id 已被级联删掉、而且同一个备份可能被恢复两次；
         path 重新排、ordinal 追加到末尾——原序就记在 bundle 里，恢复后用上下移挪回去。
         返回 None = 备份不存在、读不懂、或那本书已经整本删了（那就只能走整库副本）。
+
+        恢复等于往库里加回一整棵子树的正文，所以末尾要把上游的卷/全书摘要判过期、
+        并把库标脏：不这么做，摘要还停留在「没有这一节」的那一版上却自称新鲜，
+        assembler 照着注入，右栏的过期计数也看不见——那正是「改完稿摘要还在撒谎」那一类。
+        备份只带走 nodes 与 node_versions：摘要、告警、生成记录不在里面，
+        所以恢复后那一节的摘要要重新生成一次，历史版本则是全数带回来的。
         """
         path = self._backup_dir("nodes") / name
         if not path.is_file():
@@ -841,7 +907,13 @@ class StudioStore:
         except (OSError, ValueError) as exc:
             logger.warning(f"[studio] 备份读不了 {name}: {exc}")
             return None
+        if not isinstance(bundle, dict):   # 人手工改过的备份可能是数组或一个字符串
+            logger.warning(f"[studio] 备份结构不对（顶层不是对象）：{name}")
+            return None
         rows = bundle.get("nodes") or []
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            logger.warning(f"[studio] 备份里的 nodes 不成形：{name}")
+            return None
         if not rows or not bundle.get("work_id"):
             return None
         assert self._db is not None
@@ -903,6 +975,11 @@ class StudioStore:
                              "hung_on_root": bool(parent_id is None and old_parent)})
             await self._db.execute(
                 "UPDATE works SET updated_at = ? WHERE id = ?", (now, bundle["work_id"]))
+            # 找回来的这一棵子树是多出来的正文：上游摘要必须重新判过期（口径见方法 docstring）
+            new_root = restored.get(bundle.get("node_id") or "")
+            if new_root:
+                await self._mark_stale_locked(bundle["work_id"], new_root)
+            await self._mark_index_dirty_locked(bundle["work_id"])
             await self._db.commit()
         return {
             "restored": made, "work_id": bundle["work_id"],
@@ -1773,6 +1850,19 @@ class StudioStore:
         await self._db.execute(
             "UPDATE summaries SET ref_hash = '' WHERE scope = 'work' AND work_id = ?",
             (work_id,))
+
+    async def _mark_index_dirty_locked(self, work_id: str) -> None:
+        """把库标脏：内容没变、但结构变了的那些改动（重排、找回）走这里。
+
+        **调用方必须已持有 self._lock**。不重算索引与摘要（正文哈希没变，重算就是白烧调用），
+        只是让下一次重建知道「这一本的顺序/成员动过了」。
+        """
+        assert self._db is not None
+        await self._db.execute(
+            "INSERT INTO index_state(work_id, dirty, updated_at) VALUES(?,1,?) "
+            "ON CONFLICT(work_id) DO UPDATE SET dirty = 1, updated_at = excluded.updated_at",
+            (work_id, _now()),
+        )
 
     async def mark_summaries_stale(self, work_id: str, node_id: str) -> None:
         """对外入口（脚本/接口用）：手动把某一节的上游摘要判过期。"""

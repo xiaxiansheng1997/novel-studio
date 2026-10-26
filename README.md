@@ -85,11 +85,17 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
   交换时一起对调，否则「已死的角色在第 5 章出场」这类判定会跟着错位。
   内容没变，所以不重算索引与摘要，只把库标脏。
 - **删除前自动留备份**。删一节（含整棵子树与全部历史版本）先写一份 JSON 到 `storage/backups/nodes/`，
-  删作品先拷一份整库副本到 `storage/backups/works/`；**备份写不成就拒绝删除**，界面上会给出「备份失败，已拒绝删除」。
+  删作品先在锁内取一份整库副本到 `storage/backups/works/`（`VACUUM INTO` 的一致快照，不是热拷文件）；
+  **备份写不成就拒绝删除**，界面上只给「备份失败，已拒绝删除，详见服务端日志」这一句固定文案——
+  `detail` 会原样显示出来，而失败原因里带着库和备份目录在本机的位置，那句只该进日志。
   找回一节：`python -m scripts.restore_backup --list` 看有哪些，`--name <文件>` 试运行，加 `--yes` 真恢复
   （原父节点还在就挂回去，没了就挂作品根；章号追加到末尾，再用 ↑↓ 挪回原位）。
+  `--list` 与试运行**完全不碰数据库**，只读备份目录里的文件，所以服务还开着的时候也能放心跑；真恢复才开连接。
   整库副本只列不给脚本改：那种找回是停服务后把文件盖回 `storage/studio.sqlite`。
-  节点备份留最近 20 份、整库副本留最近 5 份，删的时候顺手清理。
+  节点备份留最近 20 份、整库副本留最近 5 份，删的时候顺手清理（清理失败只写日志，不会反过来把删除卡住）。
+- **备份保的是稿子，不是记忆**。那一份 JSON 只带走正文与全部历史版本：摘要、告警、生成记录、索引都不在里面。
+  所以恢复之后要把这一节的摘要重算一次；恢复这一步会顺手把上游的卷摘要与全书摘要判过期、并把库标脏，
+  右栏的「N 节摘要待重算」能看见它们，不会拿「没有这一节」那一版的摘要继续往下注入。
 
 ## 检查规则
 
@@ -126,9 +132,10 @@ python -m scripts.cleanup_works --sweep-orphans    # 默认试运行，加 --yes
 
 清书架也走这个脚本（同样默认试运行）。
 
-删除本身也留退路：删节/删卷写 `storage/backups/nodes/*.json`（正文 + 全部历史版本），删作品写
-`storage/backups/works/*.sqlite` 整库副本；备份写不成就拒绝删除。找回见上面「改完稿子会发生什么」与
-`python -m scripts.restore_backup --list`。
+删除本身也留退路：删节/删卷写 `storage/backups/nodes/*.json`（正文 + 全部历史版本），删作品在锁内取
+`storage/backups/works/*.sqlite` 整库副本（`VACUUM INTO` 的一致快照）；备份写不成就拒绝删除。
+备份里只有正文与版本，摘要/告警/生成记录不在里面——找回的那一节要重算摘要，见上面「改完稿子会发生什么」。
+找回入口：`python -m scripts.restore_backup --list`（只看，不碰数据库）。
 
 ## 界面规范
 
@@ -168,7 +175,7 @@ web/        旧版静态页 chat.html admin.html live.html（前端未构建时�
 dev.py      frontend / backend / build / all
 scripts/    smoke_studio.py  smoke_m1_tail.py  smoke_m2.py  smoke_m3.py  smoke_m4.py  smoke_soft_rules.py
             measure_baseline.py  shot_studio.py  cleanup_works.py  restore_backup.py  login.py  recon.py  check.ps1
-tests/      pytest（全量 163 例；写作侧用 tmp_path 建临时库，不碰 storage/）
+tests/      pytest（全量 169 例；写作侧用 tmp_path 建临时库，不碰 storage/）
 storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
             backups/nodes（删节前的 JSON 备份）/ backups/works（删作品前的整库副本），已 gitignore>
 ```
@@ -176,7 +183,8 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
 `scripts/` 下的验收脚本分两类，账号被风控时别看错哪类会花钱：
 
 - **完全离线**（不起服务、不发起任何生成调用）：`smoke_soft_rules.py`（只读正文跑软规则）、`cleanup_works.py`（清书架 / 清孤儿行，默认试运行）、
-  `restore_backup.py`（默认 `--list` 只看，`--name` 不带 `--yes` 也只打印会恢复什么）；
+  `restore_backup.py`（默认 `--list` 只看，`--name` 不带 `--yes` 也只打印会恢复什么——这两条连数据库都不开，
+  服务正在跑也能查；只有 `--yes` 才真往库里写）；
 - **要先起服务**（跑本机 HTTP 接口）：`smoke_studio.py`（默认只读，`--generate` 才真生成）、`smoke_m3.py`（默认不调模型，`--llm` 才真实抽取）、
   `smoke_m1_tail.py` 与 `smoke_m2.py`（默认会真跑一次，`--skip-llm` 只验不调模型的部分）、`smoke_m4.py`（走队列，会生成）、
   `measure_baseline.py`（M0 基线实测，`--dry-run` 只看计划）、`shot_studio.py`（Playwright 截图，不发消息）。
@@ -232,6 +240,7 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
   在这之前删下的历史残留用 `cleanup_works --sweep-orphans` 清（旧版只按 work_id 判，认不出「作品还活着、节点已没」的那些行）。
 - **备份只在删除那一刻写，不是定时快照**：没删过的东西不会自己多一份副本（`storage/backups/`），
   也没做界面化的恢复入口——节点备份靠 `scripts/restore_backup.py`，整库副本靠停服务盖文件。
+  备份只带正文与历史版本，库本身坏了（文件损坏 / 磁盘没了）仍然没有退路，因为没人定时拷走整库。
 - **上下移只在同层**：不能把一节拖到另一个卷下面（要跨卷得自己剪切正文重排）。
 - 生成吞吐受网页账号的限流与风控硬约束，串行跑一本长篇要按小时计；想要并发得自己解决账号问题。
 - 底座（`/v1` OpenAI 接口、模式与文案校准）的限制另有 **十几条**，见 `docs/reverse-proxy.md` 的「已知限制（底座侧）」。
