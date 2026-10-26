@@ -33,6 +33,30 @@ SENSITIVE_HEADERS = {
     "x-tt-passport-authorization", "x-device-id", "x-signature",
 }
 
+# 风控 / 人机验证的流量，永远不是对话接口，必须在录制时就排除。
+# 踩过的坑：阿里 Baxia 的拦截路径是
+#     https://chat2.qianwen.com/api/v2/chat/_____tmd_____/report
+# 它就长在 chat 路径下面，URL_HINTS 里的 "chat" / "qianwen" 全部命中；而这条 report 的
+# 请求 body 里是一整张 canvas 指纹（base64 WebP），体积远比对话响应大，于是 pick_endpoint
+# 按 hint + size 打分时它把冠军抢走，写出的 fixture 拿去回放完全跑错方向。
+# 不收裸 "verify"：有些站点的正常接口也带这个词，误伤代价比漏放代价大。
+RISK_URL_MARKERS = (
+    "_____tmd_____",
+    "x5secdata",
+    "slidedata",
+    "/punish",
+    "baxia",
+    "nocaptcha",
+    "secsdk",
+    "captcha",
+)
+
+
+def is_risk_control(url: str) -> bool:
+    """是否风控通道流量（滑块 / 处罚页 / 指纹上报）。"""
+    low = (url or "").lower()
+    return any(m in low for m in RISK_URL_MARKERS)
+
 
 def mask_headers(headers: dict[str, str]) -> dict[str, str]:
     return {
@@ -62,17 +86,23 @@ class NetworkRecorder:
 
     def __init__(self):
         self.entries: list[dict] = []
+        self.skipped_risk = 0  # 被当作风控流量丢掉的条数
         self._page = None
         self._handler = None
 
     def attach(self, page) -> None:
         self._page = page
         self.entries = []
+        self.skipped_risk = 0
 
         async def on_response(resp):
             try:
                 req = resp.request
                 if req.resource_type not in ("xhr", "fetch"):
+                    return
+                if is_risk_control(resp.url):
+                    # 入库前就拦：candidates 也得保持干净，否则看录制结果会被误导
+                    self.skipped_risk += 1
                     return
                 if len(self.entries) >= MAX_ENTRIES:
                     return
@@ -116,9 +146,21 @@ class NetworkRecorder:
         chosen = pick_endpoint(key, self.entries)
         if chosen is None:
             # 未抓到任何候选请求：保留原有 fixture，绝不写空文件覆盖
-            logger.warning(f"[recon] {key}: 未抓到对话请求，已保留原 fixture（未覆盖）")
+            if self.skipped_risk:
+                # 只抓到风控流量 = 页面当时整个被 punish 拦着，对话根本没发出去
+                msg = (
+                    f"只抓到 {self.skipped_risk} 条风控/滑块流量，没抓到对话请求："
+                    "页面当时正被人机验证拦着。已保留原 fixture；"
+                    "请先换网络过了验证、确认页面能正常回话后再重录"
+                )
+            else:
+                msg = "未抓到候选请求，已保留原 fixture；请在页面里发一句对话后重录"
+            logger.warning(
+                f"[recon] {key}: 未抓到对话请求（已排除风控流量 {self.skipped_risk} 条），"
+                "已保留原 fixture（未覆盖）"
+            )
             return {"count": 0, "endpoint": "", "file": None, "skipped": True,
-                    "message": "未抓到候选请求，已保留原 fixture；请在页面里发一句对话后重录"}
+                    "risk_skipped": self.skipped_risk, "message": msg}
 
         body_template = None
         if chosen.get("post_data"):
@@ -150,4 +192,10 @@ class NetworkRecorder:
         except OSError:
             pass
         logger.info(f"[recon] {key}: 记录 {len(self.entries)} 个请求，端点={out['endpoint'] or '未识别'}")
-        return {"count": len(self.entries), "endpoint": out["endpoint"], "file": str(dest.relative_to(BASE_DIR))}
+        return {
+            "count": len(self.entries),
+            "endpoint": out["endpoint"],
+            "file": str(dest.relative_to(BASE_DIR)),
+            # 报出来才看得出“录到了但大半被拦”这种半成品，别让人拿着脏 fixture 去 replay
+            "risk_skipped": self.skipped_risk,
+        }
