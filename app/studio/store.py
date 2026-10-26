@@ -1927,7 +1927,10 @@ class StudioStore:
                     return row
 
             jid = _new_id("j_")
-            unique_key = f"{idem_key or task_type}#{int(now * 1000)}"
+            # 末尾带上 jid：这一列有 UNIQUE，只精到毫秒的话「同一毫秒入两笔」就会撞键。
+            # 入队都不带 idem_key 时会退化成 "task_type#毫秒"，两笔完全相等；
+            # 带业务键的生产入队撞不上，但不能让后面的调用方重新踩回这个坑。
+            unique_key = f"{idem_key or task_type}#{int(now * 1000)}#{jid}"
             await self._db.execute(
                 "INSERT INTO jobs(id, work_id, node_id, task_type, payload_json, status, priority, "
                 "attempts, max_attempts, idem_key, scheduled_at, created_at, updated_at) "
