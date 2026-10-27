@@ -12,6 +12,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from loguru import logger
+
 from app.studio import content_types, graph, retrieval
 
 # 按形态给总预算（字符）——仅作为 YAML 缺失时的兜底
@@ -84,6 +86,9 @@ class AssemblyResult:
     user: str
     buckets: list[Bucket] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # 这一轮真正装进 S_src 的素材（含各占多少字）：生成后据此记 used，
+    # 也让「上下文」说得出「本节用了哪几条」，而不是只在出问题时甩一句告警
+    used_sources: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def total_chars(self) -> int:
@@ -94,6 +99,7 @@ class AssemblyResult:
             "buckets": [b.as_dict() for b in self.buckets],
             "total_chars": self.total_chars,
             "warnings": self.warnings,
+            "used_sources": self.used_sources,
             "system": self.system,
             "user": self.user,
         }
@@ -161,6 +167,107 @@ def _style_text(work: dict) -> str:
     return "\n".join(parts)
 
 
+# 一条素材最多贡献几个块：给 2 个是让「同一条素材的上下文」不至于挤掉别条
+_SRC_MAX_PER_SOURCE = 2
+
+
+async def _source_evidence(
+    store, work: dict, node: Optional[dict], instruction: str, budget: int
+) -> tuple[str, list[dict[str, Any]], list[str], str]:
+    """素材桶：先按本节检索，检索不到再退回「最近导入 + 开头部」。
+
+    旧写法是 `list_sources(limit=5)` 各取开头 1500 字，而面板上写着「按相关度取」——
+    于是第 6 条素材永远进不了 prompt，长素材里最相关的那段也从来读不到。
+    现在优先走 FTS（素材建索引时就单独标了 source_kind='source'），
+    命中不了才退回旧路径，并在 warnings 里说清「这一轮是退化的」。
+
+    返回 (文本, 用到的素材, warnings, 模式)，模式：""=库里没素材，
+    "empty"=有素材但内容是空的，"retrieved"=按本节检索，"recent"=退回最近几条。
+    """
+    work_id = work["id"]
+    sources = await store.list_sources(work_id, limit=500)
+    if not sources:
+        return "", [], [], ""
+
+    used: list[dict[str, Any]] = []
+    query = retrieval.build_query(
+        (node or {}).get("title"), instruction, work.get("premise")
+    )
+    if query and await store.count_chunks(work_id, "source"):
+        hits = await retrieval.retrieve(
+            store,
+            work_id,
+            query=query,
+            kinds=("source",),
+            top_k=6,
+            budget_chars=budget,
+            max_per_source=_SRC_MAX_PER_SOURCE,
+        )
+        by_id = {s["id"]: s for s in sources}
+        blocks: list[str] = []
+        total = 0
+        for hit in hits:
+            meta = by_id.get(hit.get("source_id") or "") or {}
+            title = meta.get("title") or hit.get("title") or "未命名素材"
+            seq = int(hit.get("seq") or 0)
+            start = int(hit.get("start") or 0)
+            whole = int(meta.get("chars") or 0)
+            # chunker 的 seq 从 0 起，给人看要 +1；第 0 段不是「没有出处」
+            where = f"第 {seq + 1} 段"
+            if whole:
+                where += f"（原文第 {start + 1} 字起，全文 {whole} 字）"
+            text, cut = _head(hit.get("text") or "", max(200, budget - total))
+            if not text:
+                continue
+            head = f"《{title}》{where}" + (" · 片段已截断" if cut else "")
+            blocks.append(f"{head}\n{text}")
+            used.append({
+                "id": str(hit.get("source_id") or ""),
+                "title": title,
+                "chars": len(text),
+            })
+            total += len(text) + len(head) + 2
+            if total >= budget - 200:
+                break
+        if blocks:
+            return "\n\n---\n\n".join(blocks), used, [], "retrieved"
+
+    # 退路：没建索引，或建了但本节一个词都没命中——沿用旧行为，但必须说出来
+    warnings = [
+        "素材未建索引或本节没命中：这一轮只用了最近导入的素材开头部分"
+        "（右栏「上下文」里点「建索引」后，才会按本节内容检索素材）"
+    ]
+    attempted = sources[:5]
+    chunks: list[str] = []
+    remain = budget
+    for s in attempted:
+        full = await store.get_source(s["id"])
+        if not full:
+            continue
+        body, _cut = _head(full.get("content") or "", min(1500, max(200, remain)))
+        if not body:
+            continue
+        head_bits = [f"《{s.get('title') or '未命名素材'}》"]
+        if s.get("published_at"):
+            head_bits.append(f"（{s['published_at']}）")
+        if s.get("url"):
+            head_bits.append(f" {s['url']}")
+        chunks.append("".join(head_bits) + "\n" + body)
+        used.append({
+            "id": s["id"],
+            "title": s.get("title") or "未命名素材",
+            "chars": len(body),
+        })
+        remain -= len(body)
+        if remain <= 300:
+            break
+    if len(sources) > len(attempted):
+        warnings.append(f"库里有 {len(sources)} 条素材，这一轮只取了最近 {len(attempted)} 条")
+    elif len(attempted) > len(chunks):
+        warnings.append(f"S_src 预算只够 {len(chunks)}/{len(attempted)} 条素材")
+    return "\n\n---\n\n".join(chunks), used, warnings, "recent" if chunks else "empty"
+
+
 async def assemble(
     store,
     work: dict,
@@ -194,6 +301,7 @@ async def assemble(
 
     buckets: dict[str, Bucket] = {bid: Bucket(bid, BUCKET_LABEL[bid], BUCKET_BUDGET[bid]) for bid in enabled}
     warnings: list[str] = []
+    used_sources: list[dict[str, Any]] = []
 
     # ---------- S0 结构模板 ----------
     if "S0" in buckets:
@@ -352,8 +460,11 @@ async def assemble(
 
     # ---------- S_src 素材证据 ----------
     if "S_src" in buckets:
-        sources = await store.list_sources(work["id"], limit=5)
-        if not sources:
+        text, src_used, src_warnings, mode = await _source_evidence(
+            store, work, node, instruction, buckets["S_src"].budget
+        )
+        used_sources = src_used
+        if mode == "":
             buckets.pop("S_src", None)
             # 「缺素材」这句只对写新内容的人有用：润色不动事实，
             # 每次润色都弹一句「质量会明显下降」只会让人以为得停下先去导资料。
@@ -365,29 +476,12 @@ async def assemble(
                     )
                 elif kind == "article":
                     warnings.append("该作品还没有素材，生成质量会明显下降（建议先导入资料）")
+        elif text:
+            buckets["S_src"].text = text
+            warnings.extend(src_warnings)
         else:
-            chunks = []
-            remain = buckets["S_src"].budget
-            for s in sources:
-                full = await store.get_source(s["id"])
-                if not full:
-                    continue
-                body, cut = _head(full.get("content") or "", min(1500, max(200, remain)))
-                if not body:
-                    continue
-                head_bits = [f"《{s.get('title') or '未命名素材'}》"]
-                if s.get("published_at"):
-                    head_bits.append(f"（{s['published_at']}）")
-                if s.get("url"):
-                    head_bits.append(f" {s['url']}")
-                chunks.append("".join(head_bits) + "\n" + body)
-                remain -= len(body)
-                if remain <= 300:
-                    break
-            if chunks:
-                buckets["S_src"].text = "\n\n---\n\n".join(chunks)
-                if len(sources) > len(chunks):
-                    warnings.append(f"S_src 预算只够 {len(chunks)}/{len(sources)} 条素材")
+            buckets.pop("S_src", None)
+            warnings.extend(src_warnings)
 
     # ---------- S7 当前正文 ----------
     if "S7" in buckets and node:
@@ -455,7 +549,9 @@ async def assemble(
         for bid in ("S0", "S1", "S2", "S3", "S4", "S6", "S5", "S_src", "S7", "S8")
         if bid in buckets
     ]
-    result = AssemblyResult(system=system, user=user, buckets=ordered, warnings=warnings)
+    result = AssemblyResult(
+        system=system, user=user, buckets=ordered, warnings=warnings, used_sources=used_sources
+    )
 
     if result.total_chars > total_budget:
         warnings.append(
@@ -463,3 +559,20 @@ async def assemble(
             "请调小某个桶的预算或减少素材"
         )
     return result
+
+
+async def record_used_sources(store, result: AssemblyResult) -> int:
+    """把这一轮真的进了 prompt 的素材记一次用量。
+
+    放在装配器里而不是各调用点，是因为三条路（交互式 / 队列 / 脚本）都要记，
+    少记一条，面板上的「已用 N 次」就会说谎。预览不调它。
+    计数失败不能让生成失败——那是统计，不是正文。
+    """
+    ids = [str(s.get("id")) for s in result.used_sources if s.get("id")]
+    if not ids:
+        return 0
+    try:
+        return await store.mark_sources_used(ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[studio] 素材用量计数失败: {exc}")
+        return 0

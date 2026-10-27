@@ -49,6 +49,8 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 6. 下方框子那句提示词**留空也能生成**：单节点「生成」与「大纲 / 整篇 / 排队」走同一条指令口径
    （`prompting.node_instruction`：本节标题 / 本节要点 / 篇幅 / 只输出本节正文），右栏「上下文」显示的就是真要发出去的那一份
 7. 作品标题与主旨建完还能改：点编辑器顶部的作品名就地编辑（`PATCH /studio/works/{id}`）；主旨进 S2，改完下一节就生效
+8. 右栏「素材」：拖入 `.txt / .md` 可一次导多条（导入即建索引，标题留空取文件名或首行）；生成时**按本节标题与提示词检索素材**，
+   不再固定取最新 5 条的开头。单条点开看全文、一键「抽事实卡」（自动带上出处），列表上的「已用 N 次」只在它真进了 prompt 时才加
 
 ## 两种形态
 
@@ -184,7 +186,7 @@ web/        旧版静态页 chat.html admin.html live.html（前端未构建时�
 dev.py      frontend / backend / build / all
 scripts/    smoke_studio.py  smoke_m1_tail.py  smoke_m2.py  smoke_m3.py  smoke_m4.py  smoke_soft_rules.py
             measure_baseline.py  shot_studio.py  cleanup_works.py  restore_backup.py  login.py  recon.py  check.ps1
-tests/      pytest（全量 195 例；写作侧用 tmp_path 建临时库，不碰 storage/）
+tests/      pytest（全量 206 例；写作侧用 tmp_path 建临时库，不碰 storage/）
 storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
             backups/nodes（删节前的 JSON 备份）/ backups/works（删作品前的整库副本），已 gitignore>
 ```

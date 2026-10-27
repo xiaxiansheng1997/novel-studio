@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from app.studio import jsonutil
+
 
 def work_meta(work: dict[str, Any]) -> dict[str, Any]:
     try:
@@ -109,3 +111,48 @@ def parse_beats(text: str) -> str:
         raw = raw.rsplit("```", 1)[0]
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     return "\n".join(lines)[:800]
+
+
+def facts_prompt(source: dict[str, Any], *, limit: int = 5) -> tuple[str, str]:
+    """从一条素材里抽事实卡：只要「能对原文核对的一句话」，不要观点与修辞。
+
+    事实卡是给一致性检查与生成时「优先使用」的那一层。原来从素材到事实卡
+    只能靠人手工抄，抄不动就等于这条链路不存在。
+    """
+    system = (
+        "你是资料整理助手。你只输出 JSON 数组，不要解释、不要代码块、不要前后缀。"
+        "每条事实必须是原文里能直接核对的一句话，不能推测、不能改写成观点。"
+    )
+    body = (source.get("content") or "")[:12000]
+    blocks = [
+        f"素材标题：{source.get('title') or '未命名素材'}",
+        f"资料日期：{source.get('published_at') or '未知'}",
+        f"原文：\n{body}",
+        "",
+        f"请抽出最多 {limit} 条事实，严格输出 JSON 数组，格式：",
+        '[{"statement": "一句可引用的话（不超过 60 字）", "valid_until": "YYYY-MM 或空串"}]',
+        "要求：数字、时间、人名、机构名必须与原文一致；原文没有的不要补；"
+        "「应该 / 值得 / 最好」这类主张不要。",
+    ]
+    return system, "\n".join(blocks)
+
+
+def parse_facts(text: str) -> list[dict[str, str]]:
+    """把模型输出归一成 [{statement, valid_until}]：去重、丢掉过短的、最多 10 条。"""
+    items = jsonutil.as_list(jsonutil.parse_json_loose(text))
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for it in items:
+        if isinstance(it, dict):
+            statement = jsonutil.as_str(it.get("statement") or it.get("fact"), 200)
+            valid = jsonutil.as_str(it.get("valid_until"), 20)
+        else:
+            statement = jsonutil.as_str(it, 200)
+            valid = ""
+        if len(statement) < 6 or statement in seen:
+            continue
+        seen.add(statement)
+        out.append({"statement": statement, "valid_until": valid})
+        if len(out) >= 10:
+            break
+    return out

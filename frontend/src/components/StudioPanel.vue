@@ -18,13 +18,56 @@
     <div class="panel-body">
       <!-- 素材 -->
       <section v-if="tab === 'sources'" class="section">
-        <p class="hint">生成时按相关度取前几条注入；单条建议不超过 2 万字。</p>
-        <div v-for="s in store.sources" :key="s.id" class="item">
+        <div class="src-top">
+          <p class="hint inline">生成时按本节标题与提示词检索素材，命中不了才退回最近导入的；素材桶总预算约 4500 字。</p>
+          <button class="btn btn-sm" @click="srcAdding = !srcAdding">
+            {{ srcAdding ? '收起' : '+ 添加' }}
+          </button>
+        </div>
+
+        <!-- 添加：按钮就在眼前，拖文件或粘贴都行；导入后立即建索引 -->
+        <div v-if="srcAdding" class="add-box">
+          <label class="drop" @dragover.prevent @drop.prevent="onDropFiles">
+            <input type="file" multiple accept=".txt,.md,.markdown,.text" hidden @change="onPickFiles" />
+            <span>{{ srcBusy ? '导入中…' : '拖入 .txt / .md（可多选），或点这里选文件' }}</span>
+          </label>
+          <input v-model="src.title" class="field" placeholder="标题（留空取文件名或正文首行）" />
+          <input v-model="src.url" class="field" placeholder="来源链接（可选）" />
+          <input v-model="src.published_at" class="field" placeholder="资料日期 YYYY-MM（可选）" />
+          <textarea v-model="src.content" class="field" rows="6" placeholder="粘贴正文…" />
+          <p class="src-count" :class="{ bad: srcChars > 20000 }">
+            {{ srcChars }} 字<template v-if="srcChars > 20000"> · 超过 2 万字也没关系：检索只摘命中段落</template>
+          </p>
+          <button class="btn btn-primary btn-sm" :disabled="!src.content.trim() || srcBusy" @click="submitSource">
+            {{ srcBusy ? '导入中…' : '导入' }}
+          </button>
+          <p v-if="srcError" class="warn-line">{{ srcError }}</p>
+        </div>
+
+        <input
+          v-model="srcQuery"
+          class="field"
+          placeholder="在本作品素材里搜一句…（回车）"
+          @keyup.enter="searchSources"
+        />
+        <div v-if="srcHits.length" class="src-hits">
+          <p class="hint inline">命中 {{ srcHits.length }} 段，点一条看原文</p>
+          <button v-for="h in srcHits" :key="h.chunk_id" class="src-hit" @click="openSource(h.source_id)">
+            <span class="src-hit-title">{{ h.title }}</span>
+            <span class="src-hit-text">{{ h.text }}</span>
+          </button>
+          <button class="btn btn-sm" @click="srcHits = []">清除检索</button>
+        </div>
+
+        <div v-for="s in store.sources" :key="s.id" class="item src-item" @click="openSource(s.id)">
           <div class="item-main">
             <span class="item-title">{{ s.title || '未命名素材' }}</span>
-            <span class="item-meta">{{ s.published_at || '无日期' }} · {{ s.chars }} 字</span>
+            <span class="item-meta">
+              {{ s.published_at || '无日期' }} · {{ s.chars }} 字
+              <template v-if="s.used"> · 已用 {{ s.used }} 次</template>
+            </span>
           </div>
-          <button class="mini-btn" title="删除" @click="store.deleteSource(s.id)">
+          <button class="mini-btn" title="删除" @click.stop="removeSource(s)">
             <AppIcon name="trash" :size="13" />
           </button>
         </div>
@@ -32,16 +75,28 @@
           还没有素材。时政/历史类必须导入资料，否则模型会编造事实。
         </p>
 
-        <details class="add-box">
-          <summary>添加素材</summary>
-          <input v-model="src.title" class="field" placeholder="标题（如：官方 changelog）" />
-          <input v-model="src.url" class="field" placeholder="来源链接（可选）" />
-          <input v-model="src.published_at" class="field" placeholder="资料日期 YYYY-MM（可选）" />
-          <textarea v-model="src.content" class="field" rows="5" placeholder="粘贴正文…" />
-          <button class="btn btn-primary btn-sm" :disabled="!src.content.trim() || busy" @click="submitSource">
-            导入
-          </button>
-        </details>
+        <!-- 单条素材：全文 + 抽事实卡。列表不带正文，一条可能几万字 -->
+        <div v-if="srcDetail" class="src-detail">
+          <header class="src-detail-head">
+            <span class="item-title">{{ srcDetail.title || '未命名素材' }}</span>
+            <button class="mini-btn" title="关闭" @click="srcDetail = null">×</button>
+          </header>
+          <p class="item-meta">
+            {{ srcDetail.published_at || '无日期' }} · {{ (srcDetail.content || '').length }} 字
+            <template v-if="srcDetail.used"> · 已用 {{ srcDetail.used }} 次</template>
+          </p>
+          <a v-if="srcDetail.url" class="src-link" :href="srcDetail.url" target="_blank" rel="noreferrer">
+            {{ srcDetail.url }}
+          </a>
+          <pre class="src-content">{{ srcDetail.content }}</pre>
+          <div class="src-detail-act">
+            <button class="btn btn-sm" :disabled="factsBusy" @click="extractFacts(srcDetail)">
+              {{ factsBusy ? '抽取中…' : '抽事实卡' }}
+            </button>
+            <button class="btn btn-sm" @click="removeSource(srcDetail)">删除</button>
+          </div>
+          <p v-if="factsNote" class="hint">{{ factsNote }}</p>
+        </div>
       </section>
 
       <!-- 事实 -->
@@ -65,6 +120,13 @@
           <summary>添加事实</summary>
           <textarea v-model="fact.statement" class="field" rows="2" placeholder="一句话陈述…" />
           <input v-model="fact.valid_until" class="field" placeholder="有效期 YYYY-MM（可选）" />
+          <!-- 事实挂在素材上，citation_missing / fact_stale 才追得到出处 -->
+          <select v-model="fact.source_id" class="field">
+            <option value="">不挂素材</option>
+            <option v-for="s in store.sources" :key="s.id" :value="s.id">
+              {{ s.title || '未命名素材' }}
+            </option>
+          </select>
           <button class="btn btn-primary btn-sm" :disabled="!fact.statement.trim() || busy" @click="submitFact">
             添加
           </button>
@@ -146,6 +208,10 @@
             </div>
           </div>
           <p class="ctx-total">总计 {{ ctx.total_chars }} 字符（不含目标字数）</p>
+          <!-- 素材桶现在按本节检索，得让人看得到「这一节到底会引用哪几条」 -->
+          <p v-if="ctx.used_sources && ctx.used_sources.length" class="ctx-total">
+            引用素材：{{ ctx.used_sources.map((s) => `${s.title}（${s.chars} 字）`).join('、') }}
+          </p>
           <p v-for="(w, i) in ctx.warnings" :key="i" class="warn-line">{{ w }}</p>
 
           <template v-if="ctx.evidence && ctx.evidence.length">
@@ -383,8 +449,19 @@ const staleCount = computed(
 )
 
 const src = ref({ title: '', url: '', published_at: '', content: '' })
-const fact = ref({ statement: '', valid_until: '' })
+const fact = ref({ statement: '', valid_until: '', source_id: '' })
 const term = ref({ term: '', preferred: '', forbiddenText: '' })
+
+// ---- 素材：添加区 / 检索 / 详情 ----
+const srcAdding = ref(false)
+const srcBusy = ref(false)
+const srcError = ref('')
+const srcQuery = ref('')
+const srcHits = ref([])
+const srcDetail = ref(null)
+const factsBusy = ref(false)
+const factsNote = ref('')
+const srcChars = computed(() => (src.value.content || '').length)
 
 // ---- 图谱 ----
 const KIND_LABEL = {
@@ -522,20 +599,106 @@ function barWidth(b) {
 }
 
 async function submitSource() {
-  busy.value = true
+  srcBusy.value = true
+  srcError.value = ''
   try {
-    const ok = await store.addSource({ ...src.value })
-    if (ok) src.value = { title: '', url: '', published_at: '', content: '' }
+    const payload = { ...src.value }
+    // 标题留空别让 prompt 里出现《未命名素材》：先取正文首行
+    if (!payload.title.trim()) payload.title = titleFromContent(payload.content)
+    if (await store.addSource(payload)) {
+      src.value = { title: '', url: '', published_at: '', content: '' }
+      srcAdding.value = false
+    } else {
+      srcError.value = store.error || '导入失败'
+    }
   } finally {
-    busy.value = false
+    srcBusy.value = false
+  }
+}
+
+function titleFromContent(text) {
+  const first = (text || '').split('\n').map((s) => s.trim()).find(Boolean) || ''
+  return first.slice(0, 40) || `素材 ${new Date().toLocaleDateString('zh-CN')}`
+}
+
+async function onPickFiles(e) {
+  await importFiles(Array.from(e.target.files || []))
+  e.target.value = ''
+}
+
+async function onDropFiles(e) {
+  await importFiles(Array.from(e.dataTransfer?.files || []))
+}
+
+/** 多选文件逐条导入：.txt/.md 是纯文本，读进来走同一套接口（后端会顺手建索引） */
+async function importFiles(files) {
+  const list = files.filter((f) => /\.(txt|md|markdown|text)$/i.test(f.name))
+  if (!list.length) {
+    srcError.value = '只支持 .txt / .md 纯文本；PDF 与 Word 请先另存为文本'
+    return
+  }
+  srcBusy.value = true
+  srcError.value = ''
+  let ok = 0
+  try {
+    for (const f of list) {
+      const text = await f.text()
+      const title = f.name.replace(/\.[^.]+$/, '').slice(0, 80) || titleFromContent(text)
+      if (await store.addSource({ title, content: text, url: '', published_at: '' })) ok += 1
+    }
+  } finally {
+    srcBusy.value = false
+  }
+  if (ok === list.length) {
+    srcAdding.value = false
+  } else {
+    // 添加区要留着，否则这条错误提示跟着一起被藏起来
+    srcError.value = `导入 ${ok}/${list.length} 条成功，其余失败：${store.error || '未知原因'}`
+  }
+}
+
+async function openSource(id) {
+  if (!id) return
+  factsNote.value = ''
+  srcDetail.value = await store.loadSource(id)
+  if (!srcDetail.value) srcError.value = store.error || '打不开这条素材'
+}
+
+async function removeSource(s) {
+  if (!s?.id) return
+  const name = s.title || '未命名素材'
+  if (!window.confirm(`删除素材「${name}」？\n\n正文与它的索引会一起删掉；已抽的事实卡保留，但会失去出处。`)) return
+  await store.deleteSource(s.id)
+  if (srcDetail.value?.id === s.id) srcDetail.value = null
+}
+
+async function searchSources() {
+  const q = srcQuery.value.trim()
+  srcHits.value = q ? await store.searchSources(q) : []
+}
+
+async function extractFacts(item) {
+  if (!item?.id) return
+  factsBusy.value = true
+  factsNote.value = ''
+  try {
+    const r = await store.extractFacts(item.id, 5)
+    factsNote.value = r
+      ? `已抽出 ${r.added} 条事实卡（可在「事实」里改或删）`
+      : (store.error || '抽取失败')
+  } finally {
+    factsBusy.value = false
   }
 }
 
 async function submitFact() {
   busy.value = true
   try {
-    const ok = await store.addFact({ ...fact.value })
-    if (ok) fact.value = { statement: '', valid_until: '' }
+    const ok = await store.addFact({
+      ...fact.value,
+      source_id: fact.value.source_id || null,
+    })
+    if (ok) fact.value = { statement: '', valid_until: '', source_id: '' }
   } finally {
     busy.value = false
   }
@@ -702,6 +865,133 @@ defineExpose({ refreshContext })
 .add-box .btn {
   margin-top: 8px;
   width: 100%;
+}
+
+/* 素材：入口常驻、拖放区、命中片段、详情 */
+.src-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.src-top .btn {
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+.drop {
+  display: block;
+  padding: 14px 10px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-control);
+  text-align: center;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease), color 0.18s var(--ease);
+}
+.drop:hover {
+  border-color: var(--run);
+  color: var(--text-muted);
+}
+.src-count {
+  margin: 6px 0 0;
+  font-family: theme('fontFamily.mono');
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.src-count.bad {
+  color: var(--warn);
+}
+.src-hits {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-control);
+  background: var(--panel-2);
+}
+.src-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.src-hit:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.src-hit-title {
+  font-size: 11.5px;
+  color: var(--run);
+}
+.src-hit-text {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-faint);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.src-item {
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease);
+}
+.src-item:hover {
+  border-color: var(--line);
+}
+.src-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel-2);
+}
+.src-detail-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.src-detail-head .item-title {
+  flex: 1;
+  -webkit-line-clamp: 3;
+}
+.src-link {
+  font-size: 10.5px;
+  color: var(--run);
+  word-break: break-all;
+  text-decoration: none;
+}
+.src-content {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 5px;
+  background: var(--ink-700, #1b1f26);
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.src-detail-act {
+  display: flex;
+  gap: 6px;
+}
+.src-detail-act .btn {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
 }
 .ctx-head {
   display: flex;

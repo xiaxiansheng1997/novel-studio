@@ -322,17 +322,65 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   async function addSource(payload) {
+    error.value = ''
     const r = await apiFetch(`/studio/works/${work.value.id}/sources`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
-    if (r.ok) await loadSources()
-    return r.ok
+    if (!r.ok) {
+      // 旧写法只回 ok，导入失败在界面上就是「点了没反应」
+      error.value = await errDetail(r, '导入素材失败')
+      return false
+    }
+    await loadSources()
+    return true
+  }
+
+  async function loadSource(id) {
+    const r = await apiFetch(`/studio/sources/${id}`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '打不开这条素材')
+      return null
+    }
+    return await r.json()
+  }
+
+  /** 只搜素材正文：scope=source，走与生成时同一套 FTS */
+  async function searchSources(q) {
+    if (!work.value || !q) return []
+    const r = await apiFetch(`/studio/works/${work.value.id}/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ q, scope: 'source', top_k: 10 }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '检索失败')
+      return []
+    }
+    const data = await r.json()
+    return data.hits || []
+  }
+
+  /** 从素材抽事实卡：抽完刷一次事实列表，否则面板上还是旧的 */
+  async function extractFacts(sourceId, limit = 5) {
+    error.value = ''
+    const r = await apiFetch(`/studio/sources/${sourceId}/facts/extract`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '抽取事实失败')
+      return null
+    }
+    await loadFacts()
+    return await r.json()
   }
 
   async function deleteSource(id) {
-    await apiFetch(`/studio/sources/${id}`, { method: 'DELETE' })
+    const r = await apiFetch(`/studio/sources/${id}`, { method: 'DELETE' })
+    if (!r.ok) error.value = await errDetail(r, '删除素材失败')
     await loadSources()
   }
 
@@ -1002,7 +1050,7 @@ export const useStudioStore = defineStore('studio', () => {
     activeWorkId, activeNodeId, template,
     loadTemplates, fetchWorks, createWork, updateWork, selectWork, selectNode, deleteWork,
     saveNode, createNode, deleteNode, moveNode,
-    loadSources, addSource, deleteSource,
+    loadSources, addSource, loadSource, searchSources, extractFacts, deleteSource,
     loadFacts, addFact, deleteFact,
     loadTerms, addTerm, deleteTerm,
     previewContext, generate, adoptGenerated, discardGenerated,

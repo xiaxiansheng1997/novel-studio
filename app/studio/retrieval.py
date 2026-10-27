@@ -113,6 +113,10 @@ async def retrieve(
             "node_id": c.get("node_id"),
             "source_id": c.get("source_id"),
             "ordinal": int(c.get("ordinal") or 0),
+            # 素材块没有章号，出处只能靠「第几段 + 原文第几字起」；
+            # 节点块用不上，但多两个字段比给素材单开一条通道便宜
+            "seq": int(c.get("seq_in_unit") or 0),
+            "start": int(c.get("char_start") or 0),
             "title": titles.get(src_key) or "未命名",
             "score": round(base + bonus, 4),
             "bm25": round(float(c["score"]), 4),

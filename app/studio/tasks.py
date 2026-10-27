@@ -22,7 +22,7 @@ from loguru import logger
 
 from app.core.errors import HumanVerifyRequired, NeedsLogin, ProviderBlocked, W2AError
 from app.studio import consistency, graph, indexer, prompting, scoring, summarizer
-from app.studio.assembler import assemble
+from app.studio.assembler import assemble, record_used_sources
 
 # 这些错误说明「人不在」，重试没有意义：必须暂停整条队列
 FATAL_ERRORS = (NeedsLogin, HumanVerifyRequired, ProviderBlocked)
@@ -162,6 +162,7 @@ async def run_draft(ctx: TaskContext) -> dict[str, Any]:
     task_type = "draft" if is_novel else "article_draft"
     result = await assemble(store, work, node, task_type, instruction,
                             template=ctx.template, resolved=ctx.resolved)
+    await record_used_sources(store, result)
 
     provider = ctx.gateway.resolve(ctx.model)[0]
     run_id = await store.start_run(
@@ -220,6 +221,7 @@ async def run_polish(ctx: TaskContext) -> dict[str, Any]:
     instruction = ctx.payload.get("instruction") or "只做语言层面的修改：错别字、病句、重复、标点；不改事实、结构与顺序。"
     result = await assemble(store, work, node, "polish", instruction,
                             template=ctx.template, resolved=ctx.resolved)
+    await record_used_sources(store, result)
     res = await ctx.gateway.complete(model=ctx.model, system=result.system,
                                     prompt=result.user, mode=ctx.mode)
     text = (res.text or "").strip()

@@ -1110,6 +1110,25 @@ class StudioStore:
             await self._db.commit()
         return (cur.rowcount or 0) > 0
 
+    async def mark_sources_used(self, source_ids: list[str]) -> int:
+        """记一次「这条素材真的进了 prompt」。
+
+        `sources.used` 从建表起就有，但一直没人写它，面板上也就没法告诉作者
+        哪条素材是死重。只预览不算，必须真的发出去——所以预览接口不调这里。
+        """
+        ids = [i for i in dict.fromkeys(source_ids) if i]
+        if not ids:
+            return 0
+        assert self._db is not None
+        marks = ",".join("?" for _ in ids)
+        async with self._lock:
+            cur = await self._db.execute(
+                f"UPDATE sources SET used = COALESCE(used, 0) + 1 WHERE id IN ({marks})",
+                ids,
+            )
+            await self._db.commit()
+        return cur.rowcount or 0
+
     async def add_fact(
         self, work_id: str, *, statement: str, source_id: Optional[str] = None,
         confidence: float = 1.0, valid_until: str = "",

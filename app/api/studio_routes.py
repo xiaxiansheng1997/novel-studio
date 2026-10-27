@@ -23,8 +23,8 @@ from pydantic import BaseModel, Field
 
 from app.core.auth import verify_key
 from app.llm.gateway import Gateway, pick_model
-from app.studio import content_types, consistency, graph, indexer, retrieval, summarizer
-from app.studio.assembler import assemble
+from app.studio import content_types, consistency, graph, indexer, prompting, retrieval, summarizer
+from app.studio.assembler import assemble, record_used_sources
 from app.studio.jsonutil import parse_json_loose as _parse_json_loose
 from app.studio.prompting import node_instruction as _node_instruction
 from app.studio.store import BackupError
@@ -102,6 +102,11 @@ class SourceCreate(BaseModel):
     kind: str = "note"
     content: str = Field(min_length=1)
     published_at: str = ""
+
+
+class FactsExtractRequest(BaseModel):
+    limit: int = 5
+    model: str = ""
 
 
 class FactCreate(BaseModel):
@@ -348,7 +353,8 @@ async def list_sources(work_id: str, request: Request, limit: int = 100):
 @router.post("/studio/works/{work_id}/sources", dependencies=[Depends(verify_key)])
 async def add_source(work_id: str, body: SourceCreate, request: Request):
     await _require_work(request, work_id)
-    return await _store(request).add_source(
+    store = _store(request)
+    created = await store.add_source(
         work_id,
         content=body.content,
         title=body.title,
@@ -356,6 +362,24 @@ async def add_source(work_id: str, body: SourceCreate, request: Request):
         kind=body.kind,
         published_at=body.published_at,
     )
+    # 导入即建索引：不建的话 S_src 只能退回「最近 5 条的开头」，
+    # 刚导进来的资料在第一次生成时压根不会被按内容选中。
+    try:
+        full = await store.get_source(created["id"])
+        if full:
+            await indexer.index_source(store, full)
+    except Exception as exc:  # noqa: BLE001 - 建索引失败不该让导入失败
+        logger.warning(f"[studio] 素材索引失败 id={created['id']}: {exc}")
+    return created
+
+
+@router.get("/studio/sources/{source_id}", dependencies=[Depends(verify_key)])
+async def get_source(source_id: str, request: Request):
+    """单条素材全文：列表不带正文（一条可能几万字），点开再看。"""
+    src = await _store(request).get_source(source_id)
+    if not src:
+        raise HTTPException(status_code=404, detail="素材不存在")
+    return src
 
 
 @router.delete("/studio/sources/{source_id}", dependencies=[Depends(verify_key)])
@@ -364,6 +388,36 @@ async def delete_source(source_id: str, request: Request):
     if not ok:
         raise HTTPException(status_code=404, detail="素材不存在")
     return {"ok": True}
+
+
+@router.post("/studio/sources/{source_id}/facts/extract", dependencies=[Depends(verify_key)])
+async def extract_source_facts(source_id: str, body: FactsExtractRequest, request: Request):
+    """从一条素材里抽事实卡。
+
+    素材是原文，事实卡是「一句可引用的话」。原来这两层之间只能靠人手工抄，
+    抄不动就等于没有；抽出来的卡带上 source_id，`citation_missing` / `fact_stale`
+    这类检查才追得到出处。
+    """
+    store = _store(request)
+    src = await store.get_source(source_id)
+    if not src:
+        raise HTTPException(status_code=404, detail="素材不存在")
+    gateway = _gateway(request)
+    model = pick_model(request.app.state.registry, body.model or None)
+    system, prompt = prompting.facts_prompt(src, limit=max(1, min(body.limit or 5, 10)))
+    res = await gateway.complete(model=model, system=system, prompt=prompt, mode="quick")
+    items = prompting.parse_facts(res.text or "")
+    if not items:
+        raise HTTPException(status_code=400, detail="模型没有给出能核对的事实，换条素材或重试")
+    created = []
+    for it in items:
+        created.append(await store.add_fact(
+            src["work_id"],
+            statement=it["statement"],
+            source_id=source_id,
+            valid_until=it["valid_until"],
+        ))
+    return {"ok": True, "model": model, "added": len(created), "facts": created}
 
 
 @router.get("/studio/works/{work_id}/facts", dependencies=[Depends(verify_key)])
@@ -513,6 +567,8 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
     )
     if not result.user.strip():
         raise HTTPException(status_code=400, detail="上下文为空：请先填写作品主旨或节点正文")
+    # 到这里 prompt 就一定要发出去了，素材用量记在此处（预览那条路不记）
+    await record_used_sources(store, result)
 
     gateway = _gateway(request)
     model = pick_model(request.app.state.registry, body.model or None)
@@ -537,6 +593,7 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
             "task_type": body.task_type,
             "buckets": [b.as_dict() for b in result.buckets],
             "warnings": result.warnings,
+            "used_sources": result.used_sources,
             "total_chars": result.total_chars,
         })
         try:

@@ -221,6 +221,11 @@
                 </span>
                 <span class="gen-meta">{{ genMetaText }}</span>
               </header>
+              <!-- 装配阶段就有的告警（素材没索引、预算不够、摘要过期）原来只在「上下文」里能看到 -->
+              <p v-for="(w, i) in (store.genMeta?.warnings || [])" :key="'gw' + i" class="gen-warn">{{ w }}</p>
+              <p v-if="store.genMeta?.used_sources?.length" class="gen-src">
+                引用素材：{{ store.genMeta.used_sources.map((s) => s.title).join('、') }}
+              </p>
               <pre v-if="store.genText" class="gen-text">{{ store.genText }}</pre>
               <p v-if="store.genError" class="gen-err">{{ store.genError }}</p>
               <footer v-if="!store.generating && store.genText" class="gen-actions">
@@ -1398,6 +1403,17 @@ async function applyTitle(text, target) {
   margin-top: 9px;
 }
 .gen-tip {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.gen-warn {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--warn);
+}
+.gen-src {
+  margin: 4px 0 0;
   font-size: 11px;
   color: var(--text-faint);
 }
