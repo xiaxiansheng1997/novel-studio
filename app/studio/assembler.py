@@ -29,7 +29,9 @@ TASK_BUCKETS = {
     "beats": ["S1", "S2", "S3", "S4", "S6", "S8"],
     "draft": ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"],
     "check": ["S1", "S2", "S4", "S6", "S7"],
-    "polish": ["S0", "S1", "S7", "S8"],
+    # 润色也要看见作品圣经与素材：只给正文的话，模型改完会把主旨里定好的口径写偏，
+    # 也没处核对数字与专名（润色不该引入新事实，但它得知道哪些是既有事实）。
+    "polish": ["S0", "S1", "S2", "S_src", "S7", "S8"],
     "summarize": ["S7"],
 }
 
@@ -353,13 +355,16 @@ async def assemble(
         sources = await store.list_sources(work["id"], limit=5)
         if not sources:
             buckets.pop("S_src", None)
-            if resolved.get("requires_sources"):
-                warnings.append(
-                    f"该类型（{resolved.get('subtype_label') or kind}）要求有素材，当前一条都没有："
-                    "模型只能靠已有知识写，事实错误风险高"
-                )
-            elif kind == "article":
-                warnings.append("该作品还没有素材，生成质量会明显下降（建议先导入资料）")
+            # 「缺素材」这句只对写新内容的人有用：润色不动事实，
+            # 每次润色都弹一句「质量会明显下降」只会让人以为得停下先去导资料。
+            if task_type in _DRAFT_TASKS:
+                if resolved.get("requires_sources"):
+                    warnings.append(
+                        f"该类型（{resolved.get('subtype_label') or kind}）要求有素材，当前一条都没有："
+                        "模型只能靠已有知识写，事实错误风险高"
+                    )
+                elif kind == "article":
+                    warnings.append("该作品还没有素材，生成质量会明显下降（建议先导入资料）")
         else:
             chunks = []
             remain = buckets["S_src"].budget

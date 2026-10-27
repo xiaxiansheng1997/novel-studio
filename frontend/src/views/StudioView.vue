@@ -112,7 +112,37 @@
             <button class="icon-btn" title="返回书架" @click="backToShelf">
               <AppIcon name="library" :size="16" />
             </button>
-            <span class="ed-work">{{ store.work.title }}</span>
+            <div class="ed-work-wrap">
+              <button class="ed-work" title="改作品标题与主旨" @click="toggleWorkEdit">
+                <span class="ed-work-name">{{ store.work.title }}</span>
+                <AppIcon name="pen" :size="12" />
+              </button>
+              <div v-if="workEditOpen" class="work-pop">
+                <label class="fl">
+                  <span>作品标题</span>
+                  <input
+                    v-model="workTitleDraft"
+                    class="field"
+                    placeholder="这篇叫什么"
+                    @keydown.enter.prevent="saveWorkMeta"
+                  />
+                </label>
+                <label class="fl">
+                  <span>一句话主旨</span>
+                  <textarea v-model="workPremiseDraft" class="field" rows="3"
+                            placeholder="这篇要替读者讲清楚什么"></textarea>
+                </label>
+                <p class="work-pop-tip">主旨进每一轮生成的上下文，改完下一节就生效。</p>
+                <div class="work-pop-act">
+                  <button class="btn btn-sm" @click="workEditOpen = false">取消</button>
+                  <button
+                    class="btn btn-primary btn-sm"
+                    :disabled="savingWork || !workTitleDraft.trim()"
+                    @click="saveWorkMeta"
+                  >{{ savingWork ? '保存中…' : '保存' }}</button>
+                </div>
+              </div>
+            </div>
             <span v-if="store.template" class="pill pill--info">{{ store.template.name }}</span>
             <span class="ed-save">{{ saveLabel }}</span>
             <div class="ed-right">
@@ -156,7 +186,7 @@
           <div v-if="!store.node" class="ed-empty">
             <AppIcon name="pen" :size="20" />
             <h2>选一个节点开始</h2>
-            <p>左侧点「+」建卷/章，或在空白作品里直接建第一节。</p>
+            <p>{{ emptyHint }}</p>
           </div>
 
           <template v-else>
@@ -267,7 +297,8 @@
               <select v-model="taskType" class="field task-select">
                 <option value="article_draft">写本节</option>
                 <option value="continue">续写</option>
-                <option value="polish">润色</option>
+                <!-- 润色是对已有正文动手，空节选它只会让模型凭骨架瞎编（后端也会拦） -->
+                <option value="polish" :disabled="!wordCount">润色{{ wordCount ? '' : '（需正文）' }}</option>
               </select>
               <!-- 提示词：单行 input 写长了只看得到尾巴，换成随内容长高的多行框 -->
               <textarea
@@ -302,6 +333,7 @@
       v-model:open="transformOpen"
       :text="contentDraft"
       :selection="selectedText"
+      :instruction="instruction"
       @adopt="onTransformAdopt"
     />
   </div>
@@ -347,6 +379,29 @@ const subtypes = computed(() => currentKind.value?.subtypes || [])
 
 const transformOpen = ref(false)
 const selectedText = ref('')
+
+// ---- 作品信息（标题 / 主旨）就地可改 ----
+const workEditOpen = ref(false)
+const workTitleDraft = ref('')
+const workPremiseDraft = ref('')
+const savingWork = ref(false)
+
+/**
+ * 当前作品那一档规模的层级信息，来自 /studio/content-types（content-types.yaml）。
+ * 前端不再自己猜层级：单篇只有一层「节」，系列才有「讲」，小说才有「卷」。
+ */
+const scaleMeta = computed(() => {
+  const k = kinds.value.find((x) => x.id === store.work?.kind)
+  return k?.scales?.find((s) => s.id === store.work?.scale) || null
+})
+const leafLabel = computed(() => scaleMeta.value?.leaf_label || '节')
+const containerLabel = computed(() => scaleMeta.value?.container_label || '')
+const emptyHint = computed(() =>
+  containerLabel.value
+    ? `左侧点「+」先建${containerLabel.value}，再在里面建${leafLabel.value}。`
+    : `这一档只有「${leafLabel.value}」一层：点左侧「+」建第一${leafLabel.value}，`
+      + '或先点「大纲」按模板把目录落成节点。',
+)
 
 // ---- 队列（M4） ----
 const queueHidden = ref(false)
@@ -480,6 +535,8 @@ watch(() => route.params.id, (id) => {
   if (id && id !== store.activeWorkId) openWork(id)
 })
 
+watch(() => store.work?.id, () => { workEditOpen.value = false })
+
 watch(() => store.node?.id, () => {
   titleDraft.value = store.node?.title || ''
   contentDraft.value = store.node?.content || ''
@@ -560,8 +617,15 @@ async function create() {
 
 async function quickCreate(parent) {
   const depth = parent ? parent.depth + 1 : 0
-  const kind = depth === 0 ? (store.work.kind === 'novel' ? 'volume' : 'section') : 'section'
-  const title = kind === 'volume' ? `第 ${store.tree.filter((n) => n.depth === 0).length + 1} 卷` : '新节点'
+  // 层级跟着配置走：单篇没有容器层，根上的「+」就该直接建节。
+  // 照小说的话术去建「卷」，只会让人以为单篇也得先搭一个壳。
+  const meta = scaleMeta.value
+  const container = depth === 0 && meta?.container_kind ? meta.container_kind : ''
+  const kind = container || meta?.leaf_kind || (store.work.kind === 'novel' ? 'chapter' : 'section')
+  const label = (container ? meta.container_label : meta?.leaf_label) || '节点'
+  const title = container
+    ? `第 ${store.tree.filter((n) => n.depth === 0).length + 1} ${label}`
+    : `新${label}`
   const n = await store.createNode({ kind, title, parent_id: parent?.id || null })
   if (n) titleDraft.value = n.title
 }
@@ -618,6 +682,28 @@ async function changeStatus(e) {
   await store.saveNode({ status: e.target.value }, { snapshot: true })
 }
 
+function toggleWorkEdit() {
+  workEditOpen.value = !workEditOpen.value
+  if (workEditOpen.value) {
+    workTitleDraft.value = store.work?.title || ''
+    workPremiseDraft.value = store.work?.premise || ''
+  }
+}
+
+async function saveWorkMeta() {
+  const title = workTitleDraft.value.trim()
+  if (!title || !store.work) return
+  savingWork.value = true
+  const ok = await store.updateWork({ title, premise: workPremiseDraft.value.trim() })
+  savingWork.value = false
+  if (!ok) {
+    showNotice(store.error || '保存失败', true)
+    return
+  }
+  workEditOpen.value = false
+  showNotice('作品信息已更新')
+}
+
 // 提示词框最多长到几行，再往上就自己滚；CSS 里 .gen-input 的 max-height 要和它对齐
 const INSTR_MAX_ROWS = 6
 
@@ -649,6 +735,11 @@ function onInstructionKeydown(e) {
 
 async function runGenerate() {
   if (store.generating || !store.node) return
+  if (taskType.value === 'polish' && !contentDraft.value.trim()) {
+    // 下拉框已经禁了「润色」，这里是快捷键那条路兜底
+    showNotice('润色要有正文：这一节还是空的，先写正文或切到「写本节」', true)
+    return
+  }
   // 有未保存改动先落盘，否则装配用的是旧正文
   await flushSave()
   await store.generate({ task_type: taskType.value, instruction: instruction.value })
@@ -656,7 +747,9 @@ async function runGenerate() {
 
 async function adopt() {
   const append = taskType.value === 'continue'
-  await store.adoptGenerated({ append })
+  // 版本来源按任务标：右栏「历史」里 AI 润色与 AI 草稿要能分开看
+  const source = taskType.value === 'polish' ? 'ai_polish' : 'ai_draft'
+  await store.adoptGenerated({ append, source })
   contentDraft.value = store.node?.content || ''
 }
 
@@ -683,8 +776,9 @@ async function doOutline() {
     ? window.confirm('已有内容节点。确认追加一套新目录吗？（取消则中止）')
     : false
   if (hasNodes && !append) return
-  const r = await store.generateOutline({ instruction: instruction.value, append })
-  if (r) instruction.value = ''
+  // 提示词框那句跑完大纲不清空：它同时是逐节生成要用的那一句，
+  // 一清就是把用户刚写的要求抹掉，接着生成还得重打一遍
+  await store.generateOutline({ instruction: instruction.value, append })
 }
 
 async function doPipeline() {
@@ -778,8 +872,13 @@ function openTransform() {
   transformOpen.value = true
 }
 
-/** 采用加工结果：有选区就替换选区，否则整节替换 */
-function onTransformAdopt(text) {
+/** 采用加工结果：起标题回填标题，其余有选区替换选区、没选区替换整节 */
+function onTransformAdopt(payload) {
+  if (payload && typeof payload === 'object' && payload.action === 'title') {
+    applyTitle(payload.text, payload.target)
+    return
+  }
+  const text = typeof payload === 'string' ? payload : payload.text
   const el = editorEl.value
   if (el && el.selectionStart !== el.selectionEnd) {
     const s = el.selectionStart
@@ -790,6 +889,24 @@ function onTransformAdopt(text) {
   }
   saveState.value = 'dirty'
   flushSave()
+}
+
+/**
+ * 起标题的落点两个：本节标题，或作品标题。
+ * 单篇发公众号时真正当文章标题用的是作品标题（导出那句 `# 作品标题`），
+ * 所以两个都得给，只回一个会逼人在两处之间手工搬字。
+ */
+async function applyTitle(text, target) {
+  const clean = (text || '').replace(/[《》]/g, '').trim().slice(0, 120)
+  if (!clean) return
+  if (target === 'work') {
+    if (await store.updateWork({ title: clean })) showNotice(`作品标题已改成「${clean}」`)
+    else showNotice(store.error || '改作品标题失败', true)
+    return
+  }
+  titleDraft.value = clean
+  await store.saveNode({ title: clean })
+  showNotice(`本节标题已改成「${clean}」`)
 }
 </script>
 
@@ -986,13 +1103,82 @@ function onTransformAdopt(text) {
   border-bottom: 1px solid var(--line-soft);
   background: rgba(17, 19, 24, 0.7);
 }
+.ed-work-wrap {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
 .ed-work {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 240px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
   font-size: 12.5px;
   color: var(--text-muted);
-  max-width: 240px;
+  cursor: pointer;
+  transition: color 0.18s var(--ease), border-color 0.18s var(--ease),
+    background-color 0.18s var(--ease);
+}
+.ed-work-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.ed-work:hover,
+.ed-work:focus {
+  color: var(--text);
+  border-color: var(--line);
+  background: var(--panel-2);
+  outline: none;
+}
+/* 作品信息就地编辑：贴着标题往下展开，不弹到屏幕中间打断写作 */
+.work-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+  box-shadow: 0 18px 44px -20px rgba(0, 0, 0, 0.8);
+}
+.work-pop .fl {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.work-pop .fl > span {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.work-pop .field {
+  width: 100%;
+}
+.work-pop textarea {
+  resize: vertical;
+  line-height: 1.7;
+}
+.work-pop-tip {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.6;
+}
+.work-pop-act {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 .ed-save {
   font-size: 11px;

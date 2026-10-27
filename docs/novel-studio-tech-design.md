@@ -693,13 +693,18 @@ assemble(work_id, node_id, task_type, instruction) -> AssemblyResult
 | `beats` | novel | S1 S2 S3 S4 S6 | 章纲，需伏笔与人物状态 |
 | `draft` | novel | 全部 | 章草稿，主场景 |
 | `continue` | 两形态 | 全部 + S7 | 续写，正文权重最高 |
-| `polish` | 两形态 | S0 S1 S2 S7 S8 | 不需要检索，改写为主 |
+| `polish` | 两形态 | S0 S1 S2 S_src S7 S8 | 不需要检索，改写为主；但必须看得见主旨与素材（v2.1 补） |
 | `check` | novel | S1 S2 S4 S6 S7 | 一致性检查，重图谱 |
 | `article_outline` | article | S0 S1 S2 | 生成标题与节骨架 |
 | `article_draft` | article | S0 S1 S2 S_src S7 S8 | 逐节生成，素材是主体 |
 | `assemble` | article | S1 S2 S7 | 拼接与过渡句 |
 | `fact_check` | article | S2 S_src S7 | 事实与来源核对 |
 | `summarize` / `extract` | 两形态 | S7 | 只喂正文 |
+
+**口径校准（v2.1）**：本表是设计期写法，真正生效的是 `assembler.TASK_BUCKETS`；而**起草类任务**
+（`article_draft` / `continue` / `draft`）的桶集合由 `content-types.yaml` 里该 kind/scale/subtype 的
+`buckets` 决定，不看这张表。本轮把 `polish` 从 `S0 S1 S7 S8` 补成 `S0 S1 S2 S_src S7 S8`：
+润色不该引入新事实，但它得知道哪些是既有事实，否则改完语言会把主旨里定好的口径写偏。
 
 ## 7. 记忆层
 
@@ -1102,7 +1107,8 @@ DELETE /studio/works/{id}
 GET    /studio/works/{id}/tree              # 卷/章 或 节大纲（含状态、字数）；树序来自 path
 POST   /studio/works/{id}/nodes             # {parent_id, kind, title}
 GET    /studio/nodes/{id}
-PATCH  /studio/nodes/{id}                   # 正文保存、状态流转（snapshot=true 另存一版）
+PATCH  /studio/nodes/{id}                   # 正文保存、状态流转（snapshot=true 另存一版；
+        # snapshot_source 只认 human|ai_draft|ai_polish，其余 400；不传按 human）
 POST   /studio/nodes/{id}/move              # {direction: up|down} 与同层紧邻兄弟互换，章号一起对调
 GET    /studio/nodes/{id}/versions          # 列表只给 版本号/时间/来源/字数
 GET    /studio/nodes/{id}/versions/{vid}    # 读回那一版全文（v2.0 补）
@@ -1116,9 +1122,14 @@ POST   /studio/backups/{name}/restore       # 找回那一节（连子树与历�
 POST   /studio/nodes/{id}/generate           # {task_type, instruction, save, variant}
         # SSE: meta → delta* → done；article_draft|continue|polish
         # 生成与正文分离：save=false 只回流，用户点「采用」才写库
+        # article_draft|draft 时 instruction 先过 prompting.node_instruction 包装（与 /pipeline、队列同口径），
+        #   提示词留空也拿得到「本节标题/本节要点/篇幅/只输出本节正文」；/context/preview 走同一个 _instruction_for
+        # polish 且该节正文为空 → 400（没有正文就没有可润色的，否则模型照骨架凭空编）；save=true 落库时来源按任务标
 
 # 内容类型（已实现）
 GET    /studio/content-types                 # kind → scales → subtypes，前端下拉框数据源
+        # 每个 scale 另带 leaf_kind/leaf_label 与 container_kind/container_label：
+        #   前端建节点与空态文案跟着真实层级走（单篇只有「节」，不再写「先建卷/章」）
 POST   /studio/content-types/reload          # 改完 content-types.yaml 后重读 + 同步模板
 
 # 大纲 → 逐节 → 拼装（已实现）
@@ -1130,7 +1141,8 @@ GET    /studio/works/{id}/export             # 下载 Markdown（Content-Disposi
 
 # 加工（已实现，无作品上下文也能用）
 POST   /studio/transform                     # {text, action, candidates, instruction, lang, work_id}
-        # action: rewrite|condense|expand|polish|translate|split|merge
+        # action: rewrite|condense|expand|polish|translate|split|merge|title
+        # title 换一套 system（「只输出标题，一行一个」），否则默认那句会把标题写成一段散文
         # 返回 {candidates: [{variant, run_id, text, chars, elapsed_ms}], errors}
         # 每个候选记一条 runs，variant 递增，为后续盲评/自动打分留位
 
@@ -1209,11 +1221,16 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 
 关键交互：
 
-1. **生成与正文分离**：AI 草稿先在下方预览区展示，点「采用」才写回正文（`save=false`）
+1. **生成与正文分离**：AI 草稿先在下方预览区展示，点「采用」才写回正文（`save=false`）；采用时按任务标来源，
+   下拉框里的「润色」在该节还没正文时直接禁用（快捷键那条路也兜一道），免得对着空节润色
 2. **上下文预算条**：把 `context/preview` 的各桶画成条形，看得到 S1/S2/S3/S4/S6/S5/S_src/S7/S8 各占多少——调 prompt 的必备工具
 3. **告警定位（已实现）**：告警带证据引文，点「定位」高亮正文对应片段并滚到可视区；「忽略」单条销账。硬告警与软告警分两组渲染（见 9.5）
 4. **图谱（列表 + 力导向图，均已实现）**：右栏按类型分组列出实体（带已死/已毁标签、设定卡标记）、关系三栏「源—类型—目标」、未回收伏笔；列表上方「图形视图」打开 `GraphMap.vue`（详细设计见 12.1）
 5. **任务队列（已实现）**：底部一条队列条，显示当前任务、排队/完成数、ETA 与暂停原因；抽检时展开样本卡（标题 + 分数）与「可用/重写」两个按钮；队列空闲后自动收起，不占地方
+6. **加工弹窗带本轮要求（v2.1）**：打开弹窗时把底部提示词框那句填进「附加要求」，不用在两个地方抄同一句话；
+   「起标题」这个动作默认取整节正文（看选区那几行起不出准标题），结果按行拆开，每行两个按钮分别回填本节标题与作品标题
+7. **作品信息就地可改（v2.1）**：编辑器顶部的作品名是可点的，展开即改标题与主旨；「大纲」跑完不再清空提示词框——
+   那一句同时是逐节生成要用的，清掉等于抹掉用户刚写的要求
 
 ### 12.1 图谱力导向视图（`frontend/src/components/GraphMap.vue`）
 
@@ -1244,6 +1261,7 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | **M4 流水线**（已完成 2026-10-25） | 任务队列（单 worker/优先级/幂等）、断点与启动自恢复、风控暂停与退避重试、六种执行器（beats/draft/polish/summarize/extract/check）、5 维自动打分、抽检卡点、队列面板 | 一次提交 N 章无人值守跑完：3 章 90 秒；抽检卡点可停可续；重启后自动续跑 | 已完成 |
 | **插在 M4 与 M5 之间**（已完成 2026-10-25） | 四条软规则（称呼漂移/设定冲突/绝对化表述/数字无出处，零 LLM）、告警分「硬/待确认」两组、图谱力导向可视化与实体详情 | 真实语料 + 全部历史作品离线扫描 0 误报（`scripts/smoke_soft_rules.py`）；打开图谱能看到谁和谁连着、谁已死、哪条关系过期 | 已完成 |
 | **插在 M5 之前 · 改稿的四条退路**（已完成 2026-10-26） | 摘要按内容指纹过期（`summaries.ref_hash` + 失效传播，S3/S4 只注入新鲜的，右栏报「N 节摘要待重算」）、版本历史读得回也点得回去（`source`/`run_id` 标注 + 右栏「历史」并排比对 + 回滚）、章节同层上下移（`store.move_node`，章号在库里的十份拷贝一起对调）、删除前自动备份（节点 JSON + 整库副本 `VACUUM INTO` 一致快照，写不成即拒绝删除，`scripts/restore_backup.py` 找回；恢复只带正文与版本，顺手把上游摘要判过期） | 全量 169 passed，**零真实模型调用**（测试内用假 gateway）：改完正文摘要真的重算、没改则跳过；回滚不吃未保存改动；交换后图谱章号正确且唯一约束不炸；备份失败时删不掉；删卷时插队挤进子树的那一节不会「被删了而备份里没有」 | 已完成 |
+| **插在 M5 之前 · 单篇写作体验六条**（已完成 2026-10-27） | 交互式生成补上 `node_instruction` 包装（`_instruction_for` 与预览共用）、polish 桶补 S2/S_src 且「缺素材」告警收窄到起草类、`/transform` 加 `title` 动作、作品标题与主旨就地可改、加工弹窗带底部指令、润色空正文拦截 + 版本来源按任务标（`_VERSION_SOURCES` 白名单） | 全量 195 passed，**零真实模型调用**：留空提示词生成的 prompt 里真的有「本节标题/篇幅/只输出本节正文」，且与 `node_instruction` 逐字一致；预览与生成发出去的是同一份；空节润色 400；`ai_polish` 落在版本表里而非法来源被拒；单篇 scale 的 `container_kind` 为 `None` | 已完成 |
 | **M5 向量（可选）** | fastembed 接入、向量召回、RRF 融合、检索评测 | 语义查询召回优于纯关键词 | 3-4 天 |
 
 总计约 **4-5 周**（连续开发）；业余时间按 8-10 周估。M1 结束时系统就可用（能写单篇与单章），后续都是增强。
@@ -1360,6 +1378,7 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | 26 | 力导向布局稳定性 | 把 `GraphMap.vue` 里真实的 `tick()` 源码切片出来在 Node 里跑 N=17/60/160 | 打开图谱要不要等、会不会飞 | 已测：三档均 0 NaN、0 节点重叠，关系长度中位 137/198/272；据此把参数从 3400/96/0.014 调成 7200/104/0.006 并加上自适应向心力 |
 | 27 | 软规则回归覆盖 | `tests/test_soft_rules.py`；全量 pytest | 规则改动是否退化 | 已测：35 用例（一半是「第一步」「唯一凭据」「8000 / `503` / 1.18.0」这类**不该报**的回归）；全量 125 passed（含 `tests/test_store_delete.py` 8 例） |
 | 28 | 改稿四条退路 | `tests/test_studio_memory.py` / `test_studio_versions.py` / `test_studio_reorder.py` / `test_studio_backup.py`，全部假 gateway、零网络 | 改完稿子记忆是否还可信、删错了能不能找回 | 已测：4 个文件共 46 例，全量 171 passed。关键回归：正文没变时第二次摘要调用被跳过（不因哈希口径白烧调用）、同一实体在第 2/3 章各有一条 `entity_states` 时交换不炸 UNIQUE 约束（两步取负法的存在理由）、备份写失败时删除被拒绝且库里一个字没少、**删除真正带走的那几个 id 与备份里的完全一致**（插队挤进子树的那一节不得静悄悄消失）、找回后卷与全书摘要 `fresh` 变假且 `index_state.dirty=1`、清理的保留名额只认真备份（`.part` 与丢进目录的别的文件都不占）、脚本与恢复共用同一个备份结构判据 |
+| 29 | 交互式生成的指令口径 | `tests/test_studio_instructions.py`（13 例，全假 gateway + tmp 库，零网络） | 留空提示词是否等于无指令裸跑、润色是否看得见主旨 | 已测：全量 195 passed。关键回归：`article_draft` 空 instruction 时发出去的 prompt 与 `node_instruction()` 输出**逐字一致**（旧代码是裸传，S8 整块不出现）、`context/preview` 与 `generate` 同一份口径、polish 桶含 S2/S_src 而「生成质量会明显下降」不再每次润色都弹、空节润色 400、`save=true` 的润色版本来源是 `ai_polish`、`snapshot_source` 乱填 400、`action=title` 走的是「公众号编辑」那套 system、`content-types` 给得出单篇的 `leaf_label=节` 且 `container_*` 为 `null` |
 
 ## 17. 与现有代码的接入点
 
@@ -1375,6 +1394,7 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | `scripts/smoke_m1_tail.py` / `smoke_m2.py` / `smoke_m3.py` / `smoke_m4.py` / `smoke_soft_rules.py` / `cleanup_works.py`（含 `--sweep-orphans`）/ `restore_backup.py`（含 `--list` / `--name` / `--yes`）/ `shot_studio.py` | 无（验收/维护脚本，全部离线可跑） | 新增文件 |
 | `tests/test_store_delete.py` | `store.delete_work / delete_node / delete_source / orphan_counts / sweep_orphans`、`indexer.index_node / index_source` | 否（补的是无外键保护那几张表的漏清回归） |
 | `tests/test_studio_memory.py` / `test_studio_versions.py` / `test_studio_reorder.py` / `test_studio_backup.py` | `store.update_node / move_node / restore_version / delete_node / delete_work / restore_node_backup`、`summarizer.summarize_*`、`assembler`（S3/S4）、`indexer.index_status` | 否（全是 tmp 库 + 假 gateway，不发一次真实调用） |
+| `tests/test_studio_instructions.py` | `assembler.assemble`（polish 桶与 warnings）、`studio_routes._instruction_for`（generate / context/preview）、`prompting.node_instruction`、`PATCH /studio/nodes`、`POST /studio/transform`、`GET /studio/content-types` | 否（同上；接口层用 `app.state.gateway` 桩，`stream` 是异步生成器） |
 | `frontend/src/utils/diff.js` | 无（不引依赖，现有 deps 里没有 diff 库） | 新增文件；`StudioPanel.vue` 加「历史」页、`StudioTree.vue` 加上下移、`StudioView.vue` 接回滚与备份提示 |
 | `storage/studio.sqlite` | — | 新增文件 |
 | `docs/reverse-proxy.md` | — | 新增文件：README 里的纯反代内容搬过去（`/v1` 用法、四模式与文案校准、风控排查细则、底座侧已知限制），README 只讲写作主线 |
@@ -1389,4 +1409,6 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 
 ---
 
-*文档版本：v2.0 · README 重写为写作主线（H1 改成「写作工作室（Novel Studio）」），纯反代那一半拆到 `docs/reverse-proxy.md`（含 `m0-baseline.md` 里那条「常见问题第 1 条」的指向修正）；M0 已完成（`docs/m0-baseline.md`）；M1 已完成（建表/网关/内容类型外置/大纲流水线/拼装导出/加工多候选/新 UI）；M2 已完成（分块/FTS5+jieba/三段式摘要/S3-S4-S5 注入/证据面板）；M3 已完成（图谱抽取与合并/设定卡/BFS 子图/S6/9 条硬规则/告警定位）；M4 已完成（任务队列/断点与启动自恢复/风控暂停/六种执行器/5 维打分/抽检卡点/队列面板）；v1.7 补上四条软规则（零 LLM、只出 info、不参与打分，见 9.4/9.5）、图谱力导向可视化（见 12.1）、清掉书架上的测试作品，以及三处文档与实现的偏差处理（`chunk_vectors` 尚未建表，见 15.3；告警不阻塞定稿——未实现，已如实写明，见 9.5；`delete_work` 漏清 `jobs`/`runs`/`index_units`/`chunks_fts` 已修并补回归测试，见 5.4）；v1.8 把同一个坑的另两条路径一并修完（`delete_node`/`delete_source` 清 `chunks_fts`/`index_units`/`summaries`，`orphan_counts`/`sweep_orphans` 改成按「指向的节点/素材还在不在」判，见 5.4/5.5）。v2.0 补上「改完稿子的四条退路」（分阶段路线表里「插在 M5 之前」那一行，回归见第 16 章 #28）：①**摘要按内容指纹过期**——旧版只比 `ref_ordinal`，改完正文拿回的仍是上一版摘要，那不是旧记忆是假记忆；新列 `summaries.ref_hash` 的口径是**未 strip 的原文**（与 `nodes.content_hash` 同源），这一条是个陷阱：按 strip 后的文本算会让每次保存都判过期，等于每次白烧一次模型，所以有专门的回归测着；容器/全书摘要没有单一源文本，靠失效传播把 `ref_hash` 置成 `''`，读取侧带 `fresh` 布尔，S3/S4 只注入新鲜的、被跳过的写进 `warnings`；②**版本历史读得回也点得回去**——`source` 不再写死 `'human'`（`ai_draft`/`ai_polish`/`human` 与 `run_id` 按调用方标注），`get_version`/`restore_version` 补上读回与回滚，回滚前必先把「当下还没进版本表的正文」存一版，否则那不是回滚是删稿；③**章节同层上下移**——`move_node` 不只换 `nodes.ordinal`：「第几章」在库里一共存了十份拷贝（跨 `entities`/`relations`/`events`/`entity_states`/`foreshadows` 五张表），对调统一走「先取负再 CASE」两步，否则 `entity_states UNIQUE(entity_id, ordinal)` 与 `relations` 的复合唯一键会在中间态炸；**同时换 `nodes.path`**（含子树前缀重挂）——计划原本写「不动 path」，但树序读 `path`、生成序读 `ordinal`，只换一头两者就分裂；内容没变所以不重算索引与摘要，只把 `index_state.dirty` 置 1；④**删除前自动备份**——`node_versions` 是 `ON DELETE CASCADE`、`delete_node` 按 path 前缀物理删整棵子树，三次点击之内没有任何一步能反悔，而那是用户的稿子；现在删节写 `storage/backups/nodes/*.json`（留 20 份）、删作品取整库副本（留 5 份），**备份写不成即拒绝删除**（宁可删不掉，不能删了找不回），找回走 `scripts/restore_backup.py` 与 `GET /studio/backups` / `POST /studio/backups/{name}/restore`。同日评审又补一轮，把这一条里最危险的一处收干净：快照、落盘、删除原本分**两次**持锁，锁一放、已经在等锁的 `create_node` 就能挤进这棵子树，接着被 `path LIKE` 前缀连带删掉——备份里没有它，等于「删了还宣称备份过」，现在三步在同一次持锁里做完、删除谓词直接复用那份快照；整库副本从 `shutil.copy2` 热拷改成锁内 `VACUUM INTO`（本库是默认的 rollback journal 模式，热拷既不参与 SQLite 的文件锁协议、也不会把 `-journal` 一起拷走，撞上在途写事务时拷出来那份要么打不开要么少了最近几笔，比没备份更坏——它把人的心理保险买走了）；备份失败的 500 只回一句固定文案、完整原因进日志（`detail` 会原样显示到界面上，而那句原话带着库与备份目录在本机的位置）；`restore_node_backup` 末尾补上「上游卷/全书摘要判过期 + 库标脏」（备份只带正文与版本，不这么一来找回的那一节会顶着「没有它」那一版的摘要继续被 S3 注入，而右栏看不见）；另外写备份走临时名再 `os.replace`（半截 JSON 的 mtime 最新，会被保留策略当成最近一份留下）、旧备份清理失败不再拦住删除、`--list` 与试运行不再 `init()` 数据库。同日再评审一轮，收尾两处：保留策略从 `iterdir()` 改成只认 `*.json` / `*.sqlite` 名单（旧写法实测会把最新那一份真备份连同别人丢进目录的文件一起删掉——半截 `.part` 的 mtime 恰恰最新），备份结构校验抽成 `store.check_node_bundle` 供脚本与恢复共用（原先 `peek` 的判据比 store 的拒绝条件松，空 `nodes`、条目不是对象、没写 work_id 都放行，脚本于是把坏备份报成「这本书已经整本删除」）。四条全部**零真实模型调用可验证**（测试内假 gateway + tmp 库），全量 171 passed。待实测 #1/#5 已交接给作者在实际写作中判断。下一步 M5 向量（可选）：fastembed + 向量召回 + RRF，届时要从建表开始。*
+*文档版本：v2.0 · README 重写为写作主线（H1 改成「写作工作室（Novel Studio）」），纯反代那一半拆到 `docs/reverse-proxy.md`（含 `m0-baseline.md` 里那条「常见问题第 1 条」的指向修正）；M0 已完成（`docs/m0-baseline.md`）；M1 已完成（建表/网关/内容类型外置/大纲流水线/拼装导出/加工多候选/新 UI）；M2 已完成（分块/FTS5+jieba/三段式摘要/S3-S4-S5 注入/证据面板）；M3 已完成（图谱抽取与合并/设定卡/BFS 子图/S6/9 条硬规则/告警定位）；M4 已完成（任务队列/断点与启动自恢复/风控暂停/六种执行器/5 维打分/抽检卡点/队列面板）；v1.7 补上四条软规则（零 LLM、只出 info、不参与打分，见 9.4/9.5）、图谱力导向可视化（见 12.1）、清掉书架上的测试作品，以及三处文档与实现的偏差处理（`chunk_vectors` 尚未建表，见 15.3；告警不阻塞定稿——未实现，已如实写明，见 9.5；`delete_work` 漏清 `jobs`/`runs`/`index_units`/`chunks_fts` 已修并补回归测试，见 5.4）；v1.8 把同一个坑的另两条路径一并修完（`delete_node`/`delete_source` 清 `chunks_fts`/`index_units`/`summaries`，`orphan_counts`/`sweep_orphans` 改成按「指向的节点/素材还在不在」判，见 5.4/5.5）。v2.0 补上「改完稿子的四条退路」（分阶段路线表里「插在 M5 之前」那一行，回归见第 16 章 #28）：①**摘要按内容指纹过期**——旧版只比 `ref_ordinal`，改完正文拿回的仍是上一版摘要，那不是旧记忆是假记忆；新列 `summaries.ref_hash` 的口径是**未 strip 的原文**（与 `nodes.content_hash` 同源），这一条是个陷阱：按 strip 后的文本算会让每次保存都判过期，等于每次白烧一次模型，所以有专门的回归测着；容器/全书摘要没有单一源文本，靠失效传播把 `ref_hash` 置成 `''`，读取侧带 `fresh` 布尔，S3/S4 只注入新鲜的、被跳过的写进 `warnings`；②**版本历史读得回也点得回去**——`source` 不再写死 `'human'`（`ai_draft`/`ai_polish`/`human` 与 `run_id` 按调用方标注），`get_version`/`restore_version` 补上读回与回滚，回滚前必先把「当下还没进版本表的正文」存一版，否则那不是回滚是删稿；③**章节同层上下移**——`move_node` 不只换 `nodes.ordinal`：「第几章」在库里一共存了十份拷贝（跨 `entities`/`relations`/`events`/`entity_states`/`foreshadows` 五张表），对调统一走「先取负再 CASE」两步，否则 `entity_states UNIQUE(entity_id, ordinal)` 与 `relations` 的复合唯一键会在中间态炸；**同时换 `nodes.path`**（含子树前缀重挂）——计划原本写「不动 path」，但树序读 `path`、生成序读 `ordinal`，只换一头两者就分裂；内容没变所以不重算索引与摘要，只把 `index_state.dirty` 置 1；④**删除前自动备份**——`node_versions` 是 `ON DELETE CASCADE`、`delete_node` 按 path 前缀物理删整棵子树，三次点击之内没有任何一步能反悔，而那是用户的稿子；现在删节写 `storage/backups/nodes/*.json`（留 20 份）、删作品取整库副本（留 5 份），**备份写不成即拒绝删除**（宁可删不掉，不能删了找不回），找回走 `scripts/restore_backup.py` 与 `GET /studio/backups` / `POST /studio/backups/{name}/restore`。同日评审又补一轮，把这一条里最危险的一处收干净：快照、落盘、删除原本分**两次**持锁，锁一放、已经在等锁的 `create_node` 就能挤进这棵子树，接着被 `path LIKE` 前缀连带删掉——备份里没有它，等于「删了还宣称备份过」，现在三步在同一次持锁里做完、删除谓词直接复用那份快照；整库副本从 `shutil.copy2` 热拷改成锁内 `VACUUM INTO`（本库是默认的 rollback journal 模式，热拷既不参与 SQLite 的文件锁协议、也不会把 `-journal` 一起拷走，撞上在途写事务时拷出来那份要么打不开要么少了最近几笔，比没备份更坏——它把人的心理保险买走了）；备份失败的 500 只回一句固定文案、完整原因进日志（`detail` 会原样显示到界面上，而那句原话带着库与备份目录在本机的位置）；`restore_node_backup` 末尾补上「上游卷/全书摘要判过期 + 库标脏」（备份只带正文与版本，不这么一来找回的那一节会顶着「没有它」那一版的摘要继续被 S3 注入，而右栏看不见）；另外写备份走临时名再 `os.replace`（半截 JSON 的 mtime 最新，会被保留策略当成最近一份留下）、旧备份清理失败不再拦住删除、`--list` 与试运行不再 `init()` 数据库。同日再评审一轮，收尾两处：保留策略从 `iterdir()` 改成只认 `*.json` / `*.sqlite` 名单（旧写法实测会把最新那一份真备份连同别人丢进目录的文件一起删掉——半截 `.part` 的 mtime 恰恰最新），备份结构校验抽成 `store.check_node_bundle` 供脚本与恢复共用（原先 `peek` 的判据比 store 的拒绝条件松，空 `nodes`、条目不是对象、没写 work_id 都放行，脚本于是把坏备份报成「这本书已经整本删除」）。四条全部**零真实模型调用可验证**（测试内假 gateway + tmp 库），全量 171 passed。*
+
+*v2.1（2026-10-27）· 单篇写作体验六条*：作者拿单篇发公众号时反馈「提示词什么都不写、点生成，出来的东西像没接到任务」，顺着这条查出三处口径不一致（回归见第 16 章 #29，路线表见第 13 章新增那行）：①**交互式生成没走 `node_instruction`**——`/studio/nodes/{id}/generate` 一直把 `body.instruction` 裸传给装配器，而「大纲 / 整篇 / 排队」三条路都先过 `prompting.node_instruction()`（本节标题 / 本节要点 / 篇幅 / 只输出本节正文）。框子留空时 S8 整块不出现（`_head("")` 给的是空文本，拼装时按空跳过），模型只剩模板骨架与主旨，连写哪一节、写多少字都不知道。抽成 `_instruction_for()` 后 `context/preview` 一并走它——**预览必须显示真要发出去的那一份**，否则照着预览调 prompt 是白调；②**润色看不见主旨与素材**——`polish` 桶只有 S0/S1/S7/S8（旧表 6.5 写的是含 S2 的，那句与实现不符，已校准），补进 S2 与 S_src 之后，「该作品还没有素材，生成质量会明显下降」这句会每次润色都弹，而润色不动事实、这句只对写新内容的人有意义，于是告警跟着收窄到起草类任务；③**改标题与改内容只能靠手**——`/transform` 加 `title` 动作（5 个备选、≤20 字、明确禁掉「震惊/必看/一文读懂/干货」），结果按行拆开回填「本节标题」或「作品标题」（单篇发公众号时真正当文章标题用的是后者），作品标题与主旨从「只有创建那一次能填死」变成点一下就能改（走已有的 `PATCH /studio/works/{id}`）。顺带收掉四个小的：交互式润色采用时版本来源标 `ai_polish`（与 `ai_draft` 分开，`snapshot_source` 走白名单，乱填 400）、该节正文为空时前端禁用「润色」并且服务端 400 拦在调模型之前、单篇空态文案不再写「先建卷/章」（层级与标签改由 `/studio/content-types` 一起给出来，前端不自己猜）、「大纲」跑完不再清空提示词框（那一句同时是逐节生成要用的）。加工弹窗打开时把底部提示词框那句带进「附加要求」做默认值。全量 195 passed，仍**零真实模型调用**。待实测 #1/#5 已交接给作者在实际写作中判断。下一步 M5 向量（可选）：fastembed + 向量召回 + RRF，届时要从建表开始。*

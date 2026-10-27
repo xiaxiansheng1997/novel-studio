@@ -131,6 +131,30 @@ export const useStudioStore = defineStore('studio', () => {
     return w
   }
 
+  /**
+   * 改作品本身的信息（标题、主旨）。
+   * 建完作品才发现标题想换、主旨没写清楚是常事，以前只有创建那一次能填死，
+   * 之后界面上一个入口都没有 —— 而 S2 里那句主旨是每轮生成都看得见的背景。
+   */
+  async function updateWork(patch) {
+    if (!work.value) return false
+    error.value = ''
+    const r = await apiFetch(`/studio/works/${work.value.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '更新失败')
+      return false
+    }
+    const w = await r.json()
+    work.value = w
+    const i = works.value.findIndex((x) => x.id === w.id)
+    if (i >= 0) works.value[i] = { ...works.value[i], ...w }
+    return true
+  }
+
   /** 删作品连同节点树；当前打开的就是它时清空右侧状态 */
   async function deleteWork(id) {
     const r = await apiFetch(`/studio/works/${id}`, { method: 'DELETE' })
@@ -203,14 +227,18 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function saveNode(patch, { snapshot = false } = {}) {
+  async function saveNode(patch, { snapshot = false, source = '' } = {}) {
     if (!node.value) return
     saving.value = true
+    // 只有「采用 AI 结果」才带来源：历史页要分得清哪一版是模型写的，
+    // 手改那一侧不传，由后端落成 human
+    const body = { ...patch, snapshot }
+    if (snapshot && source) body.snapshot_source = source
     try {
       const r = await apiFetch(`/studio/nodes/${node.value.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...patch, snapshot }),
+        body: JSON.stringify(body),
       })
       if (r.ok) {
         const saved = await r.json()
@@ -423,13 +451,13 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  /** 把生成的文本写回节点（用户在预览条点「采用」） */
-  async function adoptGenerated({ append = false } = {}) {
+  /** 把生成的文本写回节点（用户在预览条点「采用」），来源按任务给 */
+  async function adoptGenerated({ append = false, source = 'ai_draft' } = {}) {
     if (!node.value || !genText.value) return
     const next = append
       ? (node.value.content ? node.value.content.replace(/\s+$/, '') + '\n\n' + genText.value : genText.value)
       : genText.value
-    await saveNode({ content: next }, { snapshot: true })
+    await saveNode({ content: next }, { snapshot: true, source })
     genText.value = ''
     genMeta.value = null
   }
@@ -972,7 +1000,7 @@ export const useStudioStore = defineStore('studio', () => {
     generating, genText, genMeta, genError,
     genModel, genModelLabel, modelGroups, allGenModels, setGenModel, loadGenModels,
     activeWorkId, activeNodeId, template,
-    loadTemplates, fetchWorks, createWork, selectWork, selectNode, deleteWork,
+    loadTemplates, fetchWorks, createWork, updateWork, selectWork, selectNode, deleteWork,
     saveNode, createNode, deleteNode, moveNode,
     loadSources, addSource, deleteSource,
     loadFacts, addFact, deleteFact,

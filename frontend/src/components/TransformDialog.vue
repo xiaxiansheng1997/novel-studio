@@ -42,7 +42,8 @@
         <label class="fl">
           <span>
             原文 <em class="cnt">{{ srcChars }} 字</em>
-            <button v-if="hasSelection" class="link" @click="useSelection">用编辑器里选中的那段</button>
+            <button v-if="hasSelection && !titleMode" class="link" @click="useSelection">用编辑器里选中的那段</button>
+            <button v-else-if="titleMode && text !== fullText" class="link" @click="text = fullText">用整节正文</button>
           </span>
           <textarea v-model="text" class="field src" rows="6" placeholder="要加工的文字" />
         </label>
@@ -67,14 +68,25 @@
           正在生成 {{ candidates }} 个候选，单个约 5-20 秒
         </div>
 
+        <p v-if="titleMode" class="dlg-tip">点一行就能回填；左边进本节标题，右边进作品标题（导出时那一句 `# 标题`）。</p>
         <div v-if="results.length" class="results" :class="{ multi: results.length > 1 }">
           <article v-for="r in results" :key="r.variant" class="cand">
             <header class="cand-head">
               <span class="cand-tag">候选 {{ r.variant + 1 }}</span>
               <span class="cand-meta">{{ r.chars }} 字 · {{ (r.elapsed_ms / 1000).toFixed(1) }}s</span>
             </header>
-            <pre class="cand-text">{{ r.text }}</pre>
-            <footer class="cand-foot">
+            <!-- 起标题要的是「挑一个」，把五行整块贴回正文没有意义：按行拆开点 -->
+            <ul v-if="titleMode" class="titles">
+              <li v-for="(line, i) in titleLines(r.text)" :key="i" class="t-item">
+                <span class="t-text">{{ line }}</span>
+                <span class="t-act">
+                  <button class="btn btn-sm" @click="pickTitle(line, 'node')">设为节标题</button>
+                  <button class="btn btn-sm" @click="pickTitle(line, 'work')">设为作品标题</button>
+                </span>
+              </li>
+            </ul>
+            <pre v-else class="cand-text">{{ r.text }}</pre>
+            <footer v-if="!titleMode" class="cand-foot">
               <button class="btn btn-primary btn-sm" @click="adopt(r.text)">
                 <AppIcon name="check" :size="13" /> 采用
               </button>
@@ -96,6 +108,8 @@ const props = defineProps({
   open: { type: Boolean, default: false },
   text: { type: String, default: '' },
   selection: { type: String, default: '' },
+  // 底部提示词框里那句本轮要求：带进来做默认值，省得在两个地方抄同一句话
+  instruction: { type: String, default: '' },
 })
 const emit = defineEmits(['update:open', 'adopt'])
 
@@ -109,6 +123,7 @@ const actions = [
   { id: 'split', label: '拆成带小标题的段落' },
   { id: 'merge', label: '合并成一段' },
   { id: 'translate', label: '翻译' },
+  { id: 'title', label: '起标题（5 个备选）' },
 ]
 
 const action = ref('rewrite')
@@ -121,11 +136,15 @@ const copied = ref(-1)
 const results = computed(() => store.transformResult?.candidates || [])
 const srcChars = computed(() => text.value.length)
 const hasSelection = computed(() => props.selection.trim().length > 0)
+const titleMode = computed(() => action.value === 'title')
+const fullText = computed(() => (props.text || '').slice(0, 20000))
 
 watch(() => props.open, (v) => {
   if (!v) return
-  // 有选中就默认只加工选中那段，避免把整节重写
-  text.value = (props.selection || props.text || '').slice(0, 20000)
+  // 起标题看的是整节在讲什么，默认给选区那几行不够；其余动作默认只加工选中那段
+  const src = titleMode.value ? props.text : (props.selection || props.text)
+  text.value = (src || '').slice(0, 20000)
+  instruction.value = props.instruction || ''
   copied.value = -1
   store.transformResult = null
 })
@@ -151,6 +170,20 @@ async function run() {
 
 function adopt(t) {
   emit('adopt', t)
+  close()
+}
+
+/** 模型爱给「1. 标题」这种带号行，也爱顺手加书名号，回填前都剥掉 */
+function titleLines(t) {
+  return (t || '')
+    .split('\n')
+    .map((s) => s.replace(/^\s*(?:[-*]|\d+[.、)])\s*/, '').replace(/[《》]/g, '').trim())
+    .filter(Boolean)
+    .slice(0, 10)
+}
+
+function pickTitle(line, target) {
+  emit('adopt', { action: 'title', text: line, target })
   close()
 }
 
@@ -297,6 +330,40 @@ async function copy(t) {
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+.dlg-tip {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.6;
+}
+/* 起标题的结果：一行一条，按钮贴着右边走，扫一眼就能挑 */
+.titles {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.t-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+}
+.t-text {
+  flex: 1;
+  min-width: 0;
+  font-family: theme('fontFamily.serif');
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text);
+}
+.t-act {
+  display: flex;
+  flex: none;
+  gap: 6px;
 }
 .results {
   display: grid;

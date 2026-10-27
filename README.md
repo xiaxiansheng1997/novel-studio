@@ -44,7 +44,11 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 2. 每节生成前按桶装配上下文（S0–S8 + S_src；novel 默认 28,000 字符、article 18,000）。`POST /studio/context/preview` 只装配不花钱，能看到每桶占多少、丢了什么——**调 prompt 靠这个，不然就是盲调**
 3. 生成后可选自动后处理：分块索引 → 三段式摘要（事件 / 变化 / 钩子）→ 图谱抽取 → 一致性检查 → 5 维打分
 4. 全文拼装 `POST …/assemble`，导出 `GET …/export`（Markdown）
-5. 选中任意段落可单独加工（重写 / 压缩 / 扩写 / 润色 / 翻译 / 拆分 / 合并，`POST /studio/transform`），多候选横向比较
+5. 选中任意段落可单独加工（重写 / 压缩 / 扩写 / 润色 / 翻译 / 拆分 / 合并 / 起标题，`POST /studio/transform`），多候选横向比较；
+   「起标题」给 5 个备选（每个 ≤20 字，禁「震惊/必看/一文读懂」那套），点一行就回填到**本节标题**或**作品标题**
+6. 下方框子那句提示词**留空也能生成**：单节点「生成」与「大纲 / 整篇 / 排队」走同一条指令口径
+   （`prompting.node_instruction`：本节标题 / 本节要点 / 篇幅 / 只输出本节正文），右栏「上下文」显示的就是真要发出去的那一份
+7. 作品标题与主旨建完还能改：点编辑器顶部的作品名就地编辑（`PATCH /studio/works/{id}`）；主旨进 S2，改完下一节就生效
 
 ## 两种形态
 
@@ -77,7 +81,8 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
   卷摘要与全书摘要是多节拼出来的，没有单一源文本，靠失效传播把它们的 `ref_hash` 置空。
   过期的摘要**不会进生成上下文**（S3/S4 只取新鲜的），被丢了哪几节写在「上下文」预览的 warnings 里，
   右栏「记忆」也会显示「N 节摘要待重算」——按钮文案跟着变成「重算过期摘要」，点下去只会补过期那些，不重烧没改过的。
-- **每一版都留得回来**。每次「采用」与生成落库都会存一个版本，来源标成 AI 草稿 / AI 润色 / 手改，
+- **每一版都留得回来**。每次「采用」与生成落库都会存一个版本，来源标成 AI 草稿 / AI 润色 / 手改（接口只认这三个值，
+  乱填的当场 400；交互式润色落的那一版标 `ai_polish`，不再和「AI 草稿」混成一行），
   右栏「历史」页能列出、能跟当前正文并排比对、能点「用这一版」回滚。
   回滚前服务端会先把当下这份还没进版本表的正文存一版，所以点回滚不会吃掉你刚敲的几百字。
 - **上下移会把章号一起带走**。树上的 ↑↓ 只跟同一个父节点下的紧邻兄弟互换；「第几章」这个数在库里存了十份
@@ -179,7 +184,7 @@ web/        旧版静态页 chat.html admin.html live.html（前端未构建时�
 dev.py      frontend / backend / build / all
 scripts/    smoke_studio.py  smoke_m1_tail.py  smoke_m2.py  smoke_m3.py  smoke_m4.py  smoke_soft_rules.py
             measure_baseline.py  shot_studio.py  cleanup_works.py  restore_backup.py  login.py  recon.py  check.ps1
-tests/      pytest（全量 171 例；写作侧用 tmp_path 建临时库，不碰 storage/）
+tests/      pytest（全量 195 例；写作侧用 tmp_path 建临时库，不碰 storage/）
 storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
             backups/nodes（删节前的 JSON 备份）/ backups/works（删作品前的整库副本），已 gitignore>
 ```

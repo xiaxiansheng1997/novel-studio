@@ -161,8 +161,14 @@ def resolve(kind: str, scale: str = "", subtype: str = "") -> dict[str, Any]:
         "checks": seen,
         "layers": layers,
         "leaf_kind": (readable[0] if readable else {}).get("kind", "section"),
+        "leaf_label": (readable[0] if readable else {}).get("label", "节"),
         "container_kind": next(
             (layer.get("kind") for layer in layers if not layer.get("readable", True)), None
+        ),
+        # 标签跟着 kind 一起给：前端要照层级说话（单篇只有一层「节」，
+        # 系列才有「讲」），只会拼「卷/章」的文案在单篇里是假指引。
+        "container_label": next(
+            (layer.get("label") for layer in layers if not layer.get("readable", True)), None
         ),
         "template": merged.get("template") or "",
         "requires_sources": bool(merged.get("requires_sources")),
@@ -186,6 +192,11 @@ def list_kinds() -> list[dict[str, Any]]:
                 "label": (sval or {}).get("label") or skey,
                 "target_words": resolved.get("target_words", 0),
                 "note": resolved.get("note", ""),
+                # 层级也带上：前端建节点与写空态文案都得按真实层级来
+                "leaf_kind": resolved.get("leaf_kind"),
+                "leaf_label": resolved.get("leaf_label"),
+                "container_kind": resolved.get("container_kind"),
+                "container_label": resolved.get("container_label"),
             })
         subtypes = [
             {"id": stkey, "label": (stval or {}).get("label") or stkey}

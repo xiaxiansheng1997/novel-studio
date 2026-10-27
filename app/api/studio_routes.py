@@ -87,6 +87,8 @@ class NodeUpdate(BaseModel):
     summary: Optional[str] = None
     # 前端点「保存」时传 true，才把当前正文留一份版本；自动保存不传
     snapshot: bool = False
+    # 只有「采用 AI 结果」那一条会显式传；手改不传，由路由落成 human
+    snapshot_source: Optional[str] = None
 
 
 class NodeMove(BaseModel):
@@ -138,6 +140,10 @@ async def list_templates(request: Request, kind: str = "", subtype: str = ""):
 # 前端会把 `detail` 直接显示出来，而 `BackupError` 的原话里带着本机库文件与备份目录的位置，
 # 那句只该进日志。
 _BACKUP_DENIED = "备份失败，已拒绝删除，详见服务端日志"
+
+# node_versions.source 的取值集合，与前端 SOURCE_LABEL 一一对应。
+# 放开成任意字符串的话，历史页会出现「未知」这种没人看得懂的行，回滚前不敢点。
+_VERSION_SOURCES = {"human", "ai_draft", "ai_polish"}
 
 
 # ==================== 作品 ====================
@@ -236,7 +242,15 @@ async def get_node(node_id: str, request: Request):
 async def update_node(node_id: str, body: NodeUpdate, request: Request):
     payload = body.model_dump(exclude_none=True)
     snapshot = bool(payload.pop("snapshot", False))
-    ok = await _store(request).update_node(node_id, snapshot=snapshot, **payload)
+    source = payload.pop("snapshot_source", None)
+    if source and source not in _VERSION_SOURCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"版本来源不认: {source}（只能是 {'/'.join(sorted(_VERSION_SOURCES))}）",
+        )
+    ok = await _store(request).update_node(
+        node_id, snapshot=snapshot, snapshot_source=source or "human", **payload
+    )
     if not ok:
         raise HTTPException(status_code=404, detail="节点不存在或无更新")
     return await _store(request).get_node(node_id)
@@ -428,13 +442,15 @@ async def preview_context(body: GenerateRequest, request: Request, work_id: str,
     resolved = content_types.resolve(work.get("kind") or "article",
                                     work.get("scale") or "", work.get("subtype") or "")
 
+    # 与「生成」共用一条指令口径，预览显示的就是真要发出去的那一份
+    instruction = _instruction_for(body.task_type, node, work, body.instruction)
     result = await assemble(
-        store, work, node, body.task_type, body.instruction, template=template, resolved=resolved
+        store, work, node, body.task_type, instruction, template=template, resolved=resolved
     )
     payload = result.as_dict()
     # 把「为什么引用了这几段」一并带上，调 prompt 时不用再去翻库
     query = retrieval.build_query(
-        node.get("title") if node else "", body.instruction, work.get("premise")
+        node.get("title") if node else "", instruction, work.get("premise")
     )
     payload["query"] = query
     payload["evidence"] = await retrieval.retrieve(
@@ -470,6 +486,13 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
     work = await store.get_work(node["work_id"])
     if not work:
         raise HTTPException(status_code=404, detail="作品不存在")
+    if body.task_type == "polish" and not (node.get("content") or "").strip():
+        # 与队列侧 run_polish 同一条底线：没有正文就没有可润色的东西。
+        # 少这一句，界面上拿空节润色会一路走到装配，模型只看到骨架，凭空调出一节。
+        raise HTTPException(
+            status_code=400, detail="润色需要已有正文：这一节还是空的，先写正文或切到「写本节」"
+        )
+    instruction = _instruction_for(body.task_type, node, work, body.instruction)
 
     template = None
     if work.get("template_id"):
@@ -486,7 +509,7 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
         logger.warning(f"[studio] 生成前索引失败 node={node_id}: {exc}")
 
     result = await assemble(
-        store, work, node, body.task_type, body.instruction, template=template, resolved=resolved
+        store, work, node, body.task_type, instruction, template=template, resolved=resolved
     )
     if not result.user.strip():
         raise HTTPException(status_code=400, detail="上下文为空：请先填写作品主旨或节点正文")
@@ -544,9 +567,13 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
             if body.save and text and not error:
                 content = (node.get("content") or "") if body.task_type == "continue" else ""
                 merged = (content + ("\n\n" if content else "") + text) if content else text
-                # 续写合并进正文也是 AI 写的内容，来源记 ai_draft，不让人误以为是手改的
-                await store.update_node(node_id, content=merged, snapshot=True,
-                                        snapshot_source="ai_draft", run_id=run_id)
+                # 落库的也是 AI 写的内容，来源按任务标：润色那一版混进「AI 草稿」里，
+                # 人在历史页就分不出哪一版只改了语言、哪一版重写了内容。
+                await store.update_node(
+                    node_id, content=merged, snapshot=True,
+                    snapshot_source=("ai_polish" if body.task_type == "polish" else "ai_draft"),
+                    run_id=run_id,
+                )
                 # 写库了就把这一节重建索引，下次续写能检索到
                 fresh = await store.get_node(node_id)
                 if fresh:
@@ -620,6 +647,18 @@ def _work_meta(work: dict) -> dict[str, Any]:
         return meta if isinstance(meta, dict) else {}
     except json.JSONDecodeError:
         return {}
+
+
+def _instruction_for(task_type: str, node: Optional[dict], work: dict, extra: str) -> str:
+    """起草类任务的指令口径：大纲 / 整篇 / 队列都过 node_instruction，交互式以前是裸传的。
+
+    裸传的后果是提示词一留空，S8 整块不出现（`_head("")` 空文本会被拼装那步跳过），
+    模型只拿到模板骨架与主旨，连要写哪一节、写多少字都不知道。
+    预览接口也必须走这里：右栏「上下文」若显示的不是真要发出去的那一份，调 prompt 白调。
+    """
+    if task_type in ("article_draft", "draft") and node:
+        return _node_instruction(node, _work_meta(work), extra)
+    return extra
 
 
 def _norm_sections(items: Any) -> list[dict[str, Any]]:
@@ -1056,6 +1095,10 @@ _TRANSFORM_ACTIONS: dict[str, tuple[str, str]] = {
     "translate": ("翻译", "把这段译成目标语言，术语保持一致，保留原文的段落划分。"),
     "split": ("拆分", "把这段按语义拆成 2-4 个带小标题的段落，内容不增不减。"),
     "merge": ("合并", "把这段合并成一段连贯的话，去掉重复表述，不丢信息。"),
+    # 起标题要的不是「加工后的整段」，而是能挑：产出五行候选，界面上逐行回填。
+    # 微信那套惊叹号写法先禁掉，否则模型给的每一条都像转载。
+    "title": ("起标题", "读这段正文给 5 个备选标题：每个不超过 20 字，直给这段的信息点，"
+              "不用「震惊」「必看」「一文读懂」「干货」这类词，不玩梗、不押韵。一行一个，不编号。"),
 }
 
 
@@ -1096,7 +1139,11 @@ async def transform(body: TransformRequest, request: Request):
 
     gateway = _gateway(request)
     model = pick_model(request.app.state.registry, body.model or None)
-    system = "你是中文编辑，只输出加工后的正文，不解释、不加前后缀。"
+    if body.action == "title":
+        # 默认那句「只输出加工后的正文」会把标题写成一段散文，输出格式先说死
+        system = "你是公众号编辑。只输出标题，一行一个，不编号、不加书名号、不解释。"
+    else:
+        system = "你是中文编辑，只输出加工后的正文，不解释、不加前后缀。"
     if style:
         system += "\n文体要求：" + style
     user_parts = [f"<task>{brief}</task>"]
