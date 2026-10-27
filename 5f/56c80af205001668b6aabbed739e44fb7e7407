@@ -1,0 +1,36 @@
+README.md
+  h_b2fffa70dc114c 52-53,189
+app/api/studio_routes.py
+  h_b2fffa70dc114c 26-27,107-111,356-357,365-382,393-422,570-571,596
+app/studio/assembler.py
+  h_b2fffa70dc114c 15-16,89-91,102,170-270,304,463-467,479-481,483-484,552-554,562-578
+app/studio/prompting.py
+  h_b2fffa70dc114c 15-16,114-158
+app/studio/retrieval.py
+  h_b2fffa70dc114c 116-119
+app/studio/store.py
+  h_b2fffa70dc114c 1113-1131
+app/studio/tasks.py
+  h_b2fffa70dc114c 25,165,224
+docs/novel-studio-tech-design.md
+  h_b2fffa70dc114c 709-714,1171-1177,1179,1245-1248,1280,1398,1415,1433-1434
+frontend/src/components/StudioPanel.vue
+  h_b2fffa70dc114c 21-62,65-68,70,78-99,123-129,211-214,452,455-465,602-603,605-613,615-690,697-701,869-995
+frontend/src/stores/studio.js
+  h_b2fffa70dc114c 325,331-378,382-383,1053
+frontend/src/views/StudioView.vue
+  h_b2fffa70dc114c 224-228,1409-1419
+tests/test_studio_sources.py
+  h_b2fffa70dc114c 1-283
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5f56c80af205001668b6aabbed739e44fb7e7407",
+  "prompts": {},
+  "humans": {
+    "h_b2fffa70dc114c": {
+      "author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
