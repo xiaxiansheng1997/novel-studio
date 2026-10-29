@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS works (
     target_words INTEGER DEFAULT 0,
     style_json TEXT DEFAULT '{}',
     meta_json TEXT DEFAULT '{}',
+    -- 公众号摘要：单独一列，不塞 meta_json（那里有逐节点 outline，整段 PATCH 会覆盖掉）
+    digest TEXT DEFAULT '',
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -306,6 +308,42 @@ CREATE TABLE IF NOT EXISTS index_state (
     dirty INTEGER DEFAULT 0,
     updated_at REAL NOT NULL
 );
+
+-- ============ 公众号第二轮（v2.4） ============
+
+-- 全局键值：文风画像、文末引导属于作者本人，不属于某一篇，别塞进 works.meta_json
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT DEFAULT '',
+    updated_at REAL NOT NULL
+);
+
+-- 文风样本：作者自己写过的文章。只做本地统计（句长/段长/口头禅/标点），
+-- 不进素材检索——素材喂事实，样本喂语气，混在一起会互相挤占预算。
+CREATE TABLE IF NOT EXISTS voice_samples (
+    id TEXT PRIMARY KEY,
+    title TEXT DEFAULT '',
+    content TEXT NOT NULL,
+    chars INTEGER DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_voice_created ON voice_samples(created_at DESC);
+
+-- 发布台账：公众号没有开放接口，发布时间/链接/阅读数只能手填。
+-- 记下来才有两件东西：书架上的「已发 · 阅读」，以及文末「往期回顾」的链接。
+CREATE TABLE IF NOT EXISTS publications (
+    id TEXT PRIMARY KEY,
+    work_id TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+    published_at TEXT DEFAULT '',    -- YYYY-MM-DD，排序用字符串即可
+    url TEXT DEFAULT '',
+    reads INTEGER DEFAULT 0,
+    likes INTEGER DEFAULT 0,
+    followers INTEGER DEFAULT 0,
+    note TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_publications_work ON publications(work_id, published_at DESC);
 """
 
 # 内置模板：outline 里的 target_words 是软约束（实测偏差约 ±20%~40%）

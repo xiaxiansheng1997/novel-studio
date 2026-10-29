@@ -40,7 +40,9 @@ TASK_BUCKETS = {
 # 各桶的默认预算（字符）
 BUCKET_BUDGET = {
     "S0": 1500,
-    "S1": 1200,
+    # 1200 装得下文体要求与逐篇设定，装不下文风画像（约 150-600 字）；
+    # 被截掉的是尾部那句「禁忌」，等于作者最在意的约束先没了
+    "S1": 2000,
     "S2": 4000,
     "S3": 2000,
     "S4": 3000,
@@ -320,6 +322,13 @@ async def assemble(
             buckets.pop("S0", None)
 
     # ---------- S1 写作规范 ----------
+    # 文风画像在 S1 而不是 S5：它是「怎么写」，不是「写什么」。
+    # 没贴过旧文时是空串，这一段完全不出现。
+    voice = ""
+    if "S1" in buckets:
+        getter = getattr(store, "get_setting", None)
+        if getter is not None:
+            voice = await getter("voice_profile")
     if "S1" in buckets:
         style = _style_text(work)
         base = "你是专业的中文写作助手。只输出正文内容，不要解释你的写作过程。"
@@ -336,6 +345,9 @@ async def assemble(
             text += "\n" + type_style
         if type_rules:
             text += "\n" + type_rules
+        if voice:
+            text += ("\n按作者自己的文风写（下面的数字来自他发表过的文章，不是泛泛的形容词）：\n"
+                     + voice)
         if style:
             text += "\n" + style
         buckets["S1"].text, cut = _head(text, buckets["S1"].budget)

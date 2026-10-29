@@ -86,6 +86,9 @@
             <span class="work-kind">{{ kindLabel(w) }}</span>
             <span class="work-title">{{ w.title }}</span>
             <span class="work-meta">{{ w.node_count }} 节 · {{ fmt(w.words) }} 字</span>
+            <span v-if="pubOf(w.id)" class="work-pub">
+              已发 {{ pubOf(w.id).pubs }} 篇 · 阅读 {{ fmt(pubOf(w.id).reads) }}
+            </span>
             <span class="work-premise">{{ w.premise || '还没有主旨' }}</span>
           </div>
         </div>
@@ -132,7 +135,41 @@
                   <textarea v-model="workPremiseDraft" class="field" rows="3"
                             placeholder="这篇要替读者讲清楚什么"></textarea>
                 </label>
+                <label class="fl">
+                  <span>公众号摘要</span>
+                  <textarea v-model="workDigestDraft" class="field" rows="3"
+                            placeholder="≤120 字；不填的话公众号会截正文前 54 字"></textarea>
+                </label>
+                <div class="work-pop-row">
+                  <button class="btn btn-sm" :disabled="digestBusy" @click="makeDigestInPop">
+                    {{ digestBusy ? '生成中…' : 'AI 写摘要' }}
+                  </button>
+                  <span class="work-pop-tip inline">{{ workDigestDraft.length }} 字</span>
+                </div>
                 <p class="work-pop-tip">主旨进每一轮生成的上下文，改完下一节就生效。</p>
+
+                <!-- 发布台账：公众号没有接口，链接与阅读数只能手填；
+                     记下来书架会显示，文末「往期推荐」也从这里取 -->
+                <details v-if="!store.isNovel" class="pub-box">
+                  <summary>发布记录（{{ store.publications.length }}）</summary>
+                  <div v-for="p in store.publications" :key="p.id" class="pub-row">
+                    <span class="pub-date">{{ p.published_at || '未填日期' }}</span>
+                    <span class="pub-num">阅读 {{ fmt(p.reads) }} · 在看 {{ fmt(p.likes) }}</span>
+                    <a v-if="p.url" class="pub-link" :href="p.url" target="_blank" rel="noreferrer">链接</a>
+                    <button class="pub-del" @click="removePub(p)">删</button>
+                  </div>
+                  <p v-if="!store.publications.length" class="work-pop-tip">
+                    发出去之后把链接和阅读数记在这里。
+                  </p>
+                  <div class="pub-form">
+                    <input v-model="pubDraft.published_at" class="field" placeholder="2026-10-01" />
+                    <input v-model="pubDraft.url" class="field" placeholder="文章链接（可空）" />
+                    <input v-model.number="pubDraft.reads" class="field" type="number" placeholder="阅读" />
+                    <input v-model.number="pubDraft.likes" class="field" type="number" placeholder="在看" />
+                    <button class="btn btn-sm" @click="savePub">记一条</button>
+                  </div>
+                </details>
+
                 <div class="work-pop-act">
                   <button class="btn btn-sm" @click="workEditOpen = false">取消</button>
                   <button
@@ -161,6 +198,9 @@
               </button>
               <button class="btn btn-sm" title="拼装成 Markdown 并下载" @click="store.downloadExport()">
                 <AppIcon name="download" :size="13" /> 导出
+              </button>
+              <button class="btn btn-sm" title="公众号排版预览、发布前检查与一键复制" @click="wechatOpen = true">
+                <AppIcon name="send" :size="13" /> 公众号
               </button>
               <select
                 class="ed-model"
@@ -341,6 +381,8 @@
       :instruction="instruction"
       @adopt="onTransformAdopt"
     />
+
+    <WechatDialog v-model:open="wechatOpen" @goto="gotoIssue" />
   </div>
 </template>
 
@@ -352,6 +394,7 @@ import AppIcon from '../components/AppIcon.vue'
 import StudioTree from '../components/StudioTree.vue'
 import StudioPanel from '../components/StudioPanel.vue'
 import TransformDialog from '../components/TransformDialog.vue'
+import WechatDialog from '../components/WechatDialog.vue'
 import { useStudioStore } from '../stores/studio'
 import { apiFetch } from '../utils/api'
 
@@ -389,7 +432,42 @@ const selectedText = ref('')
 const workEditOpen = ref(false)
 const workTitleDraft = ref('')
 const workPremiseDraft = ref('')
+const workDigestDraft = ref('')
 const savingWork = ref(false)
+const digestBusy = ref(false)
+const wechatOpen = ref(false)
+
+// 发布台账：只记「发出去之后才知道」的数，跟正文无关，所以放在作品弹层里
+const pubDraft = ref({ published_at: '', url: '', reads: 0, likes: 0 })
+const pubMap = computed(() => {
+  const out = {}
+  for (const p of store.pubSummary) out[p.work_id] = p
+  return out
+})
+
+function pubOf(id) {
+  return pubMap.value[id]
+}
+
+async function savePub() {
+  const ok = await store.addPublication({
+    published_at: pubDraft.value.published_at.trim(),
+    url: pubDraft.value.url.trim(),
+    reads: Number(pubDraft.value.reads) || 0,
+    likes: Number(pubDraft.value.likes) || 0,
+  })
+  if (!ok) {
+    showNotice(store.error || '保存发布记录失败', true)
+    return
+  }
+  pubDraft.value = { published_at: '', url: '', reads: 0, likes: 0 }
+  showNotice('发布记录已保存')
+}
+
+async function removePub(p) {
+  if (!window.confirm(`删掉「${p.published_at || '未填日期'}」这条发布记录？`)) return
+  await store.deletePublication(p.id)
+}
 
 /**
  * 当前作品那一档规模的层级信息，来自 /studio/content-types（content-types.yaml）。
@@ -529,6 +607,8 @@ onMounted(async () => {
     store.loadTemplates('article'),
     store.loadContentTypes(),
     store.loadGenModels().catch(() => {}),
+    // 书架上的「已发 · 阅读」来自台账；拉不到就不显示那一行，不影响写作
+    store.loadPublicationSummary().catch(() => {}),
   ])
   if (!kinds.value.some((k) => k.id === form.value.kind)) form.value.kind = kinds.value[0]?.id || 'article'
   applyScaleDefaults()
@@ -692,6 +772,8 @@ function toggleWorkEdit() {
   if (workEditOpen.value) {
     workTitleDraft.value = store.work?.title || ''
     workPremiseDraft.value = store.work?.premise || ''
+    workDigestDraft.value = store.work?.digest || ''
+    store.loadPublications()
   }
 }
 
@@ -699,7 +781,11 @@ async function saveWorkMeta() {
   const title = workTitleDraft.value.trim()
   if (!title || !store.work) return
   savingWork.value = true
-  const ok = await store.updateWork({ title, premise: workPremiseDraft.value.trim() })
+  const ok = await store.updateWork({
+    title,
+    premise: workPremiseDraft.value.trim(),
+    digest: workDigestDraft.value.trim(),
+  })
   savingWork.value = false
   if (!ok) {
     showNotice(store.error || '保存失败', true)
@@ -707,6 +793,36 @@ async function saveWorkMeta() {
   }
   workEditOpen.value = false
   showNotice('作品信息已更新')
+}
+
+/** 弹层里的「AI 写摘要」：写完先填进输入框，确认后再随「保存」落库 */
+async function makeDigestInPop() {
+  if (digestBusy.value) return
+  digestBusy.value = true
+  try {
+    const got = await store.writeDigest()
+    if (got) {
+      workDigestDraft.value = got
+      showNotice('摘要写好了，确认后点保存')
+    } else {
+      showNotice(store.error || '写摘要失败', true)
+    }
+  } finally {
+    digestBusy.value = false
+  }
+}
+
+/**
+ * 发布检查里点「定位」：先切到那一节，再选中证据片段。
+ * 切节点会重载编辑器，没落盘的字不先存就会丢。
+ */
+async function gotoIssue(item) {
+  await flushSave()
+  if (item?.node_id && item.node_id !== store.node?.id) {
+    await store.selectNode(item.node_id)
+  }
+  await nextTick()
+  if (item?.evidence) locateEvidence(item.evidence)
 }
 
 // 提示词框最多长到几行，再往上就自己滚；CSS 里 .gen-input 的 max-height 要和它对齐
@@ -1077,6 +1193,65 @@ async function applyTitle(text, target) {
   color: var(--text-faint);
   font-family: theme('fontFamily.mono');
 }
+.work-pub {
+  font-size: 11px;
+  font-family: theme('fontFamily.mono');
+  color: var(--run);
+}
+/* ---------- 发布记录（作品弹层内） ---------- */
+.pub-box {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 8px;
+}
+.pub-box summary {
+  font-size: 11px;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.pub-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.pub-date {
+  font-family: theme('fontFamily.mono');
+  color: var(--text-faint);
+}
+.pub-num {
+  flex: 1;
+  min-width: 0;
+}
+.pub-link {
+  color: var(--run);
+  text-decoration: none;
+}
+.pub-link:hover {
+  text-decoration: underline;
+}
+.pub-del {
+  border: none;
+  background: transparent;
+  font-size: 11px;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.pub-del:hover {
+  color: var(--danger);
+}
+.pub-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 6px;
+}
+.pub-form .btn {
+  grid-column: 1 / -1;
+  height: 26px;
+  font-size: 11px;
+}
 .work-premise {
   font-size: 12px;
   line-height: 1.6;
@@ -1179,6 +1354,20 @@ async function applyTitle(text, target) {
   font-size: 11px;
   color: var(--text-faint);
   line-height: 1.6;
+}
+.work-pop-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.work-pop-row .btn {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+.work-pop-tip.inline {
+  margin-left: auto;
+  font-family: theme('fontFamily.mono');
 }
 .work-pop-act {
   display: flex;

@@ -23,8 +23,20 @@ from pydantic import BaseModel, Field
 
 from app.core.auth import verify_key
 from app.llm.gateway import Gateway, pick_model
-from app.studio import content_types, consistency, graph, indexer, prompting, retrieval, summarizer
+from app.studio import (
+    content_types,
+    consistency,
+    graph,
+    indexer,
+    prompting,
+    publish,
+    retrieval,
+    summarizer,
+    voice,
+    wechat,
+)
 from app.studio.assembler import assemble, record_used_sources
+from app.studio.jsonutil import as_list as _as_list
 from app.studio.jsonutil import parse_json_loose as _parse_json_loose
 from app.studio.prompting import node_instruction as _node_instruction
 from app.studio.store import BackupError
@@ -64,6 +76,8 @@ class WorkCreate(BaseModel):
 class WorkUpdate(BaseModel):
     title: Optional[str] = None
     premise: Optional[str] = None
+    # 公众号摘要（≤120 字）：发布页要单独填，不填会被截正文前 54 字
+    digest: Optional[str] = None
     status: Optional[str] = None
     scale: Optional[str] = None
     subtype: Optional[str] = None
@@ -1083,33 +1097,50 @@ async def run_pipeline(work_id: str, body: PipelineRequest, request: Request):
     )
 
 
-async def _render_markdown(store, work: dict, include_empty: bool) -> tuple[str, int]:
+async def _readable_sections(store, work: dict, include_empty: bool) -> list[dict[str, Any]]:
+    """按全序取可读节点（带正文）。
+
+    Markdown 导出、公众号 HTML、发布检查三处都从这里取，避免「导出的顺序」
+    和「检查的顺序」各算一套——那种漂移查起来最费时间。
+    """
     tree = await store.list_tree(work["id"])
     by_id = {n["id"]: n for n in tree}
     readable = [n for n in tree if n.get("ordinal") is not None]
     readable.sort(key=lambda n: n.get("ordinal") or 0)
 
-    blocks: list[str] = []
-    last_container = None
-    used = 0
+    out: list[dict[str, Any]] = []
     for item in readable:
         node = await store.get_node(item["id"])
         content = ((node or {}).get("content") or "").strip()
         if not content and not include_empty:
             continue
-        parent = by_id.get(item.get("parent_id"))
-        if parent and parent["id"] != last_container:
-            blocks.append(f"## {parent['title']}")
-            last_container = parent["id"]
-        blocks.append(f"### {item['title']}")
-        if content:
-            blocks.append(content)
-        used += 1
+        parent = by_id.get(item.get("parent_id")) or {}
+        out.append({
+            "id": item["id"],
+            "title": item["title"],
+            "content": content,
+            "parent_id": parent.get("id") or "",
+            "parent_title": parent.get("title") or "",
+        })
+    return out
+
+
+async def _render_markdown(store, work: dict, include_empty: bool) -> tuple[str, int]:
+    sections = await _readable_sections(store, work, include_empty)
+    blocks: list[str] = []
+    last_container = None
+    for sec in sections:
+        if sec["parent_id"] and sec["parent_id"] != last_container:
+            blocks.append(f"## {sec['parent_title']}")
+            last_container = sec["parent_id"]
+        blocks.append(f"### {sec['title']}")
+        if sec["content"]:
+            blocks.append(sec["content"])
 
     if not blocks:
         return "", 0
     markdown = f"# {work['title']}\n\n" + "\n\n".join(blocks) + "\n"
-    return markdown, used
+    return markdown, len(sections)
 
 
 @router.post("/studio/works/{work_id}/assemble", dependencies=[Depends(verify_key)])
@@ -1121,15 +1152,46 @@ async def assemble_document(work_id: str, request: Request, include_empty: bool 
     return {"markdown": markdown, "chars": len(markdown), "nodes": used}
 
 
+class DigestRequest(BaseModel):
+    model: str = ""
+    instruction: str = ""
+
+
 @router.get("/studio/works/{work_id}/export", dependencies=[Depends(verify_key)])
-async def export_document(work_id: str, request: Request, include_empty: bool = False):
-    """直接下载 Markdown 文件。"""
+async def export_document(work_id: str, request: Request, include_empty: bool = False,
+                          format: Literal["md", "html"] = "md",
+                          theme: str = "", footer: bool = True, archive: bool = True):
+    """导出：md 存档，html 是公众号编辑器认得的富文本（全部内联样式）。
+
+    公众号编辑器不认 Markdown：粘 `.md` 进去只会看到一堆井号。`format=html`
+    这一份可以直接写进剪贴板，粘到公众号后台带格式。
+
+    `theme` 空串表示用「设置里存的默认版式」；`footer` / `archive` 可以关，
+    用于只想拿一份干净正文的场合。
+    """
     store = _store(request)
     work = await _require_work(request, work_id)
+    safe = re.sub(r'[\\/:*?"<>|]+', "_", work["title"])[:60] or "draft"
+
+    if format == "html":
+        sections = await _readable_sections(store, work, include_empty)
+        if not sections:
+            raise HTTPException(status_code=400, detail="还没有可导出的内容")
+        theme_id, foot, past = await _wechat_extras(store, work, theme, footer, archive)
+        page = wechat.render_article(sections, theme=theme_id, footer=foot, archive=past)
+        encoded_html = quote(f"{safe}.html")
+        return PlainTextResponse(
+            content=page,
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Content-Disposition": f"attachment; filename=export.html; filename*=UTF-8''{encoded_html}",
+                "X-Sections": str(len(sections)),
+            },
+        )
+
     markdown, used = await _render_markdown(store, work, include_empty)
     if not markdown:
         raise HTTPException(status_code=400, detail="还没有可导出的内容")
-    safe = re.sub(r'[\\/:*?"<>|]+', "_", work["title"])[:60] or "draft"
     # 头必须是 latin-1，中文文件名要 URL 编码，否则 Starlette 会直接报 UnicodeEncodeError
     encoded = quote(f"{safe}.md")
     return PlainTextResponse(
@@ -1140,6 +1202,326 @@ async def export_document(work_id: str, request: Request, include_empty: bool = 
             "X-Nodes-Used": str(used),
         },
     )
+
+
+@router.get("/studio/works/{work_id}/publish-check", dependencies=[Depends(verify_key)])
+async def publish_check(work_id: str, request: Request):
+    """发布前体检：排版、摘要、风险词。全部本地判，不调模型、不写库。"""
+    store = _store(request)
+    work = await _require_work(request, work_id)
+    sections = await _readable_sections(store, work, include_empty=True)
+    theme_id, foot, past = await _wechat_extras(store, work, "", True, True)
+    return {
+        "items": publish.check(work, sections, digest=work.get("digest") or ""),
+        "stats": wechat.stats(sections),
+        "images": wechat.extract_images(sections),
+        "digest": work.get("digest") or "",
+        # 弹层右侧要能直接改版式与文末，所以这些一起带回来，省一次往返
+        "title": work.get("title") or "",
+        "theme": theme_id,
+        "themes": wechat.THEME_LABELS,
+        "footer": foot,
+        "archive": past,
+        "archive_on": await store.get_setting("footer_archive") == "1",
+    }
+
+
+@router.post("/studio/works/{work_id}/digest", dependencies=[Depends(verify_key)])
+async def make_digest(work_id: str, body: DigestRequest, request: Request):
+    """让模型写一段公众号摘要（≤120 字），写进 work.digest。"""
+    store = _store(request)
+    work = await _require_work(request, work_id)
+    sections = await _readable_sections(store, work, include_empty=False)
+    if not sections:
+        raise HTTPException(status_code=400, detail="还没有正文，先写几节再写摘要")
+    text = "\n\n".join(f"## {s['title']}\n{s['content']}" for s in sections)[:12000]
+    gateway = _gateway(request)
+    model = pick_model(request.app.state.registry, body.model or None)
+    system = (
+        "你是公众号编辑。只输出一段摘要，不超过 120 字：一段话、不换行、"
+        "不加标题、不解释，不要用「本文」「这篇文章」开头。"
+    )
+    prompt = "\n".join([
+        f"<title>{work['title']}</title>",
+        f"<premise>{work.get('premise') or ''}</premise>",
+        f"<extra>{body.instruction}</extra>" if body.instruction else "",
+        f"<text>\n{text}\n</text>",
+    ]).strip()
+    res = await gateway.complete(model=model, system=system, prompt=prompt, mode="quick")
+    digest = re.sub(r"\s+", " ", (res.text or "").strip()).strip("\"'「」")
+    digest = digest[:publish.DIGEST_MAX]
+    if not digest:
+        raise HTTPException(status_code=502, detail="模型没有给出摘要，重试一次或手写")
+    await store.update_work(work_id, digest=digest)
+    return {"digest": digest, "model": model, "chars": len(digest)}
+
+
+# ==================== 公众号：文风 / 设置 / 标题 / 转发语 / 台账 ====================
+
+# 设置项白名单：settings 是全局的，写坏一个 key 会静默影响所有作品
+_SETTING_KEYS = {"theme", "footer_text", "footer_archive", "voice_profile"}
+# 标题上限与公众号后台一致；超过的候选直接丢，别让人点了一个存不进去的标题
+_TITLE_CAP = 64
+_LINE_NOISE = re.compile(r"^\s*(?:[-*·•]|\d+\s*[.、)）]|[（(]\s*\d+\s*[)）])\s*")
+
+
+def _title_lines(text: str, limit: int) -> list[str]:
+    """把模型输出的「一行一个标题」洗干净：去编号、去引号、去解释行。"""
+    out: list[str] = []
+    for raw in (text or "").splitlines():
+        line = _LINE_NOISE.sub("", raw).strip().strip("\"'“”「」《》")
+        if not line or len(line) > _TITLE_CAP:
+            continue
+        if line.endswith(("：", ":", "。")):
+            continue
+        if line not in out:
+            out.append(line)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _share_copies(text: str, limit: int) -> list[dict[str, Any]]:
+    """转发语优先按 JSON 解析；模型不听话时退回按行切，别让接口报 502。"""
+    out: list[dict[str, Any]] = []
+    for item in _as_list(_parse_json_loose(text)):
+        if isinstance(item, dict):
+            body = str(item.get("text") or item.get("copy") or "").strip()
+            angle = str(item.get("angle") or "").strip()
+        else:
+            body, angle = str(item).strip(), ""
+        if not body:
+            continue
+        out.append({
+            "angle": (angle or "转发")[:12],
+            "text": body[:200],
+            "chars": len(body),
+        })
+        if len(out) >= limit:
+            break
+    if out:
+        return out
+    return [{"angle": "转发", "text": t, "chars": len(t)} for t in _title_lines(text, limit)]
+
+
+async def _wechat_extras(store, work: dict[str, Any], theme: str,
+                         with_footer: bool, with_archive: bool):
+    """导出的三件外挂：版式、文末引导、往期推荐。
+
+    版式优先级：显式参数 > 设置里的默认 > paper。传了不认识的主题就退回默认，
+    不报错——排错时最不需要的就是「导出失败」。
+    """
+    theme_id = theme if theme in wechat.THEME_LABELS else (await store.get_setting("theme"))
+    if theme_id not in wechat.THEME_LABELS:
+        theme_id = wechat.DEFAULT_THEME
+    foot = (await store.get_setting("footer_text")) if with_footer else ""
+    past: list[dict[str, Any]] = []
+    if with_archive and await store.get_setting("footer_archive") == "1":
+        past = await store.archive_links(
+            subtype=work.get("subtype") or "", exclude_work_id=work["id"]
+        )
+    return theme_id, foot, past
+
+
+class VoiceSampleCreate(BaseModel):
+    title: str = ""
+    # 太短的样本统计不出东西：三五十字连句长都不稳
+    content: str = Field(min_length=30, max_length=60000)
+
+
+class VoiceProfileUpdate(BaseModel):
+    profile: str = Field(default="", max_length=2000)
+
+
+class SettingUpdate(BaseModel):
+    value: str = Field(default="", max_length=4000)
+
+
+class TitlesRequest(BaseModel):
+    model: str = ""
+    count: int = 6
+    instruction: str = ""
+
+
+class ShareRequest(BaseModel):
+    model: str = ""
+    count: int = 3
+
+
+class PublicationCreate(BaseModel):
+    published_at: str = ""
+    url: str = ""
+    reads: int = 0
+    likes: int = 0
+    followers: int = 0
+    note: str = ""
+
+
+class PublicationUpdate(BaseModel):
+    published_at: Optional[str] = None
+    url: Optional[str] = None
+    reads: Optional[int] = None
+    likes: Optional[int] = None
+    followers: Optional[int] = None
+    note: Optional[str] = None
+
+
+async def _rebuild_voice(store) -> str:
+    """样本变了就重算画像。统计是纯本地的，加一篇重算一次不心疼。"""
+    texts = [s["content"] for s in await store.list_voice_texts()]
+    profile = voice.build(texts)[:2000]
+    await store.set_setting("voice_profile", profile)
+    return profile
+
+
+@router.get("/studio/voice", dependencies=[Depends(verify_key)])
+async def get_voice(request: Request):
+    store = _store(request)
+    samples = await store.list_voice_samples()
+    return {
+        "samples": samples,
+        "profile": await store.get_setting("voice_profile"),
+        "chars": sum(int(s.get("chars") or 0) for s in samples),
+    }
+
+
+@router.post("/studio/voice/samples", dependencies=[Depends(verify_key)])
+async def add_voice_sample(body: VoiceSampleCreate, request: Request):
+    """贴一篇旧文。加完立刻重算画像，不用再点一次「统计」。"""
+    store = _store(request)
+    row = await store.add_voice_sample(content=body.content, title=body.title)
+    return {"sample": row, "profile": await _rebuild_voice(store)}
+
+
+@router.delete("/studio/voice/samples/{sample_id}", dependencies=[Depends(verify_key)])
+async def delete_voice_sample(sample_id: str, request: Request):
+    store = _store(request)
+    if not await store.delete_voice_sample(sample_id):
+        raise HTTPException(status_code=404, detail="样本不存在")
+    return {"ok": True, "profile": await _rebuild_voice(store)}
+
+
+@router.post("/studio/voice/analyze", dependencies=[Depends(verify_key)])
+async def analyze_voice(request: Request):
+    return {"profile": await _rebuild_voice(_store(request))}
+
+
+@router.put("/studio/voice/profile", dependencies=[Depends(verify_key)])
+async def save_voice_profile(body: VoiceProfileUpdate, request: Request):
+    """手改画像。下次加/删样本会被重算覆盖，界面上要写清这一点。"""
+    store = _store(request)
+    await store.set_setting("voice_profile", body.profile.strip()[:2000])
+    return {"profile": body.profile.strip()[:2000]}
+
+
+@router.get("/studio/settings", dependencies=[Depends(verify_key)])
+async def get_settings(request: Request):
+    return await _store(request).all_settings()
+
+
+@router.put("/studio/settings/{key}", dependencies=[Depends(verify_key)])
+async def put_setting(key: str, body: SettingUpdate, request: Request):
+    if key not in _SETTING_KEYS:
+        raise HTTPException(status_code=400, detail=f"不支持的设置项: {key}")
+    store = _store(request)
+    await store.set_setting(key, body.value)
+    return {"key": key, "value": body.value}
+
+
+@router.post("/studio/works/{work_id}/titles", dependencies=[Depends(verify_key)])
+async def make_titles(work_id: str, body: TitlesRequest, request: Request):
+    """按全文出候选标题。列表页只露前 20 字，所以每条都把字数带回去。"""
+    store = _store(request)
+    work = await _require_work(request, work_id)
+    sections = await _readable_sections(store, work, include_empty=False)
+    if not sections:
+        raise HTTPException(status_code=400, detail="还没有正文，先写几节再换标题")
+    n = max(1, min(int(body.count or 6), 10))
+    text = "\n\n".join(f"## {s['title']}\n{s['content']}" for s in sections)[:12000]
+    gateway = _gateway(request)
+    model = pick_model(request.app.state.registry, body.model or None)
+    system = "你是公众号编辑。只输出候选标题，一行一个，不编号、不加书名号、不解释。"
+    prompt = "\n".join([
+        f"<title>{work['title']}</title>",
+        f"<premise>{work.get('premise') or ''}</premise>",
+        f"<extra>{body.instruction}</extra>" if body.instruction else "",
+        f"<ask>给 {n} 个备选标题，每个不超过 20 字，角度要分开：数字、反常识、痛点、"
+        "对比、具体场景、结论各一个。不用「震惊」「必看」「一文读懂」「干货」，"
+        "不玩梗、不押韵、不用感叹号。</ask>",
+        f"<text>\n{text}\n</text>",
+    ]).strip()
+    res = await gateway.complete(model=model, system=system, prompt=prompt, mode="quick")
+    titles = _title_lines(res.text, n)
+    if not titles:
+        raise HTTPException(status_code=502, detail="模型没有给出能用的标题，重试一次")
+    return {"titles": [{"text": t, "chars": len(t)} for t in titles], "model": model}
+
+
+@router.post("/studio/works/{work_id}/share", dependencies=[Depends(verify_key)])
+async def make_share(work_id: str, body: ShareRequest, request: Request):
+    """朋友圈/群里的转发语。摘要服务公众号列表页，转发语是另一套口气。"""
+    store = _store(request)
+    work = await _require_work(request, work_id)
+    sections = await _readable_sections(store, work, include_empty=False)
+    if not sections:
+        raise HTTPException(status_code=400, detail="还没有正文，先写几节再写转发语")
+    n = max(1, min(int(body.count or 3), 5))
+    text = "\n\n".join(f"## {s['title']}\n{s['content']}" for s in sections)[:6000]
+    gateway = _gateway(request)
+    model = pick_model(request.app.state.registry, body.model or None)
+    system = "你是公众号作者。只输出 JSON 数组，不要解释、不要代码围栏。"
+    prompt = "\n".join([
+        f"<title>{work['title']}</title>",
+        f"<digest>{work.get('digest') or ''}</digest>",
+        f"<ask>写 {n} 条转发到朋友圈/微信群的文案，每条不超过 80 字，口气分开："
+        "提问式（把读者拉进来）、结论式（直接给判断）、自嘲或坦白式。"
+        "不要 emoji，不要「干货」「必看」「速看」「震惊」。</ask>",
+        '<format>[{"angle":"提问","text":"..."}]</format>',
+        f"<text>\n{text}\n</text>",
+    ]).strip()
+    res = await gateway.complete(model=model, system=system, prompt=prompt, mode="quick")
+    return {"copies": _share_copies(res.text, n), "model": model}
+
+
+@router.get("/studio/works/{work_id}/publications", dependencies=[Depends(verify_key)])
+async def list_publications(work_id: str, request: Request):
+    await _require_work(request, work_id)
+    return await _store(request).list_publications(work_id)
+
+
+@router.post("/studio/works/{work_id}/publications", dependencies=[Depends(verify_key)])
+async def add_publication(work_id: str, body: PublicationCreate, request: Request):
+    await _require_work(request, work_id)
+    return await _store(request).add_publication(
+        work_id,
+        published_at=body.published_at.strip(),
+        url=body.url.strip(),
+        reads=body.reads,
+        likes=body.likes,
+        followers=body.followers,
+        note=body.note.strip(),
+    )
+
+
+@router.patch("/studio/publications/{pub_id}", dependencies=[Depends(verify_key)])
+async def update_publication(pub_id: str, body: PublicationUpdate, request: Request):
+    store = _store(request)
+    if not await store.get_publication(pub_id):
+        raise HTTPException(status_code=404, detail="发布记录不存在")
+    await store.update_publication(pub_id, **body.model_dump(exclude_none=True))
+    return await store.get_publication(pub_id)
+
+
+@router.delete("/studio/publications/{pub_id}", dependencies=[Depends(verify_key)])
+async def delete_publication(pub_id: str, request: Request):
+    if not await _store(request).delete_publication(pub_id):
+        raise HTTPException(status_code=404, detail="发布记录不存在")
+    return {"ok": True}
+
+
+@router.get("/studio/publications/summary", dependencies=[Depends(verify_key)])
+async def publication_summary(request: Request):
+    return await _store(request).publication_summary()
 
 
 # ==================== 加工类任务（多候选） ====================

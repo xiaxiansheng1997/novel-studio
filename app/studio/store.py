@@ -25,7 +25,9 @@ _MAX_LIMIT = 500
 
 # work_id 上没有 REFERENCES works(id) 的表（这几张建得早，外键是后来补的）。
 # 删作品时手动清，历史遗留的孤儿行由 sweep_orphans 兜底。
-_NO_FK_TABLES = ("jobs", "runs", "index_units")
+# publications 虽然写了 REFERENCES，但连接从没开 `PRAGMA foreign_keys`，
+# 级联删除实际不生效——写在这张名单里才是真的会被清掉。
+_NO_FK_TABLES = ("jobs", "runs", "index_units", "publications")
 
 # 孤儿行判定：一张表一条 WHERE。条件要和 delete_work / delete_node / delete_source
 # 各自的清理范围一一对应：删作品按 work_id 判就够，而删单节/单条素材时作品还活着，
@@ -43,6 +45,7 @@ _ORPHAN_WHERE = {
         "OR work_id NOT IN (SELECT id FROM works)"
     ),
     "summaries": "scope IN ('node', 'container') AND ref_id NOT IN (SELECT id FROM nodes)",
+    "publications": "work_id NOT IN (SELECT id FROM works)",
 }
 
 # 章号（ordinal）在库里不止 nodes 一处：图谱的时间线、事件顺序、伏笔超期判定各存了一份，
@@ -164,25 +167,33 @@ class StudioStore:
         看起来就像「记忆全丢了」。所以历史行一律按当时的内容指纹补上。
         """
         assert self._db is not None
+        # 每个新列独立判：早先这里是「ref_hash 在就直接 return」，
+        # 再加列时会被这句话挡在门外，等于新列永远补不上。
         cur = await self._db.execute("PRAGMA table_info(summaries)")
         cols = {r[1] for r in await cur.fetchall()}
-        if "ref_hash" in cols:
-            return
-        await self._db.execute("ALTER TABLE summaries ADD COLUMN ref_hash TEXT DEFAULT ''")
-        # 节摘要：拿节点自己的 content_hash；容器/全书摘要没有单一源文本，
-        # 用一个非空占位表示「当年生成过、没理由认为它过期」。
-        await self._db.execute(
-            "UPDATE summaries SET ref_hash = "
-            "COALESCE(NULLIF(ref_hash, ''), "
-            "(SELECT n.content_hash FROM nodes n WHERE n.id = summaries.ref_id), '') "
-            "WHERE scope = 'node'"
-        )
-        await self._db.execute(
-            "UPDATE summaries SET ref_hash = 'legacy' "
-            "WHERE scope IN ('container', 'work') AND ref_hash = ''"
-        )
-        await self._db.commit()
-        logger.info("[studio] summaries 已补 ref_hash 列并回填历史指纹")
+        if "ref_hash" not in cols:
+            await self._db.execute("ALTER TABLE summaries ADD COLUMN ref_hash TEXT DEFAULT ''")
+            # 节摘要：拿节点自己的 content_hash；容器/全书摘要没有单一源文本，
+            # 用一个非空占位表示「当年生成过、没理由认为它过期」。
+            await self._db.execute(
+                "UPDATE summaries SET ref_hash = "
+                "COALESCE(NULLIF(ref_hash, ''), "
+                "(SELECT n.content_hash FROM nodes n WHERE n.id = summaries.ref_id), '') "
+                "WHERE scope = 'node'"
+            )
+            await self._db.execute(
+                "UPDATE summaries SET ref_hash = 'legacy' "
+                "WHERE scope IN ('container', 'work') AND ref_hash = ''"
+            )
+            await self._db.commit()
+            logger.info("[studio] summaries 已补 ref_hash 列并回填历史指纹")
+
+        cur = await self._db.execute("PRAGMA table_info(works)")
+        wcols = {r[1] for r in await cur.fetchall()}
+        if "digest" not in wcols:
+            await self._db.execute("ALTER TABLE works ADD COLUMN digest TEXT DEFAULT ''")
+            await self._db.commit()
+            logger.info("[studio] works 已补 digest 列（公众号摘要）")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -309,8 +320,8 @@ class StudioStore:
         return dict(row) if row else None
 
     async def update_work(self, work_id: str, **fields: Any) -> bool:
-        allowed = {"title", "premise", "status", "scale", "subtype", "template_id", "target_words",
-                   "style_json", "meta_json"}
+        allowed = {"title", "premise", "digest", "status", "scale", "subtype", "template_id",
+                   "target_words", "style_json", "meta_json"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return False
@@ -1202,6 +1213,189 @@ class StudioStore:
             cur = await self._db.execute("DELETE FROM terms WHERE id = ?", (term_id,))
             await self._db.commit()
         return (cur.rowcount or 0) > 0
+
+    # ==================== 公众号：文风 / 设置 / 发布台账 ====================
+
+    async def get_setting(self, key: str) -> str:
+        """全局设置：文风画像、文末引导这类东西属于作者，不属于某一篇。"""
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = await cur.fetchone()
+        return str(row["value"] or "") if row else ""
+
+    async def all_settings(self) -> dict[str, str]:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute("SELECT key, value FROM settings")
+            rows = await cur.fetchall()
+        return {str(r["key"]): str(r["value"] or "") for r in rows}
+
+    async def set_setting(self, key: str, value: str) -> None:
+        assert self._db is not None
+        async with self._lock:
+            await self._db.execute(
+                "INSERT INTO settings(key, value, updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                "updated_at=excluded.updated_at",
+                (key, value or "", _now()),
+            )
+            await self._db.commit()
+
+    async def add_voice_sample(self, *, content: str, title: str = "") -> dict[str, Any]:
+        assert self._db is not None
+        sid = _new_id("v_")
+        async with self._lock:
+            await self._db.execute(
+                "INSERT INTO voice_samples(id, title, content, chars, created_at) "
+                "VALUES(?,?,?,?,?)",
+                (sid, title or "", content,
+                 sum(1 for c in content if not c.isspace()), _now()),
+            )
+            await self._db.commit()
+        return await self.get_voice_sample(sid)  # type: ignore[return-value]
+
+    async def list_voice_samples(self) -> list[dict[str, Any]]:
+        """列表不带正文：一篇旧文可能几千字，列表只要标题与字数。"""
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT id, title, chars, created_at FROM voice_samples "
+                "ORDER BY created_at DESC"
+            )
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_voice_sample(self, sample_id: str) -> Optional[dict[str, Any]]:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT * FROM voice_samples WHERE id = ?", (sample_id,)
+            )
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_voice_texts(self) -> list[dict[str, Any]]:
+        """统计要全文。单独一个方法，是为了别把几万字顺手塞进列表接口。"""
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT title, content FROM voice_samples ORDER BY created_at ASC"
+            )
+            rows = await cur.fetchall()
+        return [{"title": r["title"], "content": r["content"]} for r in rows]
+
+    async def delete_voice_sample(self, sample_id: str) -> bool:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "DELETE FROM voice_samples WHERE id = ?", (sample_id,)
+            )
+            await self._db.commit()
+            return (cur.rowcount or 0) > 0
+
+    async def add_publication(
+        self, work_id: str, *, published_at: str = "", url: str = "",
+        reads: int = 0, likes: int = 0, followers: int = 0, note: str = "",
+    ) -> dict[str, Any]:
+        assert self._db is not None
+        pid = _new_id("p_")
+        now = _now()
+        async with self._lock:
+            await self._db.execute(
+                "INSERT INTO publications(id, work_id, published_at, url, reads, likes, "
+                "followers, note, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (pid, work_id, published_at or "", url or "", max(0, int(reads)),
+                 max(0, int(likes)), max(0, int(followers)), note or "", now, now),
+            )
+            await self._db.commit()
+        return await self.get_publication(pid)  # type: ignore[return-value]
+
+    async def get_publication(self, pub_id: str) -> Optional[dict[str, Any]]:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT * FROM publications WHERE id = ?", (pub_id,)
+            )
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_publications(self, work_id: str) -> list[dict[str, Any]]:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT * FROM publications WHERE work_id = ? "
+                "ORDER BY published_at DESC, created_at DESC",
+                (work_id,),
+            )
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def update_publication(self, pub_id: str, **fields: Any) -> bool:
+        allowed = {"published_at", "url", "reads", "likes", "followers", "note"}
+        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates:
+            return False
+        assert self._db is not None
+        updates["updated_at"] = _now()
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        async with self._lock:
+            cur = await self._db.execute(
+                f"UPDATE publications SET {sets} WHERE id = ?",
+                (*updates.values(), pub_id),
+            )
+            await self._db.commit()
+            return (cur.rowcount or 0) > 0
+
+    async def delete_publication(self, pub_id: str) -> bool:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "DELETE FROM publications WHERE id = ?", (pub_id,)
+            )
+            await self._db.commit()
+            return (cur.rowcount or 0) > 0
+
+    async def publication_summary(self) -> list[dict[str, Any]]:
+        """书架用：每个作品发了几篇、总阅读、最后一次的链接。
+
+        `last_url` 用相关子查询取「最新一条带链接的」：同一篇可能改过两次，
+        空链接那条不该把往期回顾的位置占掉。
+        """
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT p.work_id, w.title AS work_title, w.subtype AS subtype, "
+                "COUNT(*) AS pubs, COALESCE(SUM(p.reads),0) AS reads, "
+                "COALESCE(SUM(p.likes),0) AS likes, MAX(p.published_at) AS last_at, "
+                "(SELECT p2.url FROM publications p2 WHERE p2.work_id = p.work_id "
+                "  AND p2.url <> '' ORDER BY p2.published_at DESC, p2.created_at DESC "
+                "  LIMIT 1) AS last_url "
+                "FROM publications p JOIN works w ON w.id = p.work_id "
+                "GROUP BY p.work_id ORDER BY last_at DESC"
+            )
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def archive_links(
+        self, *, subtype: str = "", exclude_work_id: str = "", limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """往期回顾：一篇作品只取最新那条带链接的记录，避免同一篇重复刷屏。"""
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT p.work_id, w.title, p.url, p.published_at "
+                "FROM publications p JOIN works w ON w.id = p.work_id "
+                "WHERE p.id = (SELECT p2.id FROM publications p2 "
+                "  WHERE p2.work_id = p.work_id AND p2.url <> '' "
+                "  ORDER BY p2.published_at DESC, p2.created_at DESC LIMIT 1) "
+                "AND p.work_id <> ? AND (? = '' OR w.subtype = ?) "
+                "ORDER BY p.published_at DESC LIMIT ?",
+                (exclude_work_id or "", subtype or "", subtype or "",
+                 max(1, min(int(limit), 20))),
+            )
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
 
     # ==================== 告警 ====================
 

@@ -158,6 +158,78 @@
         </details>
       </section>
 
+      <!-- 文风：这一篇的写法 + 我的样本 + 画像 -->
+      <section v-else-if="tab === 'style'" class="section">
+        <p class="hint">
+          写法进「这一篇」，样本进「所有篇」。两者都在生成时进 S1，不占素材与检索的预算。
+        </p>
+
+        <div class="blk">
+          <div class="blk-head">
+            <span class="blk-title">这一篇的写法</span>
+            <button class="btn btn-sm" @click="saveStyle">保存写法</button>
+          </div>
+          <div class="chips">
+            <button v-for="(p, id) in STYLE_PRESETS" :key="id" class="chip" @click="applyPreset(id)">
+              {{ p.label }}
+            </button>
+          </div>
+          <label class="fl">
+            <span>人称</span>
+            <input v-model="styleDraft.person" class="field" placeholder="第二人称「你」" />
+          </label>
+          <label class="fl">
+            <span>时态</span>
+            <input v-model="styleDraft.tense" class="field" placeholder="现在时，讲正在发生的事" />
+          </label>
+          <label class="fl">
+            <span>语气</span>
+            <input v-model="styleDraft.tone" class="field" placeholder="像跟朋友讲话，句子短" />
+          </label>
+          <label class="fl">
+            <span>禁忌</span>
+            <input v-model="styleDraft.taboo" class="field" placeholder="不用「首先/其次」，不写「本文将」" />
+          </label>
+        </div>
+
+        <div class="blk">
+          <div class="blk-head">
+            <span class="blk-title">我的文风样本</span>
+            <span class="hint inline">{{ styleChars }} 字</span>
+          </div>
+          <p class="hint">贴你自己写过的文章（≥30 字）。加进来就重算画像，纯本地统计，不调模型。</p>
+          <div v-for="s in store.voice.samples" :key="s.id" class="item">
+            <div class="item-main">
+              <span class="item-title">{{ s.title || '未命名' }}</span>
+              <span class="item-meta">{{ s.chars }} 字</span>
+            </div>
+            <button class="mini-btn" title="删除" @click="removeSample(s)">
+              <AppIcon name="trash" :size="13" />
+            </button>
+          </div>
+          <textarea v-model="sample.content" class="field" rows="5" placeholder="粘贴一篇旧文…"></textarea>
+          <input v-model="sample.title" class="field" placeholder="这篇叫什么（可选）" />
+          <button
+            class="btn btn-primary btn-sm"
+            :disabled="sampleBusy || sample.content.trim().length < 30"
+            @click="submitSample"
+          >{{ sampleBusy ? '加入中…' : '加入样本' }}</button>
+        </div>
+
+        <div class="blk">
+          <div class="blk-head">
+            <span class="blk-title">文风画像</span>
+            <button class="btn btn-sm" @click="store.analyzeVoice()">重新统计</button>
+          </div>
+          <textarea v-model="profileDraft" class="field" rows="8"
+                    placeholder="贴 1-2 篇旧文后自动生成"></textarea>
+          <div class="row-act">
+            <button class="btn btn-sm" @click="saveProfile">保存画像</button>
+            <span class="hint inline">加/删样本会自动重算，手改的会被覆盖</span>
+          </div>
+        </div>
+      </section>
+
       <!-- 上下文 -->
       <section v-else-if="tab === 'context'" class="section">
         <!-- 记忆状态：索引与摘要。没建索引时 S4/S5 是空的，先在这里看得到 -->
@@ -463,6 +535,87 @@ const factsBusy = ref(false)
 const factsNote = ref('')
 const srcChars = computed(() => (src.value.content || '').length)
 
+// ---- 文风：预设只填空，保存才写库 ----
+const STYLE_PRESETS = {
+  chat: {
+    label: '像聊天',
+    person: '第二人称「你」',
+    tense: '现在时',
+    tone: '像跟一个具体的人讲话，句子短，多用问句推进',
+    taboo: '不用「首先/其次/最后」，不端着，不写「本文将」',
+  },
+  column: {
+    label: '像专栏',
+    person: '第一人称「我」',
+    tense: '现在时',
+    tone: '先给判断，再解释为什么，最后给一个可执行的做法',
+    taboo: '不写「众所周知」，不铺垫背景，不堆形容词',
+  },
+  report: {
+    label: '像报告',
+    person: '第三人称',
+    tense: '现在时',
+    tone: '克制、数据优先，每个判断后面跟依据',
+    taboo: '不用感叹号，不玩梗，不确定的地方写明「待验证」',
+  },
+}
+const styleDraft = ref({ person: '', tense: '', tone: '', taboo: '' })
+const sample = ref({ title: '', content: '' })
+const sampleBusy = ref(false)
+const profileDraft = ref('')
+const styleChars = computed(() => store.voice.chars || 0)
+
+function loadStyle() {
+  let got = {}
+  try {
+    got = JSON.parse(store.work?.style_json || '{}')
+  } catch {
+    got = {}
+  }
+  styleDraft.value = {
+    person: got.person || '',
+    tense: got.tense || '',
+    tone: got.tone || '',
+    taboo: got.taboo || '',
+  }
+}
+
+async function saveStyle() {
+  const clean = {}
+  for (const key of ['person', 'tense', 'tone', 'taboo']) {
+    const val = (styleDraft.value[key] || '').trim()
+    if (val) clean[key] = val
+  }
+  await store.updateWork({ style_json: JSON.stringify(clean) })
+}
+
+function applyPreset(id) {
+  const p = STYLE_PRESETS[id]
+  if (p) styleDraft.value = { person: p.person, tense: p.tense, tone: p.tone, taboo: p.taboo }
+}
+
+async function submitSample() {
+  sampleBusy.value = true
+  try {
+    const ok = await store.addVoiceSample({
+      title: sample.value.title.trim(),
+      content: sample.value.content,
+    })
+    if (ok) sample.value = { title: '', content: '' }
+  } finally {
+    sampleBusy.value = false
+  }
+}
+
+async function removeSample(s) {
+  if (!window.confirm(`删掉样本「${s.title || '未命名'}」？画像会跟着重算。`)) return
+  await store.deleteVoiceSample(s.id)
+}
+
+async function saveProfile() {
+  await store.saveVoiceProfile(profileDraft.value)
+}
+
 // ---- 图谱 ----
 const KIND_LABEL = {
   character: '人物', location: '地点', item: '物品',
@@ -561,6 +714,7 @@ const tabs = computed(() => {
     { id: 'sources', label: '素材', count: store.sources.length },
     { id: 'facts', label: '事实', count: store.facts.length },
     { id: 'terms', label: '术语', count: store.terms.length },
+    { id: 'style', label: '文风', count: 0 },
     { id: 'graph', label: '图谱', count: graphEntities.value.length, novelOnly: true },
     { id: 'context', label: '上下文', count: 0 },
     { id: 'versions', label: '历史', count: store.versions.length },
@@ -579,8 +733,13 @@ async function loadAll() {
     store.loadIndexStatus(),
     store.loadGraph(),
     store.loadIssueSummary(),
+    store.loadVoice(),
   ])
+  loadStyle()
 }
+
+// 画像变了就刷新编辑框（重新统计、加/删样本都会走到这里）
+watch(() => store.voice.profile, (v) => { profileDraft.value = v || '' }, { immediate: true })
 onMounted(loadAll)
 watch(() => store.activeWorkId, loadAll)
 
@@ -1256,5 +1415,57 @@ defineExpose({ refreshContext })
 }
 .issue.soft .item-title {
   color: var(--text-muted);
+}
+.blk {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--panel-2);
+}
+.blk-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.blk-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: transparent;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.chip:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}
+.fl {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.row-act {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 </style>

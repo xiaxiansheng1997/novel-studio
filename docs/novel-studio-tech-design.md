@@ -597,6 +597,16 @@ kinds:
 5. YAML 写坏不让服务起不来：解析失败回落到内置兜底，并在接口返回里带 `error` 字段
 
 
+### 5.7 公众号第二轮的三张表（v2.4）
+
+| 表 | 关键列 | 为什么单独建 |
+|---|---|---|
+| `settings` | `key` / `value` / `updated_at` | 文风画像、默认版式、文末引导是**作者的**，不属于某一篇；塞进 `works.meta_json` 会被大纲生成整段覆盖（那里存着逐节点 `outline`，`scoring.parse_outline_target` 要读） |
+| `voice_samples` | `id` / `title` / `content` / `chars` | 作者自己写过的文章。不进 `sources`：素材喂事实、样本喂语气，混在一起会互相挤占 S5/S_src 的预算 |
+| `publications` | `work_id` / `published_at` / `url` / `reads` / `likes` / `followers` / `note` | 公众号没有开放接口，发布后的链接与阅读数只能手填；记下来才有书架的「已发 · 阅读」与文末「往期推荐」 |
+
+`publications` 写的是 `ON DELETE CASCADE`，但连接从来没开 `PRAGMA foreign_keys`，级联实际不生效——所以它被加进 `_NO_FK_TABLES`（删作品时手动清）与 `_ORPHAN_WHERE`（`--sweep-orphans` 能认出历史残留）。三张表都是 `CREATE TABLE IF NOT EXISTS`，老库 `init()` 一次就补齐（回归见第 16 章 #32）。
+
 ## 6. ContextAssembler
 
 这是整个系统的心脏。**写不出来通常不是模型不行，而是上下文喂错了。**
@@ -711,6 +721,12 @@ assemble(work_id, node_id, task_type, instruction) -> AssemblyResult
 长素材中后段最相关的那段从来读不到。现在真走 FTS（`retrieve(kinds=("source",))`，每条约 2 块），
 命中不了才退回「最近导入」并在 `warnings` 里说明；块头标出「第 N 段（原文第 X 字起，全文 Y 字）」，
 素材桶里到底装了哪几条，`AssemblyResult.used_sources` 与右栏「上下文」都能查到。
+
+**S1 的第三次校准（v2.4）**：6.4 表里 S1 写的是「1,500」，实现长期是 1,200。这一轮把**文风画像**
+（约 150-600 字）也塞进 S1 之后，1,200 装不下，而 `_head` 截的是尾部——被截掉的正是最后那句「禁忌」，
+等于作者最在意的约束最先没了。现在预算是 **2,000**。顺序也定死：文体要求 → 文风画像 → 逐篇 `style_json`。
+`style_json` 是个体差异（这一篇用什么人称），画像是底色（我平时怎么说话），个体覆盖底色。
+没有样本时这一段完全不出现——不会凭空多出一句「请按文风写」，让模型自己去猜。
 
 ## 7. 记忆层
 
@@ -1144,6 +1160,27 @@ POST   /studio/works/{id}/pipeline           # {only_empty, limit, instruction} 
         # SSE: plan → (node_start → delta* → node_done)* → done
 POST   /studio/works/{id}/assemble           # 纯拼装，不调模型 → {markdown, chars, nodes}
 GET    /studio/works/{id}/export             # 下载 Markdown（Content-Disposition）
+GET    /studio/works/{id}/export?format=html # 公众号版：全内联样式，粘进编辑器带格式（v2.3）
+        # v2.4 加 ?theme=paper|mono|warm&footer=false&archive=false；theme 空串 = 设置里的默认
+GET    /studio/works/{id}/publish-check      # 发布前体检：排版/摘要/风险词，纯本地判（v2.3）
+        # v2.4 额外返回 theme/themes/footer/archive/archive_on/title，弹层不用再往返一次
+POST   /studio/works/{id}/digest             # {model}：写 ≤120 字公众号摘要并落 work.digest（v2.3）
+POST   /studio/works/{id}/titles             # {count, model}：按全文出候选标题（≤64 字/条，去编号去解释行）（v2.4）
+POST   /studio/works/{id}/share              # {count, model}：朋友圈/群转发语，JSON 解析失败退回按行切（v2.4）
+
+# 文风 / 设置 / 发布台账（v2.4）
+GET    /studio/voice                         # 样本列表（不带正文）+ 当前画像 + 样本总字数
+POST   /studio/voice/samples                 # {title, content}；content ≥30 字，加完立刻重算画像
+DELETE /studio/voice/samples/{id}            # 删完同样重算
+POST   /studio/voice/analyze                 # 显式重算（本地统计，零模型调用）
+PUT    /studio/voice/profile                 # 手改画像；下次加/删样本会被覆盖（界面已写明）
+GET    /studio/settings                      # 全部键值
+PUT    /studio/settings/{key}                # 白名单：theme / footer_text / footer_archive / voice_profile，其余 400
+GET    /studio/works/{id}/publications       # 本作品的发布记录
+POST   /studio/works/{id}/publications       # {published_at, url, reads, likes, followers, note}
+PATCH  /studio/publications/{id}             # 只允许改上面那几个字段
+DELETE /studio/publications/{id}
+GET    /studio/publications/summary          # 按作品聚合：篇数 / 总阅读 / 总在看 / 最新带链接的那条
 
 # 加工（已实现，无作品上下文也能用）
 POST   /studio/transform                     # {text, action, candidates, instruction, lang, work_id}
@@ -1246,6 +1283,16 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
    标题留空取文件名/首行）；列表显示「已用 N 次」，点一条看全文、一键「抽事实卡」；生成时按本节检索素材，
    预览区写明「引用素材」是哪几条，装配告警（没索引、预算不够、摘要过期）直接显示在生成预览条下面，
    不用再切到「上下文」去翻
+9. **公众号版（v2.3）**：头部「公众号」开一个 960px 的弹层：左边 375px 手机预览（内容就是导出的 HTML），
+   右边是摘要（可让 AI 写）、发布前检查（点「定位」跳到那一节并选中证据）与配图清单；底部「复制到公众号」
+   用 `ClipboardItem` 把 `text/html` 写进剪贴板，粘进公众号编辑器直接带格式（不支持的浏览器退化到选中预览再复制）
+10. **发布前那几件决定（v2.4）**：弹层右栏从上到下是「标题 → 摘要 → 转发语 → 检查 → 配图 → 版式 → 文末」。
+   标题块显示字数与「列表页只露前 20 字」的截断预览，点「换 6 个标题」按全文出候选，**点「用这个」才改作品标题**；
+   转发语与摘要分开生成（朋友圈要的是另一套口气）；版式三选一即时预览并记成默认；文末引导与「往期推荐」开关也在这一页，
+   保存后预览立刻重渲。所有改动都不碰正文。
+11. **文风页（v2.4）**：右栏新增「文风」tab——上半是「这一篇的写法」（人称/时态/语气/禁忌 + 三个预设），
+   下半是「我的文风样本」（贴旧文，加一篇重算一次）与可手改的「文风画像」。样本是全局的，写法是逐篇的，
+   两者进的是同一个 S1，谁覆盖谁见 6.5。作品弹层里另有可折叠的「发布记录」，书架卡片上显示「已发 N 篇 · 阅读 X」。
 
 ### 12.1 图谱力导向视图（`frontend/src/components/GraphMap.vue`）
 
@@ -1278,6 +1325,8 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | **插在 M5 之前 · 改稿的四条退路**（已完成 2026-10-26） | 摘要按内容指纹过期（`summaries.ref_hash` + 失效传播，S3/S4 只注入新鲜的，右栏报「N 节摘要待重算」）、版本历史读得回也点得回去（`source`/`run_id` 标注 + 右栏「历史」并排比对 + 回滚）、章节同层上下移（`store.move_node`，章号在库里的十份拷贝一起对调）、删除前自动备份（节点 JSON + 整库副本 `VACUUM INTO` 一致快照，写不成即拒绝删除，`scripts/restore_backup.py` 找回；恢复只带正文与版本，顺手把上游摘要判过期） | 全量 169 passed，**零真实模型调用**（测试内用假 gateway）：改完正文摘要真的重算、没改则跳过；回滚不吃未保存改动；交换后图谱章号正确且唯一约束不炸；备份失败时删不掉；删卷时插队挤进子树的那一节不会「被删了而备份里没有」 | 已完成 |
 | **插在 M5 之前 · 单篇写作体验六条**（已完成 2026-10-27） | 交互式生成补上 `node_instruction` 包装（`_instruction_for` 与预览共用）、polish 桶补 S2/S_src 且「缺素材」告警收窄到起草类、`/transform` 加 `title` 动作、作品标题与主旨就地可改、加工弹窗带底部指令、润色空正文拦截 + 版本来源按任务标（`_VERSION_SOURCES` 白名单） | 全量 195 passed，**零真实模型调用**：留空提示词生成的 prompt 里真的有「本节标题/篇幅/只输出本节正文」，且与 `node_instruction` 逐字一致；预览与生成发出去的是同一份；空节润色 400；`ai_polish` 落在版本表里而非法来源被拒；单篇 scale 的 `container_kind` 为 `None` | 已完成 |
 | **插在 M5 之前 · 素材链路**（已完成 2026-10-27） | S_src 改为按本节检索（`kinds=("source",)`，每条约 2 块，命中不了退回最近导入并告警）、导入即建索引、`GET /studio/sources/{id}` 单条详情、`sources.used` 接上（只在 prompt 真发出去时 +1）、`POST /studio/sources/{id}/facts/extract` 抽事实卡并带 `source_id`、前端拖 `.txt/.md` 批量导入 / 素材搜索 / 单条详情 / 抽事实 / 生成告警上屏 | 全量 206 passed，**零真实模型调用**：两条素材各讲一件事时只注入相关那条、第 7 条素材建索引后能被检索到、没索引时退回并给出「未建索引」告警、`context/preview` 不记用量而真生成一次 `used` +1、抽事实卡落库带出处且不改 `used` | 已完成 |
+| **插在 M5 之前 · 公众号链路**（已完成 2026-10-29） | 微信兼容 HTML 导出（全内联样式、`format=html`）、一键复制富文本（`ClipboardItem`）、发布前检查（段落过长/半角标点/连续空行/摘要缺失/结尾无引导/风险词）、`works.digest` 摘要列与 AI 写摘要、配图占位 `[图：…]` 与配图清单、`article/wechat` 子类与 `tpl_wechat` 模板 | 全量 220 passed，**零真实模型调用**：导出的 HTML 里没有 `<style>`/class 而正文里的标签被转义、列表/引用/代码/配图占位都认、老库能补上 `digest` 列、摘要超 120 字被截、风险词命中只提示不拦截 | 已完成 |
+| **插在 M5 之前 · 公众号第二轮**（已完成 2026-10-29） | 文风画像（`voice.py` 本地统计句长/段长/人称/口头禅/标点，注入 S1 且预算 1200→2000）、`style_json` 终于有写入入口（三个预设 + 四项）、三套版式主题（`?theme=`）、文末引导与「往期推荐」、换标题与转发语两个接口、`publications` 发布台账与书架聚合、发布检查补四条（外链/套话开头/通篇不加粗/小标题过长） | 全量 244 passed，**零真实模型调用**：画像只写数字支撑得出的结论且代码块不参与统计、有画像才出现在 S1、三套版式输出不同且未知主题退回默认、文末与往期可单独关掉、往期不列当前这篇也不列没链接的、`used` 口径不受影响、台账聚合与 404 都对、老库 `DROP TABLE` 后重开能补出三张表 | 已完成 |
 | **M5 向量（可选）** | fastembed 接入、向量召回、RRF 融合、检索评测 | 语义查询召回优于纯关键词 | 3-4 天 |
 
 总计约 **4-5 周**（连续开发）；业余时间按 8-10 周估。M1 结束时系统就可用（能写单篇与单章），后续都是增强。
@@ -1396,6 +1445,8 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | 28 | 改稿四条退路 | `tests/test_studio_memory.py` / `test_studio_versions.py` / `test_studio_reorder.py` / `test_studio_backup.py`，全部假 gateway、零网络 | 改完稿子记忆是否还可信、删错了能不能找回 | 已测：4 个文件共 46 例，全量 171 passed。关键回归：正文没变时第二次摘要调用被跳过（不因哈希口径白烧调用）、同一实体在第 2/3 章各有一条 `entity_states` 时交换不炸 UNIQUE 约束（两步取负法的存在理由）、备份写失败时删除被拒绝且库里一个字没少、**删除真正带走的那几个 id 与备份里的完全一致**（插队挤进子树的那一节不得静悄悄消失）、找回后卷与全书摘要 `fresh` 变假且 `index_state.dirty=1`、清理的保留名额只认真备份（`.part` 与丢进目录的别的文件都不占）、脚本与恢复共用同一个备份结构判据 |
 | 29 | 交互式生成的指令口径 | `tests/test_studio_instructions.py`（13 例，全假 gateway + tmp 库，零网络） | 留空提示词是否等于无指令裸跑、润色是否看得见主旨 | 已测：全量 195 passed。关键回归：`article_draft` 空 instruction 时发出去的 prompt 与 `node_instruction()` 输出**逐字一致**（旧代码是裸传，S8 整块不出现）、`context/preview` 与 `generate` 同一份口径、polish 桶含 S2/S_src 而「生成质量会明显下降」不再每次润色都弹、空节润色 400、`save=true` 的润色版本来源是 `ai_polish`、`snapshot_source` 乱填 400、`action=title` 走的是「公众号编辑」那套 system、`content-types` 给得出单篇的 `leaf_label=节` 且 `container_*` 为 `null` |
 | 30 | 素材链路 | `tests/test_studio_sources.py`（11 例，全假 gateway + tmp 库，零网络） | 导了素材却像没导：按不按相关、能不能点开、用没用上 | 已测：全量 206 passed。关键回归：两条素材各讲一件事时只注入相关那条（旧写法会把最新那条排版规范也塞进来）、第 7 条素材建索引后能被检索到（旧写法固定只取最新 5 条）、没建索引时退回「最近导入」且 warnings 里写清「这一轮是退化的」、命中块标「第 1 段 / 原文第 1 字起 / 全文 N 字」、导入即建索引（`search?scope=source` 当场能命中）、`context/preview` 不记用量而真生成一次 `used` +1、`GET /studio/sources/{id}` 给全文且 404 不含糊、抽事实卡带 `source_id` 且解析不出时 400 不落库 |
+| 31 | 公众号发布链路 | `tests/test_publish.py`（14 例，全假 gateway + tmp 库） | 发出去那一下会不会被排版毁掉、会不会踩词 | 已测：全量 220 passed。关键回归：导出 HTML 全部内联且正文里的 `<script>` 被转义、代码围栏里的空行不切块、标题默认不进正文、`[图：…]` 变占位块且不进字数、发布检查能报出摘要缺失/长段/半角标点/风险词/无结尾引导、干净稿不误报、老库 `DROP COLUMN digest` 后重开能补上、摘要超过 120 字被截、没正文时写摘要 400 且不调模型 |
+| 32 | 公众号第二轮 | `tests/test_publish_plus.py`（24 例，全假 gateway + tmp 库，零网络） | 「像不像我写的」「每篇都要手工补的几步」有没有真的落地 | 已测：全量 244 passed。关键回归：文风画像只写数字支撑得出的结论（样本里没有破折号就不出现「破折号 0.0 个」）、代码块不参与句长统计、没贴样本时 S1 里不出现「按作者自己的文风写」、三套版式产出不同样式而未知主题退回默认、文末与往期能单独关掉、往期不列当前这篇也不列没链接的、换标题会去掉编号并丢掉解释行、转发语在模型不吐 JSON 时退回按行切、台账聚合出书架要的数字、老库 `DROP TABLE` 三张表后重开能补齐 |
 
 ## 17. 与现有代码的接入点
 
@@ -1413,6 +1464,10 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | `tests/test_studio_memory.py` / `test_studio_versions.py` / `test_studio_reorder.py` / `test_studio_backup.py` | `store.update_node / move_node / restore_version / delete_node / delete_work / restore_node_backup`、`summarizer.summarize_*`、`assembler`（S3/S4）、`indexer.index_status` | 否（全是 tmp 库 + 假 gateway，不发一次真实调用） |
 | `tests/test_studio_instructions.py` | `assembler.assemble`（polish 桶与 warnings）、`studio_routes._instruction_for`（generate / context/preview）、`prompting.node_instruction`、`PATCH /studio/nodes`、`POST /studio/transform`、`GET /studio/content-types` | 否（同上；接口层用 `app.state.gateway` 桩，`stream` 是异步生成器） |
 | `tests/test_studio_sources.py` | `assembler._source_evidence / record_used_sources`、`retrieval.retrieve(kinds=("source",))`、`indexer.index_source`、`store.mark_sources_used / add_fact`、`prompting.facts_prompt / parse_facts`、`GET /studio/sources/{id}`、`POST /studio/sources/{id}/facts/extract` | 否（同上；假 gateway 的 `complete` 直接回一段 JSON 当「模型抽出来的事实」） |
+| `app/studio/wechat.py` / `publish.py` / `risk-words.yaml`、`frontend/src/components/WechatDialog.vue` | 无（纯函数 + 本地词表；弹层只用 `navigator.clipboard` 与 `ClipboardItem`） | 新增文件；`studio_routes` 加 `export?format=html` / `publish-check` / `digest`，`works` 加 `digest` 列（`_migrate` 补），`StudioView` 头部加「公众号」入口 |
+| `tests/test_publish.py` | `wechat.render_article / split_blocks / extract_images / stats`、`publish.check / risk_hits`、`store.update_work(digest=)`、`GET export?format=html`、`GET publish-check`、`POST digest` | 否（同为假 gateway + tmp 库；迁移用例会临时 `DROP COLUMN digest` 再重开） |
+| `app/studio/voice.py` | `tokenize.tokens`（常用词统计）、`store.get_setting/set_setting`（画像落 `settings`）、`assembler.assemble`（S1 注入） | 新增文件；`assembler` 加一次 `get_setting` 并把 S1 预算提到 2,000 |
+| `tests/test_publish_plus.py` | `voice.analyze/build/profile_text/traits`、`wechat.styles/render_article(theme, footer, archive)`、`publish.check` 新增四条、`store.add_voice_sample/publication_summary/archive_links`、`GET /studio/voice*`、`PUT /studio/settings/{key}`、`POST /works/{id}/titles|share`、`publications` 五个接口 | 否（同为假 gateway + tmp 库；迁移用例会临时 `DROP TABLE` 三张新表再重开） |
 | `frontend/src/utils/diff.js` | 无（不引依赖，现有 deps 里没有 diff 库） | 新增文件；`StudioPanel.vue` 加「历史」页、`StudioTree.vue` 加上下移、`StudioView.vue` 接回滚与备份提示 |
 | `storage/studio.sqlite` | — | 新增文件 |
 | `docs/reverse-proxy.md` | — | 新增文件：README 里的纯反代内容搬过去（`/v1` 用法、四模式与文案校准、风控排查细则、底座侧已知限制），README 只讲写作主线 |
@@ -1432,3 +1487,7 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 *v2.1（2026-10-27）· 单篇写作体验六条*：作者拿单篇发公众号时反馈「提示词什么都不写、点生成，出来的东西像没接到任务」，顺着这条查出三处口径不一致（回归见第 16 章 #29，路线表见第 13 章新增那行）：①**交互式生成没走 `node_instruction`**——`/studio/nodes/{id}/generate` 一直把 `body.instruction` 裸传给装配器，而「大纲 / 整篇 / 排队」三条路都先过 `prompting.node_instruction()`（本节标题 / 本节要点 / 篇幅 / 只输出本节正文）。框子留空时 S8 整块不出现（`_head("")` 给的是空文本，拼装时按空跳过），模型只剩模板骨架与主旨，连写哪一节、写多少字都不知道。抽成 `_instruction_for()` 后 `context/preview` 一并走它——**预览必须显示真要发出去的那一份**，否则照着预览调 prompt 是白调；②**润色看不见主旨与素材**——`polish` 桶只有 S0/S1/S7/S8（旧表 6.5 写的是含 S2 的，那句与实现不符，已校准），补进 S2 与 S_src 之后，「该作品还没有素材，生成质量会明显下降」这句会每次润色都弹，而润色不动事实、这句只对写新内容的人有意义，于是告警跟着收窄到起草类任务；③**改标题与改内容只能靠手**——`/transform` 加 `title` 动作（5 个备选、≤20 字、明确禁掉「震惊/必看/一文读懂/干货」），结果按行拆开回填「本节标题」或「作品标题」（单篇发公众号时真正当文章标题用的是后者），作品标题与主旨从「只有创建那一次能填死」变成点一下就能改（走已有的 `PATCH /studio/works/{id}`）。顺带收掉四个小的：交互式润色采用时版本来源标 `ai_polish`（与 `ai_draft` 分开，`snapshot_source` 走白名单，乱填 400）、该节正文为空时前端禁用「润色」并且服务端 400 拦在调模型之前、单篇空态文案不再写「先建卷/章」（层级与标签改由 `/studio/content-types` 一起给出来，前端不自己猜）、「大纲」跑完不再清空提示词框（那一句同时是逐节生成要用的）。加工弹窗打开时把底部提示词框那句带进「附加要求」做默认值。全量 195 passed，仍**零真实模型调用**。待实测 #1/#5 已交接给作者在实际写作中判断。下一步 M5 向量（可选）：fastembed + 向量召回 + RRF，届时要从建表开始。*
 
 *v2.2（2026-10-27）· 素材链路*：作者问「右边素材导入是不是不太好用」，查下来不是手感问题而是口径错——面板写着「生成时按相关度取前几条」，实现是 `list_sources(limit=5)` 各取**开头 1500 字**（第 6 条素材永远进不了 prompt，长素材最相关的那段读不到），S5 又是 `kinds=("body",)`，素材块连检索都进不去。这次把 S_src 接上真检索（`kinds=("source",)`、每条约 2 块），导入即建索引，命中块标出「第 N 段 / 原文第 X 字起 / 全文 Y 字」，没索引时退回旧行为但把「这一轮是退化的」写进 `warnings`；`sources.used` 从建表起就没任何代码写过，现在只在 prompt 真发出去时 +1（预览不算），面板显示「已用 N 次」；素材与事实卡之间补了 `POST /studio/sources/{id}/facts/extract`，抽出来的事实带 `source_id`，`citation_missing` / `fact_stale` 才追得到出处；`GET /studio/sources/{id}` 也补上了（之前连正文都点不开）。前端把「添加」从折叠区提到常驻按钮，支持拖 `.txt / .md` 多选导入、实时字数（超 2 万字只提示不拦——检索只摘命中段落）、素材搜索（复用 `/studio/search?scope=source`）、单条详情与删除确认，导入失败不再静默（旧写法只回一个 `ok`）；生成预览条下直接显示装配告警与「引用素材」。顺带把 11 章那份接口清单里 `PATCH /studio/works/{id}/sources|facts|terms` 这行**从未实现过**的写法改正。全量 206 passed，仍**零真实模型调用**。*
+
+*v2.3（2026-10-29）· 公众号发布链路*：素材链路做完之后再问「还有什么对发公众号有帮助」，查下来生成能力已经够用，缺的是**最后一公里**：导出只有 `.md`，而公众号编辑器不认 Markdown，粘进去是一堆井号；发布页要的摘要、封面、配图系统一个都没有；段落长度、半角标点、风险词也没人管。这次补上五件事：①**富文本导出**——`GET /export?format=html` 产出全内联样式的 HTML（公众号会剥掉 `<style>` 与 class，只留 style），正文里先转义再套行内格式，列表/引用/代码块/配图占位都认；②**一键复制**——`WechatDialog` 用 `ClipboardItem` 把 `text/html` 与 `text/plain` 一起写进剪贴板，不支持的浏览器退化成「选中预览再复制」；③**发布前检查**——新模块 `publish.py`，纯本地判：段落超过 120 字、中文句子里混半角标点、连续空行、行尾空格、摘要缺失或超 120 字、结尾没有互动引导、正文没有配图占位，外加 `risk-words.yaml` 里的绝对化/医疗/金融/诱导分享/迷信五类风险词（命中只提示改写，不拦截、不扣分，时政类没有内置：变化快、误报代价高，留给作者自己补）；④**摘要**——`works` 加 `digest` 列（`_migrate` 里独立判列，早先那句「ref_hash 在就 return」会挡住后续所有新列），`POST /works/{id}/digest` 让模型写 ≤120 字并落库，作品弹层里也能改；⑤**公众号文风**——`content-types.yaml` 加 `article/wechat` 子类与 `tpl_wechat` 模板（口语、每段 ≤100 字、小标题直给结论、每 2-3 段插一个「[图：画面]」占位）。全量 220 passed，仍**零真实模型调用**。*
+
+*v2.4（2026-10-29）· 公众号第二轮*：v2.3 之后接着问「还有没有对写作有帮助的」，查下来剩下的都是**每篇都要手工补的那几步**，以及一处从来没生效过的配置。①**`works.style_json` 是死配置**——`assembler._style_text()` 会读人称/时态/语气/禁忌并注入 S1，但全前端没有一处写它，所以永远是空串：每篇都只能吃 `tpl_wechat` 的通用口吻，想固定「像我」得在每节提示词里重说一遍。现在作品弹层与右栏「文风」页都能写，另给三个预设（像聊天 / 像专栏 / 像报告）。②**没有「我的文风样本」**——素材喂的是事实，模板给的是文体，而「像不像我写的」取决于句长、段长、人称、口头禅与标点，这些全是可测的量：新增 `voice.py`，纯本地统计（切句切段数数比值，不做词性分析），输出一段只含「数字支撑得出的结论」的画像（样本里没有破折号就不写破折号），跟着 S1 进 prompt。**刻意不用模型总结文风**：那只会得到一堆「文笔细腻」这类没法验证、也没法照做的形容词。③**S1 预算被挤出事故**：画像进来才发现 1,200 装不下，而 `_head` 截的是尾部——先没的正是「禁忌」，于是提到 2,000，并把顺序定成「文体 → 画像 → 逐篇 style_json」（个体覆盖底色）。④**排版只有一套皮肤**——样式全是模块常量，现在三套（纸张 / 极简 / 暖色），弹层里切换、存进 `settings.theme`，只改排版不改正文。⑤**每篇都手工贴同样的结尾**——文末引导存成全局设置，导出时自动追加，可选「往期推荐」（从台账取同子类、带链接、最新一条，当前这篇不列）。⑥**摘要只有一条、标题只有一个**——转发语（提问 / 结论 / 坦白三种口气，模型不吐 JSON 就按行切）与换标题（按全文出 6 个候选，显示字数与「列表页只露前 20 字」的截断预览，点「用这个」才改作品标题）都进了弹层。⑦**发布检查还漏三处最常出的事故**——正文外链（订阅号里点不动）、首段以「随着…」开头或超过 80 字、过千字全文一处加粗都没有，另加小标题超过 20 字会折行。⑧**发完就丢**——`publications` 表记日期/链接/阅读/在看，书架显示「已发 N 篇 · 阅读 X」。顺带把 `publications` 加进 `_NO_FK_TABLES` 与 `_ORPHAN_WHERE`：它写了 `ON DELETE CASCADE`，但连接从没开 `PRAGMA foreign_keys`，级联其实不生效——这种「看起来有外键」的表最容易被漏清。全量 244 passed（新增 24 例），5 条变异全部变红，仍**零真实模型调用**。*

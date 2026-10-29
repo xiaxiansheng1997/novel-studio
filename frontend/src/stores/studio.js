@@ -33,6 +33,11 @@ export const useStudioStore = defineStore('studio', () => {
   const facts = ref([])
   const terms = ref([])
   const issues = ref([])
+  // 公众号那一侧：文风画像是全局的，发布台账是按作品的
+  const voice = ref({ samples: [], profile: '', chars: 0 })
+  const settings = ref({})
+  const publications = ref([])
+  const pubSummary = ref([])
 
   const loading = ref(false)
   const saving = ref(false)
@@ -814,6 +819,234 @@ export const useStudioStore = defineStore('studio', () => {
     return true
   }
 
+  /**
+   * 公众号版 HTML：全内联样式，直接写剪贴板就能粘进公众号编辑器。
+   * theme 传空串表示用设置里存的默认版式；footer/archive 可以单独关掉。
+   */
+  async function exportHtml({ includeEmpty = false, theme = '', footer = true, archive = true } = {}) {
+    if (!work.value) return ''
+    const qs = new URLSearchParams({
+      format: 'html',
+      include_empty: String(includeEmpty),
+      footer: String(footer),
+      archive: String(archive),
+    })
+    if (theme) qs.set('theme', theme)
+    const r = await apiFetch(`/studio/works/${work.value.id}/export?${qs}`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '导出公众号版失败')
+      return ''
+    }
+    return await r.text()
+  }
+
+  /** 发布前体检：排版、摘要、风险词，全部本地判，不调模型 */
+  async function publishCheck() {
+    if (!work.value) return null
+    const r = await apiFetch(`/studio/works/${work.value.id}/publish-check`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '发布检查失败')
+      return null
+    }
+    return await r.json()
+  }
+
+  /** 让模型写公众号摘要（≤120 字），服务端直接写回 work.digest */
+  async function writeDigest() {
+    if (!work.value) return ''
+    error.value = ''
+    const r = await apiFetch(`/studio/works/${work.value.id}/digest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '写摘要失败')
+      return ''
+    }
+    const data = await r.json()
+    if (work.value) work.value = { ...work.value, digest: data.digest }
+    return data.digest
+  }
+
+  // ==================== 公众号：文风 / 设置 / 标题 / 转发语 / 台账 ====================
+
+  async function loadVoice() {
+    const r = await apiFetch('/studio/voice')
+    if (!r.ok) {
+      error.value = await errDetail(r, '读取文风失败')
+      return null
+    }
+    voice.value = await r.json()
+    return voice.value
+  }
+
+  /** 贴一篇旧文：服务端加完就重算画像，这里只需要把新的拉回来 */
+  async function addVoiceSample({ title = '', content }) {
+    error.value = ''
+    const r = await apiFetch('/studio/voice/samples', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, content }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '加入文风样本失败')
+      return false
+    }
+    await loadVoice()
+    return true
+  }
+
+  async function deleteVoiceSample(id) {
+    const r = await apiFetch(`/studio/voice/samples/${id}`, { method: 'DELETE' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '删除样本失败')
+      return false
+    }
+    await loadVoice()
+    return true
+  }
+
+  async function analyzeVoice() {
+    const r = await apiFetch('/studio/voice/analyze', { method: 'POST' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '重新统计失败')
+      return false
+    }
+    await loadVoice()
+    return true
+  }
+
+  async function saveVoiceProfile(profile) {
+    const r = await apiFetch('/studio/voice/profile', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '保存画像失败')
+      return false
+    }
+    const j = await r.json()
+    voice.value = { ...voice.value, profile: j.profile }
+    return true
+  }
+
+  async function loadSettings() {
+    const r = await apiFetch('/studio/settings')
+    if (r.ok) settings.value = await r.json()
+    return settings.value
+  }
+
+  async function saveSetting(key, value) {
+    const r = await apiFetch(`/studio/settings/${key}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '保存设置失败')
+      return false
+    }
+    settings.value = { ...settings.value, [key]: value }
+    return true
+  }
+
+  /** 按全文出候选标题；返回 [{text, chars}] */
+  async function generateTitles({ count = 6 } = {}) {
+    if (!work.value) return []
+    error.value = ''
+    const r = await apiFetch(`/studio/works/${work.value.id}/titles`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count, model: genModel.value }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '换标题失败')
+      return []
+    }
+    const j = await r.json()
+    return j.titles || []
+  }
+
+  /** 朋友圈/群里的转发语；返回 [{angle, text, chars}] */
+  async function shareCopies({ count = 3 } = {}) {
+    if (!work.value) return []
+    error.value = ''
+    const r = await apiFetch(`/studio/works/${work.value.id}/share`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count, model: genModel.value }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '写转发语失败')
+      return []
+    }
+    const j = await r.json()
+    return j.copies || []
+  }
+
+  async function loadPublications() {
+    if (!work.value) return []
+    const r = await apiFetch(`/studio/works/${work.value.id}/publications`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '读取发布记录失败')
+      return []
+    }
+    publications.value = await r.json()
+    return publications.value
+  }
+
+  async function addPublication(payload) {
+    if (!work.value) return false
+    error.value = ''
+    const r = await apiFetch(`/studio/works/${work.value.id}/publications`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '记发布失败')
+      return false
+    }
+    await loadPublications()
+    await loadPublicationSummary()
+    return true
+  }
+
+  async function updatePublication(id, patch) {
+    const r = await apiFetch(`/studio/publications/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '更新发布记录失败')
+      return false
+    }
+    await loadPublications()
+    await loadPublicationSummary()
+    return true
+  }
+
+  async function deletePublication(id) {
+    const r = await apiFetch(`/studio/publications/${id}`, { method: 'DELETE' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '删除发布记录失败')
+      return false
+    }
+    await loadPublications()
+    await loadPublicationSummary()
+    return true
+  }
+
+  /** 书架用：每个作品发了几篇、总阅读 */
+  async function loadPublicationSummary() {
+    const r = await apiFetch('/studio/publications/summary')
+    if (r.ok) pubSummary.value = await r.json()
+    return pubSummary.value
+  }
+
   // ==================== 加工（多候选） ====================
 
   const transforming = ref(false)
@@ -1064,7 +1297,13 @@ export const useStudioStore = defineStore('studio', () => {
     contentTypes, contentTypeError, loadContentTypes,
     outlineBusy, generateOutline,
     pipeline, runPipeline,
-    assembling, assembleDoc, downloadExport,
+    assembling, assembleDoc, downloadExport, exportHtml, publishCheck, writeDigest,
+    // 公众号第二轮：文风 / 设置 / 标题 / 转发语 / 台账
+    voice, settings, publications, pubSummary,
+    loadVoice, addVoiceSample, deleteVoiceSample, analyzeVoice, saveVoiceProfile,
+    loadSettings, saveSetting, generateTitles, shareCopies,
+    loadPublications, addPublication, updatePublication, deletePublication,
+    loadPublicationSummary,
     transforming, transformResult, transform,
     // M3 图谱与一致性
     graphData, graphBusy, graphNote, checking, issueSummary, isNovel,

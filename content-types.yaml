@@ -78,6 +78,17 @@ kinds:
         label: 通用
         template: tpl_general
         instructions: 清楚、具体，避免空话套话
+      wechat:
+        label: 公众号
+        template: tpl_wechat
+        checks_append: [absolute_claim]
+        # 公众号的读法：手机一屏约 3 行，段落一长就没人读下去
+        style_prompt: >-
+          用口语写，像在跟一个具体的人讲话。每段不超过三行（约 100 字），段与段之间空一行；
+          小标题直给结论，不写「第一部分」这类空标题。
+        instructions: >-
+          每 2-3 段插一个「[图：画面描述]」占位，写清画面里有什么；
+          结尾留一句互动或关注引导，不要用「点赞转发加关注」这种硬广腔。
 
   # ---------------- 长篇小说 ----------------
   novel:
@@ -181,6 +192,18 @@ templates:
       - { heading: 结论, prompt: 收束观点，给可执行的建议, target_words: 400 }
     style: 清楚、具体，避免空话与套话
     checks: [structure_incomplete]
+
+  - id: tpl_wechat
+    kind: article
+    subtype: wechat
+    name: 公众号文章
+    outline:
+      - { heading: 开头钩子, prompt: 用一个具体场景或反常识的结论把读者拉进来，不用「随着…」开场, target_words: 300 }
+      - { heading: 问题在哪, prompt: 讲清读者遇到的麻烦，给一个能记住的判断, target_words: 700 }
+      - { heading: 怎么做, prompt: 2-3 个可执行的做法，每个配一个真实例子, target_words: 1200 }
+      - { heading: 收尾, prompt: 一句话收束全文，再留一个互动或关注的理由, target_words: 300 }
+    style: 口语、短段，每段不超过 100 字；小标题直给信息；不用「首先/其次/最后」
+    checks: [structure_incomplete, absolute_claim]
 
   - id: tpl_report
     kind: article

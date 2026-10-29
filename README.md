@@ -51,6 +51,13 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 7. 作品标题与主旨建完还能改：点编辑器顶部的作品名就地编辑（`PATCH /studio/works/{id}`）；主旨进 S2，改完下一节就生效
 8. 右栏「素材」：拖入 `.txt / .md` 可一次导多条（导入即建索引，标题留空取文件名或首行）；生成时**按本节标题与提示词检索素材**，
    不再固定取最新 5 条的开头。单条点开看全文、一键「抽事实卡」（自动带上出处），列表上的「已用 N 次」只在它真进了 prompt 时才加
+9. **发公众号这一下**：头部「公众号」打开预览（375px 手机宽度，就是导出的那一份），点「复制到公众号」直接带走格式，
+   粘进编辑器不用再删井号；同一页给发布前检查（段落过长、中文里混半角标点、外链、套话开头、通篇不加粗、摘要没填、风险词）
+   与配图清单，摘要可以让 AI 写（≤120 字，落库），还能换 6 个标题、写 3 条转发语、切三套版式（纸张 / 极简 / 暖色）、
+   补一段文末关注引导并自动带上「往期推荐」；正文里写「[图：画面描述]」就会变成导出时的配图占位
+10. **文风**：右栏「文风」页可以给这一篇定人称 / 时态 / 语气 / 禁忌（三个预设一键填），也能贴几篇自己写过的旧文——
+    本地统计句长、段长、口头禅、人称与标点，生成一段「文风画像」跟着 S1 进每次 prompt（不占素材与检索预算，不调模型）。
+    发出去的文章在作品弹层里记一条台账（日期 / 链接 / 阅读 / 在看），书架因此能显示「已发 N 篇 · 阅读 X」
 
 ## 两种形态
 
@@ -169,24 +176,27 @@ python -m scripts.cleanup_works --sweep-orphans    # 默认试运行，加 --yes
 ```
 app/
   main.py runtime.py config.py
-  api/      studio_routes.py（62 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
+  api/      studio_routes.py（80 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
   studio/   schema.py store.py content_types.py assembler.py prompting.py tokenize.py chunker.py
             indexer.py retrieval.py summarizer.py graph.py consistency.py soft_rules.py
-            scoring.py tasks.py jobs.py jsonutil.py            ← 写作业务全在这
+            scoring.py tasks.py jobs.py jsonutil.py
+            wechat.py（公众号 HTML）publish.py（发布前检查）voice.py（文风画像）
+                                                            ← 写作业务全在这
   llm/      gateway.py        # 写作流程与 provider 解耦，复用下面的 registry 与限流
   core/     base.py modes.py registry.py sse.py store.py ratelimit.py errors.py blocked.py control_tokens.py
             auth.py alerts.py cut.py request_log.py ui_bindings.py
   browser/  playwright_pool.py session_manager.py stream_capture.py cdp_stream.py live_browser.py network_recorder.py ui_modes.py site_session.py
   providers/ _replay.py _browser_base.py  qwen.py doubao.py deepseek.py   ← 底座：驱动三家网页端
 frontend/   Vue 3 + Vite（/studio /chat /admin /live，首页重定向到 /studio；构建产物 dist 由后端托管）
-content-types.yaml   文种配置（kinds → scales → subtypes + 模板）
+content-types.yaml   文种配置（kinds → scales → subtypes + 模板；article 有 wechat 子类）
+risk-words.yaml      公众号风险词（发布前检查用，改完不用重启）
 docs/       novel-studio-tech-design.md（设计与各里程碑实测）  m0-baseline.md  content-types.md  reverse-proxy.md
 design-system/  本地生成，已 gitignore（写作台的界面规范）
 web/        旧版静态页 chat.html admin.html live.html（前端未构建时兜底）
 dev.py      frontend / backend / build / all
 scripts/    smoke_studio.py  smoke_m1_tail.py  smoke_m2.py  smoke_m3.py  smoke_m4.py  smoke_soft_rules.py
             measure_baseline.py  shot_studio.py  cleanup_works.py  restore_backup.py  login.py  recon.py  check.ps1
-tests/      pytest（全量 206 例；写作侧用 tmp_path 建临时库，不碰 storage/）
+tests/      pytest（全量 244 例；写作侧用 tmp_path 建临时库，不碰 storage/）
 storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
             backups/nodes（删节前的 JSON 备份）/ backups/works（删作品前的整库副本），已 gitignore>
 ```
@@ -258,7 +268,7 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
 
 ## 文档索引
 
-- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.0）
+- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.4）
 - `docs/m0-baseline.md` — M0 基线实测数据
 - `docs/content-types.md` — 文种与模板配置约定
 - `docs/reverse-proxy.md` — 底座：驱动三家网页端、`/v1` API 用法、风控排查细则
