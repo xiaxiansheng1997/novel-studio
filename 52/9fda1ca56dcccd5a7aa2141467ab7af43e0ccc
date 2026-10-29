@@ -1,0 +1,46 @@
+README.md
+  h_b2fffa70dc114c 54-60,179,182-184,191-192,199,271
+app/api/studio_routes.py
+  h_b2fffa70dc114c 26-37,39,79-80,1100-1105,1111,1117-1138,1143,1155-1159,1161-1171,1174-1191,1207-1526
+app/studio/assembler.py
+  h_b2fffa70dc114c 43-45,325-331,348-350
+app/studio/publish.py
+  h_b2fffa70dc114c 1-285
+app/studio/schema.py
+  h_b2fffa70dc114c 38-39,311-346
+app/studio/store.py
+  h_b2fffa70dc114c 28-30,48,170-171,174-196,323-324,1217-1399
+app/studio/voice.py
+  h_b2fffa70dc114c 1-203
+app/studio/wechat.py
+  h_b2fffa70dc114c 1-268
+content-types.yaml
+  h_b2fffa70dc114c 81-91,196-207
+docs/novel-studio-tech-design.md
+  h_b2fffa70dc114c 600-609,725-730,1163-1183,1286-1295,1328-1329,1448-1449,1467-1470,1490-1493
+frontend/src/components/StudioPanel.vue
+  h_b2fffa70dc114c 161-232,538-618,717,736,738,740-742,1419-1470
+frontend/src/components/WechatDialog.vue
+  h_b2fffa70dc114c 1-657
+frontend/src/stores/studio.js
+  h_b2fffa70dc114c 36-40,822-1049,1300-1306
+frontend/src/views/StudioView.vue
+  h_b2fffa70dc114c 89-91,138-148,150-172,202-204,384-385,397,435,437-470,610-611,775-776,784-788,798-827,1196-1254,1358-1371
+risk-words.yaml
+  h_b2fffa70dc114c 1-81
+tests/test_publish.py
+  h_b2fffa70dc114c 1-285
+tests/test_publish_plus.py
+  h_b2fffa70dc114c 1-433
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "529fda1ca56dcccd5a7aa2141467ab7af43e0ccc",
+  "prompts": {},
+  "humans": {
+    "h_b2fffa70dc114c": {
+      "author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
