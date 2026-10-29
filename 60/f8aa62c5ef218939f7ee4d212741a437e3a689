@@ -1,0 +1,44 @@
+README.md
+  h_b2fffa70dc114c 61-68,187,207,279
+app/api/studio_routes.py
+  h_b2fffa70dc114c 15,36,83-84,143-162,198-244,305-376,541-564,621-633,660-675,798,823-827,831-840,842-843,870-877
+app/studio/schema.py
+  h_b2fffa70dc114c 347-367
+app/studio/store.py
+  h_b2fffa70dc114c 519,540-543,1080-1082,1130-1156,1210-1243,1284-1320,1504-1589,1821-1877
+docs/novel-studio-tech-design.md
+  h_b2fffa70dc114c 1211,1215,1217,1219-1220,1225,1229-1233,1306-1317,1352-1354,1475,1496-1497,1522-1529
+frontend/src/components/AppIcon.vue
+  h_b2fffa70dc114c 68-69
+frontend/src/components/GlobalSearch.vue
+  h_b2fffa70dc114c 1-324
+frontend/src/components/ImportDocDialog.vue
+  h_b2fffa70dc114c 1-425
+frontend/src/components/StudioPanel.vue
+  h_b2fffa70dc114c 91-117,126-137,139-153,178-189,191-202,590-596,889-985,1065-1067,1154-1161
+frontend/src/components/StudioTree.vue
+  h_b2fffa70dc114c 5-10,22,26,29-40,85,91,99-201,257,259-276,322-347
+frontend/src/stores/studio.js
+  h_b2fffa70dc114c 41-43,129-212,322-325,327,339-341,343-359,382-427,537-553,575-588,610-623,640,642-644,648,652-653,659,699-701,704,708-712,714-716,718-721,724,731,1491,1494-1500
+frontend/src/views/StudioView.vue
+  h_b2fffa70dc114c 12,18-29,32-56,103-122,124,132-138,156-166,177-179,183,257-262,319-326,354-371,373-380,382-384,387-389,497-504,517-518,532,561-637,687-702,750-751,764-826,829,892-893,915-919,929-948,951-952,957-969,978-981,985-990,1021-1025,1084,1086,1088-1089,1091-1097,1099,1104-1106,1110-1112,1210-1214,1222-1233,1235,1243-1247,1445,1447-1619,1704-1728,1945-1950,2049-2063,2167-2191,2197-2201
+tests/test_edit_entities.py
+  h_b2fffa70dc114c 1-204
+tests/test_global_search.py
+  h_b2fffa70dc114c 1-174
+tests/test_ideas_stats.py
+  h_b2fffa70dc114c 1-167
+tests/test_studio_instructions.py
+  h_b2fffa70dc114c 213-224
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "60f8aa62c5ef218939f7ee4d212741a437e3a689",
+  "prompts": {},
+  "humans": {
+    "h_b2fffa70dc114c": {
+      "author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
