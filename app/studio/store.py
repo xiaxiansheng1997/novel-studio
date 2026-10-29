@@ -516,7 +516,7 @@ class StudioStore:
 
         async with self._lock:
             cur = await self._db.execute(
-                "SELECT content, work_id FROM nodes WHERE id = ?", (node_id,)
+                "SELECT content, work_id, word_count FROM nodes WHERE id = ?", (node_id,)
             )
             row = await cur.fetchone()
             if not row:
@@ -537,6 +537,10 @@ class StudioStore:
             # 只能在这一刻主动置空——不然改完第 7 章，S3 会继续拿着旧卷概要用下去。
             if "content" in updates and (updates["content"] or "") != old:
                 await self._mark_stale_locked(row["work_id"], node_id)
+                # 手写才计入「今天写了多少字」：AI 采用的正文走 ai_*，夜间跑批不该刷高统计
+                if snapshot_source == "human":
+                    await self._log_writes_locked(
+                        now, int(updates["word_count"]) - int(row["word_count"] or 0))
 
             # 只在显式要求时留版本：自动保存每几秒一次，全存会把库撑爆
             if snapshot and "content" in updates and (updates["content"] or "") != old:
@@ -1073,7 +1077,9 @@ class StudioStore:
             return node
         if current and current != await self._newest_version_content(node_id):
             await self.append_version(node_id, current, source="human")
-        await self.update_node(node_id, content=target["content"] or "")
+        # 回滚不是「写」：换回旧稿不该把当天的字数刷高
+        await self.update_node(node_id, content=target["content"] or "",
+                               snapshot_source="restore")
         return await self.get_node(node_id)
 
     # ==================== 素材 / 事实 / 术语 ====================
@@ -1120,6 +1126,33 @@ class StudioStore:
             cur = await self._db.execute("DELETE FROM sources WHERE id = ?", (source_id,))
             await self._db.commit()
         return (cur.rowcount or 0) > 0
+
+    async def update_source(
+        self, source_id: str, *, title: Optional[str] = None, url: Optional[str] = None,
+        published_at: Optional[str] = None, content: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """改一条素材的标题/出处/正文。
+
+        这里只写字段，不碰 chunks：要不要重建索引交给 `indexer.index_source`
+        按 content_hash 判断——只改标题时它会自己跳过，不用在这里分叉。
+        """
+        updates = {
+            "title": title, "url": url, "published_at": published_at, "content": content,
+        }
+        updates = {k: v for k, v in updates.items() if v is not None}
+        if not updates:
+            return await self.get_source(source_id)
+        assert self._db is not None
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        async with self._lock:
+            cur = await self._db.execute("SELECT id FROM sources WHERE id = ?", (source_id,))
+            if not await cur.fetchone():
+                return None
+            await self._db.execute(
+                f"UPDATE sources SET {sets} WHERE id = ?", [*updates.values(), source_id]
+            )
+            await self._db.commit()
+        return await self.get_source(source_id)
 
     async def mark_sources_used(self, source_ids: list[str]) -> int:
         """记一次「这条素材真的进了 prompt」。
@@ -1174,6 +1207,40 @@ class StudioStore:
             await self._db.commit()
         return (cur.rowcount or 0) > 0
 
+    async def update_fact(
+        self, fact_id: str, *, statement: Optional[str] = None,
+        confidence: Optional[float] = None, valid_until: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """改一张事实卡。出处（source_id）不在这里改：换来源等于换一条卡。"""
+        updates = {
+            "statement": statement, "confidence": confidence, "valid_until": valid_until,
+        }
+        updates = {k: v for k, v in updates.items() if v is not None}
+        if not updates:
+            return await self.get_fact(fact_id)
+        assert self._db is not None
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        async with self._lock:
+            cur = await self._db.execute("SELECT id FROM facts WHERE id = ?", (fact_id,))
+            if not await cur.fetchone():
+                return None
+            await self._db.execute(
+                f"UPDATE facts SET {sets} WHERE id = ?", [*updates.values(), fact_id]
+            )
+            await self._db.commit()
+        return await self.get_fact(fact_id)
+
+    async def get_fact(self, fact_id: str) -> Optional[dict[str, Any]]:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT f.*, s.title AS source_title FROM facts f "
+                "LEFT JOIN sources s ON s.id = f.source_id WHERE f.id = ?",
+                (fact_id,),
+            )
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
     async def upsert_term(
         self, work_id: str, *, term: str, definition: str = "",
         preferred: str = "", forbidden: list[str] | None = None,
@@ -1213,6 +1280,43 @@ class StudioStore:
             cur = await self._db.execute("DELETE FROM terms WHERE id = ?", (term_id,))
             await self._db.commit()
         return (cur.rowcount or 0) > 0
+
+    async def update_term(
+        self, term_id: str, *, term: Optional[str] = None, definition: Optional[str] = None,
+        preferred: Optional[str] = None, forbidden: Optional[list[str]] = None,
+    ) -> Optional[dict[str, Any]]:
+        """改术语。改词本身会撞 `UNIQUE(work_id, term)`——那是「重名」，不是系统故障。"""
+        import sqlite3
+
+        updates: dict[str, Any] = {
+            "term": term, "definition": definition, "preferred": preferred,
+        }
+        updates = {k: v for k, v in updates.items() if v is not None}
+        if forbidden is not None:
+            updates["forbidden"] = json.dumps(forbidden, ensure_ascii=False)
+        if not updates:
+            return await self.get_term(term_id)
+        assert self._db is not None
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        async with self._lock:
+            cur = await self._db.execute("SELECT id FROM terms WHERE id = ?", (term_id,))
+            if not await cur.fetchone():
+                return None
+            try:
+                await self._db.execute(
+                    f"UPDATE terms SET {sets} WHERE id = ?", [*updates.values(), term_id]
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("已经有同名术语了") from exc
+            await self._db.commit()
+        return await self.get_term(term_id)
+
+    async def get_term(self, term_id: str) -> Optional[dict[str, Any]]:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute("SELECT * FROM terms WHERE id = ?", (term_id,))
+            row = await cur.fetchone()
+        return dict(row) if row else None
 
     # ==================== 公众号：文风 / 设置 / 发布台账 ====================
 
@@ -1393,6 +1497,92 @@ class StudioStore:
                 "ORDER BY p.published_at DESC LIMIT ?",
                 (exclude_work_id or "", subtype or "", subtype or "",
                  max(1, min(int(limit), 20))),
+            )
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    # ==================== 选题池与写作统计 ====================
+
+    async def add_idea(self, text: str) -> dict[str, Any]:
+        assert self._db is not None
+        iid = _new_id("idea_")
+        now = _now()
+        async with self._lock:
+            await self._db.execute(
+                "INSERT INTO ideas(id, text, status, work_id, created_at, updated_at) "
+                "VALUES(?,?,'open','',?,?)",
+                (iid, text, now, now),
+            )
+            await self._db.commit()
+            cur = await self._db.execute("SELECT * FROM ideas WHERE id = ?", (iid,))
+            row = await cur.fetchone()
+        return dict(row) if row else {}
+
+    async def get_idea(self, idea_id: str) -> Optional[dict[str, Any]]:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute("SELECT * FROM ideas WHERE id = ?", (idea_id,))
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_ideas(self, *, status: str = "open", limit: int = 50) -> list[dict[str, Any]]:
+        assert self._db is not None
+        sql = "SELECT * FROM ideas"
+        params: list[Any] = []
+        if status:
+            sql += " WHERE status = ?"
+            params.append(status)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(limit, _MAX_LIMIT)))
+        async with self._lock:
+            cur = await self._db.execute(sql, params)
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def update_idea(self, idea_id: str, **fields: Any) -> bool:
+        allowed = {"text", "status", "work_id"}
+        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates:
+            return False
+        assert self._db is not None
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        async with self._lock:
+            cur = await self._db.execute(
+                f"UPDATE ideas SET {sets}, updated_at = ? WHERE id = ?",
+                [*updates.values(), _now(), idea_id],
+            )
+            await self._db.commit()
+        return (cur.rowcount or 0) > 0
+
+    async def delete_idea(self, idea_id: str) -> bool:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute("DELETE FROM ideas WHERE id = ?", (idea_id,))
+            await self._db.commit()
+        return (cur.rowcount or 0) > 0
+
+    async def _log_writes_locked(self, now: float, chars: int) -> None:
+        """把一次手写保存记到当天。**调用方必须已持有 self._lock**。"""
+        assert self._db is not None
+        day = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+        await self._db.execute(
+            "INSERT INTO write_days(day, chars, saves, updated_at) VALUES(?,?,1,?) "
+            "ON CONFLICT(day) DO UPDATE SET chars = chars + excluded.chars, "
+            "saves = saves + 1, updated_at = excluded.updated_at",
+            (day, max(0, int(chars)), now),
+        )
+
+    async def daily_writes(self, *, days: int = 30) -> list[dict[str, Any]]:
+        """按天的手写净增字数（`update_node` 实时累加，不在查询时扫版本表）。
+
+        负增量记 0：删改不该显示成「写了负字」；只删不改的那一天仍会留一行（chars=0），
+        连续天数按 chars>0 判，自然不算写作日。
+        """
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT day, chars, saves FROM write_days ORDER BY day DESC LIMIT ?",
+                (max(1, min(days, 180)),),
             )
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
@@ -1627,6 +1817,63 @@ class StudioStore:
             )
             titles.update({r["id"]: (r["title"] or "素材") for r in await cur.fetchall()})
         return titles
+
+    async def search_chunks_global(
+        self, match_expr: str, *, kinds: tuple[str, ...] = ("body", "source"), limit: int = 40,
+    ) -> list[dict[str, Any]]:
+        """跨作品检索：与 `search_chunks` 同一套 FTS，只是不按 work_id 过滤。
+
+        作品一多，「我之前在哪篇写过这个」就只能一篇篇点进去搜——那是书架最先崩的一步。
+        """
+        assert self._db is not None
+        if not match_expr:
+            return []
+        cap = max(1, min(limit, 120))
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT chunk_id, bm25(chunks_fts) AS rank FROM chunks_fts "
+                "WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
+                (match_expr, cap * 3),
+            )
+            hits = await cur.fetchall()
+            if not hits:
+                return []
+            order = {r["chunk_id"]: float(r["rank"] or 0.0) for r in hits}
+            marks = ",".join("?" for _ in hits)
+            kms = ",".join("?" for _ in kinds)
+            cur = await self._db.execute(
+                "SELECT c.id, c.work_id, c.source_kind, c.node_id, c.source_id, c.ordinal, "
+                "c.text, w.title AS work_title, w.status AS work_status, n.title AS node_title "
+                "FROM chunks c JOIN works w ON w.id = c.work_id "
+                "LEFT JOIN nodes n ON n.id = c.node_id "
+                f"WHERE c.id IN ({marks}) AND c.source_kind IN ({kms})",
+                [*order.keys(), *kinds],
+            )
+            rows = await cur.fetchall()
+        out = [dict(r) for r in rows]
+        for d in out:
+            d["score"] = -order.get(d["id"], 0.0)
+        # 保持 FTS 的排序（IN 查询不保证顺序）
+        out.sort(key=lambda d: order.get(d["id"], 0.0))
+        return out[:cap]
+
+    async def search_works_meta(self, q: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        """标题/主旨里直接命中。
+
+        正文 FTS 只索引 chunks，搜不到书名；而人找东西常常只记得名字。
+        """
+        assert self._db is not None
+        if not (q or "").strip():
+            return []
+        like = f"%{q.strip()}%"
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT id, title, premise, kind, status, updated_at FROM works "
+                "WHERE title LIKE ? OR premise LIKE ? ORDER BY updated_at DESC LIMIT ?",
+                (like, like, max(1, min(limit, 20))),
+            )
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
 
     async def touch_index_state(self, work_id: str, **fields: Any) -> None:
         allowed = {"last_chunk_ordinal", "last_graph_ordinal", "last_summary_ordinal", "dirty"}

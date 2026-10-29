@@ -210,6 +210,18 @@ def test_adopted_polish_is_not_recorded_as_a_draft(tmp_path) -> None:
         assert rows[0]["source"] == "ai_polish", rows
 
 
+def test_generate_still_emits_done_after_the_abort_guard(tmp_path) -> None:
+    """给中止加的 except/finally 不能顺手把正常收尾吞掉：done 与 [DONE] 都得到。"""
+    gw = FakeGateway()
+    with make_client(tmp_path, gw) as client:
+        _, node = make_article(client)
+        resp = client.post(f"/studio/nodes/{node['id']}/generate",
+                           json={"task_type": "article_draft", "instruction": ""})
+        assert resp.status_code == 200, resp.text
+        assert '"event": "done"' in resp.text, resp.text[-400:]
+        assert "data: [DONE]" in resp.text
+
+
 def test_patch_node_accepts_a_known_source_only(tmp_path) -> None:
     """`snapshot_source` 是白名单：放开成任意字符串，历史页会出现没人看得懂的行。"""
     gw = FakeGateway()

@@ -9,16 +9,50 @@
 
     <div class="studio">
       <!-- 未选作品：书架 -->
-      <main v-if="!store.work" class="shelf">
+      <main v-if="!store.work" ref="shelfEl" class="shelf">
         <header class="shelf-head">
           <div>
             <h1>写作台</h1>
             <p class="shelf-sub">长篇连载与单篇文档共用一套工作台，结构由作品类型决定。</p>
           </div>
-          <button class="btn btn-primary" @click="showCreate = !showCreate">
-            <AppIcon name="plus" :size="15" /> 新建作品
-          </button>
+          <div class="shelf-tools">
+            <label class="shelf-search">
+              <AppIcon name="search" :size="14" />
+              <input v-model="shelfQ" class="field" placeholder="搜标题 / 主旨" aria-label="筛选作品" />
+            </label>
+            <button class="btn btn-sm" title="跨作品搜正文与素材（Ctrl+K）" @click="openSearch()">
+              <AppIcon name="search" :size="13" /> 搜正文
+            </button>
+            <button class="btn btn-primary" @click="showCreate = !showCreate">
+              <AppIcon name="plus" :size="15" /> 新建作品
+            </button>
+          </div>
         </header>
+
+        <!-- 归档只是从书架收起，不删任何东西：所以在写/已归档是两个视图，不是筛选器 -->
+        <div class="shelf-views">
+          <button class="view-chip" :class="{ 'is-on': !showArchived }" @click="showArchived = false">
+            在写 {{ activeWorks.length }}
+          </button>
+          <button class="view-chip" :class="{ 'is-on': showArchived }" @click="showArchived = true">
+            已归档 {{ archivedWorks.length }}
+          </button>
+        </div>
+
+        <!-- 写作日历：数据从版本表现算，不在别处另记一份 -->
+        <section class="write-log" aria-label="写作统计">
+          <span class="wl-item"><strong>{{ fmt(store.dailyWrites.today) }}</strong> 今天字数</span>
+          <span class="wl-item"><strong>{{ store.dailyWrites.streak }}</strong> 连续天</span>
+          <span class="wl-days" :title="last14.map((d) => `${d.day} ${d.chars} 字`).join(' / ')">
+            <span
+              v-for="d in last14"
+              :key="d.day"
+              class="wl-bar"
+              :class="{ 'is-on': d.chars > 0 }"
+              :style="{ height: barHeight(d.chars) }"
+            ></span>
+          </span>
+        </section>
 
         <form v-if="showCreate" class="create card" @submit.prevent="create">
           <div class="create-row">
@@ -66,9 +100,28 @@
           </div>
         </form>
 
-        <div v-if="store.works.length" class="grid">
+        <!-- 灵感箱：一句话想法先落这儿，不占作品 -->
+        <section class="ideas">
+          <div class="ideas-head">
+            <h2>灵感箱</h2>
+            <span class="ideas-sub">还没成形的一句话，先记着；「用它开写」会填进上面的新建表单</span>
+          </div>
+          <form class="ideas-add" @submit.prevent="saveIdea">
+            <input v-model="ideaDraft" class="field" placeholder="一句话：想写什么，给谁看" />
+            <button class="btn btn-sm" type="submit" :disabled="ideaBusy || !ideaDraft.trim()">记下</button>
+          </form>
+          <ul v-if="store.ideas.length" class="idea-list">
+            <li v-for="i in store.ideas" :key="i.id" class="idea-row">
+              <span class="idea-text" :title="i.text">{{ i.text }}</span>
+              <button class="link-btn" @click="startFromIdea(i)">用它开写</button>
+              <button class="idea-del" title="删掉这条想法" @click="store.deleteIdea(i.id)">删</button>
+            </li>
+          </ul>
+        </section>
+
+        <div v-if="visibleWorks.length" class="grid">
           <div
-            v-for="w in store.works"
+            v-for="w in visibleWorks"
             :key="w.id"
             class="work-card"
             role="button"
@@ -76,6 +129,13 @@
             @click="openWork(w.id)"
             @keydown.enter="openWork(w.id)"
           >
+            <button
+              class="work-arch"
+              :title="showArchived ? '移回「在写」' : '归档：从书架收起，正文与版本都不删'"
+              @click.stop="showArchived ? unarchiveWork(w) : archiveWork(w)"
+            >
+              <AppIcon :name="showArchived ? 'refresh' : 'archive'" :size="12" />
+            </button>
             <button
               class="work-del"
               title="删除作品（连同节点树与全部历史版本；删前留一份整库副本）"
@@ -93,7 +153,17 @@
           </div>
         </div>
         <p v-else-if="!showCreate" class="shelf-empty">
-          还没有作品。点右上角「新建作品」，或先把已有稿件粘进来改写。
+          <template v-if="shelfQ">
+            没有匹配「{{ shelfQ }}」的作品。
+            <button class="link-btn" @click="openSearch(shelfQ)">去正文里搜</button>
+          </template>
+          <template v-else-if="showArchived">还没有归档的作品。归档只是从书架收起，不删正文。</template>
+          <template v-else-if="archivedWorks.length">
+            在写的都归档了（{{ archivedWorks.length }} 篇），切到「已归档」可以翻出来。
+          </template>
+          <template v-else>
+            还没有作品。先点右上角「新建作品」，进去之后左栏有「导入旧稿」，能把已有章节一次贴进来。
+          </template>
         </p>
       </main>
 
@@ -104,10 +174,13 @@
           :active-id="store.activeNodeId"
           :title="store.work.title"
           :stats="store.stats"
-          @select="store.selectNode"
+          :target="store.work.target_words || 0"
+          :work-id="store.work.id"
+          @select="onSelectNode"
           @create="quickCreate"
           @remove="removeNode"
           @move="moveNode"
+          @import="importOpen = true"
         />
 
         <main class="editor">
@@ -181,7 +254,12 @@
               </div>
             </div>
             <span v-if="store.template" class="pill pill--info">{{ store.template.name }}</span>
-            <span class="ed-save">{{ saveLabel }}</span>
+            <span
+              class="ed-save"
+              :class="{ 'is-bad': saveState === 'error' }"
+              :title="saveState === 'error' ? '没存上，点一下重试（正文还在页面上）' : ''"
+              @click="saveState === 'error' && flushSave()"
+            >{{ saveLabel }}</span>
             <div class="ed-right">
               <button class="btn btn-sm" :disabled="store.outlineBusy || store.pipeline.running"
                       title="按模板和主旨生成目录，落成节点" @click="doOutline">
@@ -238,7 +316,14 @@
                 <option value="review">待审</option>
                 <option value="final">定稿</option>
               </select>
-              <span class="ed-count">{{ wordCount }} 字</span>
+              <span class="ed-count" :class="{ over: nodeTarget && wordCount > nodeTarget * 1.1 }">
+                {{ wordCount }} 字<template v-if="nodeTarget"> / {{ nodeTarget }}</template>
+              </span>
+              <span
+                v-if="nodeTarget"
+                class="ed-prog"
+                :title="`本节目标 ${nodeTarget} 字`"
+              ><i :style="{ width: Math.min(100, (wordCount / nodeTarget) * 100) + '%' }"></i></span>
             </div>
 
             <div class="ed-body">
@@ -266,16 +351,42 @@
               <p v-if="store.genMeta?.used_sources?.length" class="gen-src">
                 引用素材：{{ store.genMeta.used_sources.map((s) => s.title).join('、') }}
               </p>
-              <pre v-if="store.genText" class="gen-text">{{ store.genText }}</pre>
+              <!-- 逐段勾选：一千五百字里只想要三段时，不必先整段采用再手删 -->
+              <div v-if="store.genText" class="gen-text">
+                <label
+                  v-for="(p, i) in genParas"
+                  :key="i"
+                  class="gen-para"
+                  :class="{ 'is-off': !isPicked(i) }"
+                >
+                  <input
+                    v-if="!store.generating"
+                    v-model="genPicked[i]"
+                    type="checkbox"
+                    class="gen-para-box"
+                    :aria-label="`采用第 ${i + 1} 段`"
+                  />
+                  <span class="gen-para-text">{{ p }}</span>
+                </label>
+              </div>
               <p v-if="store.genError" class="gen-err">{{ store.genError }}</p>
+              <!-- 停止后别把半截稿当失败：已经出来的部分可以照常采用 -->
+              <p v-if="store.genStopped" class="gen-stop">
+                已停止：上面是停下前生成的部分，可以继续采用
+              </p>
+              <footer v-if="store.generating" class="gen-actions">
+                <button class="btn btn-sm" @click="store.stopGenerate()">停止生成</button>
+                <span class="gen-tip">断开连接，已生成的部分会留下</span>
+              </footer>
               <footer v-if="!store.generating && store.genText" class="gen-actions">
-                <button class="btn btn-primary btn-sm" @click="adopt">
-                  <AppIcon name="check" :size="13" /> 采用
+                <button class="btn btn-primary btn-sm" :disabled="!pickedCount" @click="adopt">
+                  <AppIcon name="check" :size="13" />
+                  {{ pickedCount === genParas.length ? '全部采用' : `采用 ${pickedCount}/${genParas.length} 段` }}
                 </button>
                 <button class="btn btn-sm" @click="store.discardGenerated()">放弃</button>
-                <span class="gen-tip">
-                  采用后会存为一个版本，可在右栏「历史」里对比并回滚
-                </span>
+                <button class="link-btn" @click="pickAll(true)">全选</button>
+                <button class="link-btn" @click="pickAll(false)">全不选</button>
+                <span class="gen-tip">勾掉不要的段；采用会存为一个版本，可在右栏「历史」里回滚</span>
               </footer>
             </section>
 
@@ -383,6 +494,14 @@
     />
 
     <WechatDialog v-model:open="wechatOpen" @goto="gotoIssue" />
+    <GlobalSearch v-model:open="searchOpen" :initial="searchSeed" @goto="gotoSearchHit" />
+    <ImportDocDialog
+      v-model:open="importOpen"
+      :parent-id="importParent.id"
+      :parent-title="importParent.title"
+      :leaf-kind="importKind"
+      @done="onImported"
+    />
   </div>
 </template>
 
@@ -395,6 +514,8 @@ import StudioTree from '../components/StudioTree.vue'
 import StudioPanel from '../components/StudioPanel.vue'
 import TransformDialog from '../components/TransformDialog.vue'
 import WechatDialog from '../components/WechatDialog.vue'
+import GlobalSearch from '../components/GlobalSearch.vue'
+import ImportDocDialog from '../components/ImportDocDialog.vue'
 import { useStudioStore } from '../stores/studio'
 import { apiFetch } from '../utils/api'
 
@@ -408,7 +529,7 @@ const form = ref({ kind: 'article', scale: 'single', subtype: 'tech', title: '',
 
 const titleDraft = ref('')
 const contentDraft = ref('')
-const saveState = ref('saved') // saved | saving | dirty
+const saveState = ref('saved') // saved | saving | dirty | error
 const taskType = ref('article_draft')
 const instruction = ref('')
 const editorEl = ref(null)
@@ -436,6 +557,83 @@ const workDigestDraft = ref('')
 const savingWork = ref(false)
 const digestBusy = ref(false)
 const wechatOpen = ref(false)
+
+// 书架：搜索框只筛卡片，跨作品搜正文走 Ctrl+K 那个弹层——两种搜索混在一个框里会互相误会
+const shelfQ = ref('')
+const showArchived = ref(false)
+const searchOpen = ref(false)
+const searchSeed = ref('')
+
+/** 打开全库搜索；带 seed 时（书架空态点的「去正文里搜」）直接搜这个词 */
+function openSearch(seed = '') {
+  searchSeed.value = seed
+  searchOpen.value = true
+}
+
+const ideaDraft = ref('')
+const ideaBusy = ref(false)
+const pendingIdea = ref('')
+const shelfEl = ref(null)
+
+// 关掉新建表单就别再记着那条灵感：否则下一次手动新建会被误标成「用它开写」
+watch(showCreate, (on) => {
+  if (!on) pendingIdea.value = ''
+})
+
+async function saveIdea() {
+  const text = ideaDraft.value.trim()
+  if (!text || ideaBusy.value) return
+  ideaBusy.value = true
+  const idea = await store.addIdea(text)
+  ideaBusy.value = false
+  if (!idea) {
+    showNotice(store.error || '记下失败', true)
+    return
+  }
+  ideaDraft.value = ''
+}
+
+/** 用它开写：只填新建表单，kind/scale 仍由人挑——猜错类型比不填更麻烦 */
+async function startFromIdea(idea) {
+  pendingIdea.value = idea.id
+  form.value.title = idea.text.slice(0, 40)
+  form.value.premise = idea.text
+  showCreate.value = true
+  await nextTick()
+  shelfEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+const activeWorks = computed(() => store.works.filter((w) => (w.status || 'active') !== 'archived'))
+const archivedWorks = computed(() => store.works.filter((w) => w.status === 'archived'))
+const visibleWorks = computed(() => {
+  const base = showArchived.value ? archivedWorks.value : activeWorks.value
+  const q = shelfQ.value.trim().toLowerCase()
+  if (!q) return base
+  return base.filter((w) =>
+    (w.title || '').toLowerCase().includes(q) || (w.premise || '').toLowerCase().includes(q),
+  )
+})
+
+async function archiveWork(w) {
+  if (!(await store.setWorkStatus(w.id, 'archived'))) showNotice(store.error || '归档失败', true)
+}
+
+async function unarchiveWork(w) {
+  if (!(await store.setWorkStatus(w.id, 'active'))) showNotice(store.error || '恢复失败', true)
+}
+
+/** 全库搜索的结果点进来：同一篇里就直接换节，不然带着 node 跳过去 */
+async function gotoSearchHit(hit) {
+  if (!hit?.work_id) return
+  if (store.work?.id === hit.work_id) {
+    if (hit.node_id) await onSelectNode(hit.node_id)
+    return
+  }
+  router.push({
+    path: `/studio/${hit.work_id}`,
+    query: hit.node_id ? { node: hit.node_id } : {},
+  })
+}
 
 // 发布台账：只记「发出去之后才知道」的数，跟正文无关，所以放在作品弹层里
 const pubDraft = ref({ published_at: '', url: '', reads: 0, likes: 0 })
@@ -486,6 +684,22 @@ const emptyHint = computed(() =>
       + '或先点「大纲」按模板把目录落成节点。',
 )
 
+// ---- 导入旧稿 ----
+// 当前选中的是容器（卷/篇）就挂进去，否则落在根上：跨卷移动还没做，落在根上最安全
+const importOpen = ref(false)
+const importParent = computed(() => {
+  const n = store.node
+  return n && n.ordinal == null ? { id: n.id, title: n.title } : { id: '', title: '' }
+})
+const importKind = computed(
+  () => scaleMeta.value?.leaf_kind || (store.work?.kind === 'novel' ? 'chapter' : 'section'),
+)
+
+async function onImported(res) {
+  showNotice(`已导入 ${res.created} 节`)
+  if (res.firstId) await store.selectNode(res.firstId)
+}
+
 // ---- 队列（M4） ----
 const queueHidden = ref(false)
 const qc = computed(() => store.queue?.counts || {})
@@ -533,6 +747,8 @@ let saveTimer = 0
 
 const saveLabel = computed(() => {
   if (!store.node) return ''
+  // 失败要显眼：以前无论成功失败都写「已保存」，关页面前一秒才发现白写了
+  if (saveState.value === 'error') return '保存失败'
   if (store.saving || saveState.value === 'saving') return '保存中…'
   if (saveState.value === 'dirty') return '未保存'
   return '已保存'
@@ -545,8 +761,72 @@ const wordCount = computed(() => {
   return cjk + words
 })
 
+/** 本节目标字数：只在大纲生成过的那一节有（存在 meta_json.outline 里） */
+const nodeTarget = computed(() => {
+  try {
+    const meta = JSON.parse(store.work?.meta_json || '{}')
+    return Number(meta?.outline?.[store.node?.id]?.target_words || 0)
+  } catch {
+    return 0
+  }
+})
+
+// ---- 生成结果逐段采用 ----
+const genParas = computed(() =>
+  (store.genText || '')
+    .split(/\n{2,}/)
+    .map((s) => s.trim())
+    .filter(Boolean),
+)
+const genPicked = ref([])
+
+function isPicked(i) {
+  return genPicked.value[i] !== false
+}
+
+const pickedCount = computed(() => genParas.value.filter((_, i) => isPicked(i)).length)
+
+function pickAll(on) {
+  genPicked.value = genParas.value.map(() => on)
+}
+
+// 流式生成时段落还在长，等停了再给勾选（默认全选）；重新生成时重置
+watch(() => store.generating, (on, was) => {
+  if (was && !on) pickAll(true)
+})
+watch(() => store.genText, (text) => {
+  if (!text) genPicked.value = []
+})
+
+// ---- 写作日历（近 14 天，今天在最右）----
+function ymd(dt) {
+  const m = String(dt.getMonth() + 1).padStart(2, '0')
+  const d = String(dt.getDate()).padStart(2, '0')
+  return `${dt.getFullYear()}-${m}-${d}`
+}
+
+const last14 = computed(() => {
+  const got = new Map((store.dailyWrites.days || []).map((d) => [d.day, d.chars]))
+  const out = []
+  const base = new Date()
+  for (let i = 13; i >= 0; i--) {
+    const dt = new Date(base.getFullYear(), base.getMonth(), base.getDate() - i)
+    const day = ymd(dt)
+    out.push({ day, chars: got.get(day) || 0 })
+  }
+  return out
+})
+
+const dailyMax = computed(() => Math.max(1, ...last14.value.map((d) => d.chars)))
+
+function barHeight(chars) {
+  if (!chars) return '3px'
+  return Math.max(6, Math.round((chars / dailyMax.value) * 24)) + 'px'
+}
+
 const genStatus = computed(() => {
   if (store.generating) return store.genText ? '生成中' : '装配上下文…'
+  if (store.genStopped) return '已停止'
   return '生成完成'
 })
 
@@ -609,6 +889,8 @@ onMounted(async () => {
     store.loadGenModels().catch(() => {}),
     // 书架上的「已发 · 阅读」来自台账；拉不到就不显示那一行，不影响写作
     store.loadPublicationSummary().catch(() => {}),
+    store.loadIdeas().catch(() => {}),
+    store.loadDailyWrites().catch(() => {}),
   ])
   if (!kinds.value.some((k) => k.id === form.value.kind)) form.value.kind = kinds.value[0]?.id || 'article'
   applyScaleDefaults()
@@ -630,6 +912,11 @@ watch(() => store.node?.id, () => {
 
 // 键盘可达：Ctrl+S 立即存，Ctrl+Enter 生成（见 design-system MASTER.md）
 function onKeydown(e) {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault()
+    openSearch()
+    return
+  }
   if (!(e.ctrlKey || e.metaKey)) return
   if (e.key === 's') {
     e.preventDefault()
@@ -639,12 +926,46 @@ function onKeydown(e) {
     runGenerate()
   }
 }
-onMounted(() => window.addEventListener('keydown', onKeydown))
+/**
+ * 离开前的两条保险：
+ * 1. 还没落盘就关标签页/刷新，让浏览器拦一下（saveState 不是 saved 时）；
+ * 2. 切到别的标签页先存一次——比 beforeunload 更早，用户往往触发不到前者。
+ */
+function onBeforeUnload(e) {
+  if (saveState.value === 'saved') return
+  e.preventDefault()
+  e.returnValue = ''
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'hidden') flushSave()
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  window.addEventListener('beforeunload', onBeforeUnload)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+})
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('beforeunload', onBeforeUnload)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   stopQueuePoll()
   clearTimeout(noticeTimer)
 })
+
+/**
+ * 换节前先落盘：上一节保存失败还直接切走，编辑器里那段字就再也没机会回到库里。
+ * 能存上就静默通过，存不上才让人自己决定。
+ */
+async function onSelectNode(id) {
+  if (!id || id === store.node?.id) return
+  if (saveState.value !== 'saved') {
+    const ok = await flushSave()
+    if (!ok && !window.confirm('上一节还没存上，切走会丢掉那段改动。仍要切换吗？')) return
+  }
+  await store.selectNode(id)
+}
 
 async function openWork(id) {
   await store.selectWork(id)
@@ -654,12 +975,19 @@ async function openWork(id) {
   queueHidden.value = false
   await store.loadQueue()
   if (store.queueActive) startQueuePoll()
-  // 默认选中第一个有正文的节点，省一次点击
-  const first = store.tree.find((n) => n.ordinal != null)
+  // 默认选中第一个有正文的节点，省一次点击；从全库搜索跳进来时先认 ?node=
+  const wanted = typeof route.query.node === 'string' ? route.query.node : ''
+  const first = (wanted && store.tree.find((n) => n.id === wanted))
+    || store.tree.find((n) => n.ordinal != null)
   if (first) await store.selectNode(first.id)
 }
 
-function backToShelf() {
+async function backToShelf() {
+  // 回书架等于离开这一节：没存上的改动先重试，别一声不响地丢
+  const ok = await flushSave()
+  if (!ok && !window.confirm('这一节还没存上，回书架会丢掉这段改动。仍要离开吗？')) return
+  // 刚写完的字要立刻反映到书架上的「今天字数 / 连续天」
+  store.loadDailyWrites().catch(() => {})
   router.replace('/studio')
   store.work = null
   store.tree = []
@@ -690,6 +1018,11 @@ async function create() {
   store.error = ''
   try {
     const w = await store.createWork({ ...form.value })
+    // 从灵感箱开的稿：记下指向，之后在库里能回看这句想法变成了哪篇
+    if (pendingIdea.value) {
+      await store.useIdea(pendingIdea.value, w.id)
+      pendingIdea.value = ''
+    }
     showCreate.value = false
     form.value = { kind: 'article', scale: 'single', subtype: 'tech', title: '', premise: '', target_words: 5000 }
     router.replace(`/studio/${w.id}`)
@@ -748,23 +1081,35 @@ function onInput() {
   saveTimer = setTimeout(flushSave, 800)
 }
 
-/** 立即落盘；已经是最新状态就不重复请求 */
+/** 立即落盘；已经是最新状态就不重复请求。返回是否真的存上 */
 async function flushSave() {
-  if (!store.node) return
+  if (!store.node) return false
   clearTimeout(saveTimer)
-  if (saveState.value === 'saved') return
+  if (saveState.value === 'saved') return true
+  const wasError = saveState.value === 'error'
   saveState.value = 'saving'
-  await store.saveNode({ content: contentDraft.value })
+  const ok = await store.saveNode({ content: contentDraft.value })
+  if (!ok) {
+    saveState.value = 'error'
+    // 自动保存每 800ms 会再试一次；服务端挂着的时候不该每敲一个字弹一遍
+    if (!wasError) showNotice(store.error || '保存失败：正文还在页面上，先别关', true)
+    return false
+  }
   saveState.value = 'saved'
+  return true
 }
 
 async function saveTitle() {
   if (!titleDraft.value.trim()) return
-  await store.saveNode({ title: titleDraft.value.trim() })
+  if (!(await store.saveNode({ title: titleDraft.value.trim() }))) {
+    showNotice(store.error || '标题没存上，再试一次', true)
+  }
 }
 
 async function changeStatus(e) {
-  await store.saveNode({ status: e.target.value }, { snapshot: true })
+  if (!(await store.saveNode({ status: e.target.value }, { snapshot: true }))) {
+    showNotice(store.error || '状态没存上，再试一次', true)
+  }
 }
 
 function toggleWorkEdit() {
@@ -862,7 +1207,11 @@ async function runGenerate() {
     return
   }
   // 有未保存改动先落盘，否则装配用的是旧正文
-  await flushSave()
+  if (!(await flushSave())) {
+    // 装配读的是库里的正文：没存上就生成，模型看到的是上一版，白跑一次
+    showNotice('正文没存上，先在顶部「保存失败」处重试，再生成', true)
+    return
+  }
   await store.generate({ task_type: taskType.value, instruction: instruction.value })
 }
 
@@ -870,8 +1219,20 @@ async function adopt() {
   const append = taskType.value === 'continue'
   // 版本来源按任务标：右栏「历史」里 AI 润色与 AI 草稿要能分开看
   const source = taskType.value === 'polish' ? 'ai_polish' : 'ai_draft'
-  await store.adoptGenerated({ append, source })
+  const total = genParas.value.length
+  const paras = genParas.value.filter((_, i) => isPicked(i))
+  if (!paras.length) {
+    showNotice('一段都没勾：勾上要用的段落再采用', true)
+    return
+  }
+  const ok = await store.adoptGenerated({ append, source, text: paras.join('\n\n') })
+  if (!ok) {
+    // 预览里那份还在，稍后再点一次就行；不能顺手把编辑器刷成旧正文
+    showNotice(store.error || '采用失败：生成结果还在预览里', true)
+    return
+  }
   contentDraft.value = store.node?.content || ''
+  if (paras.length < total) showNotice(`已采用 ${paras.length}/${total} 段`)
 }
 
 /**
@@ -879,7 +1240,11 @@ async function adopt() {
  * 顺序反了的话，服务端看到的是上一版自动保存的正文，手里这份改动就直接丢了。
  */
 async function onRestoreVersion(versionId) {
-  await flushSave()
+  // 回滚会盖掉编辑器里那一份：没存上就别动，不然两边一起丢
+  if (!(await flushSave())) {
+    showNotice('当前正文没存上，先重试保存再回滚', true)
+    return
+  }
   const ok = await store.restoreVersion(versionId)
   if (!ok) return
   contentDraft.value = store.node?.content || ''
@@ -1077,8 +1442,181 @@ async function applyTitle(text, target) {
   font-size: 12.5px;
   color: var(--text-faint);
 }
-.shelf-head .btn {
+.shelf-tools {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.shelf-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  color: var(--text-faint);
+}
+.shelf-search:focus-within {
+  border-color: rgba(217, 164, 91, 0.45);
+}
+.shelf-search .field {
+  width: 168px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+}
+.shelf-search .field:focus {
+  outline: none;
+}
+.shelf-views {
+  display: flex;
+  gap: 6px;
+  margin: -6px 0 18px;
+}
+.view-chip {
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+  font-family: theme('fontFamily.mono');
+  cursor: pointer;
+  transition: color 0.18s var(--ease), background-color 0.18s var(--ease);
+}
+.view-chip:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+.view-chip.is-on {
+  color: var(--run);
+  background: rgba(217, 164, 91, 0.1);
+}
+.write-log {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: -6px 0 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.wl-item strong {
+  margin-right: 4px;
+  font-family: theme('fontFamily.mono');
+  font-size: 14px;
+  color: var(--text);
+}
+.wl-days {
+  margin-left: auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 26px;
+}
+.wl-bar {
+  width: 4px;
+  min-height: 3px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.09);
+}
+.wl-bar.is-on {
+  background: rgba(217, 164, 91, 0.65);
+}
+.ideas {
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-panel);
+}
+.ideas-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.ideas-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.ideas-sub {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.ideas-add {
+  display: flex;
+  gap: 8px;
+}
+.ideas-add .field {
+  flex: 1;
+  min-width: 0;
+}
+.idea-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.idea-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 5px;
+}
+.idea-row:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+.idea-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.idea-del {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+  cursor: pointer;
+}
+.idea-del:hover {
+  color: var(--danger);
+}
+.link-btn {
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--run);
+  font-size: inherit;
+  font-family: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.link-btn:hover {
+  color: var(--text);
 }
 .create {
   padding: 16px 18px;
@@ -1162,6 +1700,31 @@ async function applyTitle(text, target) {
   cursor: pointer;
   opacity: 0;
   transition: opacity 0.15s var(--ease), color 0.15s var(--ease);
+}
+.work-arch {
+  position: absolute;
+  top: 8px;
+  right: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease), color 0.15s var(--ease);
+}
+.work-card:hover .work-arch,
+.work-card:focus-within .work-arch {
+  opacity: 1;
+}
+.work-arch:hover {
+  color: var(--run);
+  background: rgba(217, 164, 91, 0.12);
 }
 .work-card:hover .work-del,
 .work-card:focus-within .work-del {
@@ -1379,6 +1942,12 @@ async function applyTitle(text, target) {
   color: var(--text-faint);
   font-family: theme('fontFamily.mono');
 }
+/* 存不上要能看见：变红，并且点一下直接重试 */
+.ed-save.is-bad {
+  color: var(--danger);
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
 .ed-right {
   margin-left: auto;
   display: flex;
@@ -1476,6 +2045,21 @@ async function applyTitle(text, target) {
   font-size: 11px;
   color: var(--text-faint);
   white-space: nowrap;
+}
+.ed-count.over {
+  color: var(--warn);
+}
+.ed-prog {
+  width: 46px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.ed-prog i {
+  display: block;
+  height: 100%;
+  background: var(--run);
 }
 .ed-body {
   flex: 1;
@@ -1580,10 +2164,40 @@ async function applyTitle(text, target) {
   white-space: pre-wrap;
   word-break: break-word;
 }
+.gen-para {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.gen-para:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.gen-para-box {
+  margin-top: 8px;
+  flex-shrink: 0;
+  accent-color: var(--run);
+}
+.gen-para-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+}
+.gen-para.is-off .gen-para-text {
+  opacity: 0.38;
+  text-decoration: line-through;
+}
 .gen-err {
   margin: 8px 0 0;
   font-size: 12px;
   color: var(--danger);
+}
+.gen-stop {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
 }
 .gen-actions {
   display: flex;

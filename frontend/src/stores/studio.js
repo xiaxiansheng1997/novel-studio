@@ -38,6 +38,9 @@ export const useStudioStore = defineStore('studio', () => {
   const settings = ref({})
   const publications = ref([])
   const pubSummary = ref([])
+  // 选题池是全局的；写作统计只有一份（按天净增字数，从版本表现算）
+  const ideas = ref([])
+  const dailyWrites = ref({ days: [], today: 0, saves_today: 0, streak: 0, total: 0 })
 
   const loading = ref(false)
   const saving = ref(false)
@@ -121,6 +124,90 @@ export const useStudioStore = defineStore('studio', () => {
     const q = kind ? `?kind=${kind}` : ''
     const r = await apiFetch('/studio/works' + q)
     if (r.ok) works.value = await r.json()
+  }
+
+  /** 归档 / 恢复：只改 works.status，正文、版本、索引一个都不动 */
+  async function setWorkStatus(id, status) {
+    const r = await apiFetch(`/studio/works/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, status === 'archived' ? '归档失败' : '恢复失败')
+      return false
+    }
+    const w = await r.json()
+    const i = works.value.findIndex((x) => x.id === w.id)
+    if (i >= 0) works.value[i] = { ...works.value[i], ...w }
+    if (work.value?.id === w.id) work.value = w
+    return true
+  }
+
+  /** 全库搜索：标题/主旨 + 已建索引的正文与素材；结果由调用方自己持有 */
+  async function globalSearch(q) {
+    const text = (q || '').trim()
+    if (!text) return { works: [], hits: [] }
+    const r = await apiFetch('/studio/search?' + new URLSearchParams({ q: text, limit: '20' }))
+    if (!r.ok) {
+      error.value = await errDetail(r, '搜索失败')
+      return { works: [], hits: [] }
+    }
+    return await r.json()
+  }
+
+  // ---- 选题池与写作统计 ----
+
+  async function loadIdeas() {
+    const r = await apiFetch('/studio/ideas')
+    if (r.ok) ideas.value = await r.json()
+  }
+
+  async function addIdea(text) {
+    const body = (text || '').trim()
+    if (!body) return null
+    const r = await apiFetch('/studio/ideas', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: body }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '记下失败')
+      return null
+    }
+    const idea = await r.json()
+    ideas.value.unshift(idea)
+    return idea
+  }
+
+  /** 想法变成作品：记下 work_id 后从待写列表里收走 */
+  async function useIdea(id, workId) {
+    const r = await apiFetch(`/studio/ideas/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'used', work_id: workId }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '标记失败')
+      return false
+    }
+    ideas.value = ideas.value.filter((x) => x.id !== id)
+    return true
+  }
+
+  async function deleteIdea(id) {
+    const r = await apiFetch(`/studio/ideas/${id}`, { method: 'DELETE' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '删除失败')
+      return false
+    }
+    ideas.value = ideas.value.filter((x) => x.id !== id)
+    return true
+  }
+
+  async function loadDailyWrites(days = 30) {
+    const r = await apiFetch(`/studio/stats/daily?days=${days}`)
+    if (r.ok) dailyWrites.value = await r.json()
   }
 
   async function createWork(payload) {
@@ -232,8 +319,12 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
+  /**
+   * 写回一节。返回是否真的落库——自动保存靠这个返回值决定显示「已保存」还是
+   * 「保存失败」。以前失败就地吞掉，界面照样写「已保存」，关掉页面那段字就没了。
+   */
   async function saveNode(patch, { snapshot = false, source = '' } = {}) {
-    if (!node.value) return
+    if (!node.value) return false
     saving.value = true
     // 只有「采用 AI 结果」才带来源：历史页要分得清哪一版是模型写的，
     // 手改那一侧不传，由后端落成 human
@@ -245,19 +336,27 @@ export const useStudioStore = defineStore('studio', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      if (r.ok) {
-        const saved = await r.json()
-        node.value = saved
-        // 同步树上的字数与标题，避免侧栏显示旧值
-        const t = tree.value.find((n) => n.id === saved.id)
-        if (t) {
-          t.title = saved.title
-          t.word_count = saved.word_count
-          t.status = saved.status
-        }
-        // 只有留了版本的写入才需要重拉：自动保存那点调用省下来给「历史」页换内容
-        if (snapshot) await loadVersions()
+      if (!r.ok) {
+        error.value = await errDetail(r, '保存失败')
+        return false
       }
+      const saved = await r.json()
+      node.value = saved
+      // 同步树上的字数与标题，避免侧栏显示旧值
+      const t = tree.value.find((n) => n.id === saved.id)
+      if (t) {
+        t.title = saved.title
+        t.word_count = saved.word_count
+        t.status = saved.status
+      }
+      // 只有留了版本的写入才需要重拉：自动保存那点调用省下来给「历史」页换内容
+      if (snapshot) await loadVersions()
+      error.value = ''
+      return true
+    } catch (e) {
+      // fetch 自己抛（断网、服务被关）不会走上面的 !r.ok 分支
+      error.value = `保存失败：${String(e?.message || e)}`
+      return false
     } finally {
       saving.value = false
     }
@@ -278,6 +377,52 @@ export const useStudioStore = defineStore('studio', () => {
     tree.value = await (await apiFetch(`/studio/works/${work.value.id}/tree`)).json()
     await selectNode(n.id)
     return n
+  }
+
+  /**
+   * 逐节导入旧稿。
+   *
+   * 每节都走 createNode 那条接口，但不在循环里 select：八十章会触发八十次
+   * 「选中 + 重拉整棵树」。最后统一重拉一次树、刷一次字数、重建一次索引就够了。
+   * 导入的正文不计入「今天写的字」——create_node 本来就不记，别在别处补。
+   */
+  async function importNodes(sections, { kind = 'chapter', parentId = null } = {}, onProgress = null) {
+    if (!work.value) return { created: 0, failed: 0, firstId: '' }
+    let created = 0
+    let failed = 0
+    let firstId = ''
+    for (const [i, s] of sections.entries()) {
+      const r = await apiFetch(`/studio/works/${work.value.id}/nodes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind,
+          title: s.title,
+          content: s.content,
+          parent_id: parentId || null,
+        }),
+      })
+      if (r.ok) {
+        const row = await r.json()
+        if (!firstId) firstId = row.id
+        created += 1
+      } else {
+        failed += 1
+      }
+      onProgress?.(i + 1, sections.length)
+    }
+    tree.value = await (await apiFetch(`/studio/works/${work.value.id}/tree`)).json()
+    const st = await apiFetch(`/studio/works/${work.value.id}/stats`)
+    if (st.ok) stats.value = await st.json()
+    // 导进来的正文还没进 FTS：不建索引，刚导入的章搜不到、生成也用不上
+    if (created) {
+      try {
+        await reindex()
+      } catch {
+        /* 索引失败不该让导入回滚 */
+      }
+    }
+    return { created, failed, firstId }
   }
 
   /** 删节点连同子树。备份写不成时后端会拒绝删除，这里把原因带到 error 上 */
@@ -389,6 +534,23 @@ export const useStudioStore = defineStore('studio', () => {
     await loadSources()
   }
 
+  /** 改素材：正文改了后端会重建这一条的索引，回来直接把新行给调用方 */
+  async function updateSource(id, payload) {
+    error.value = ''
+    const r = await apiFetch(`/studio/sources/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '保存素材失败')
+      return null
+    }
+    const row = await r.json()
+    await loadSources()
+    return row
+  }
+
   async function loadFacts() {
     if (!work.value) return
     const r = await apiFetch(`/studio/works/${work.value.id}/facts`)
@@ -408,6 +570,20 @@ export const useStudioStore = defineStore('studio', () => {
   async function deleteFact(id) {
     await apiFetch(`/studio/facts/${id}`, { method: 'DELETE' })
     await loadFacts()
+  }
+
+  async function updateFact(id, payload) {
+    const r = await apiFetch(`/studio/facts/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '保存事实失败')
+      return false
+    }
+    await loadFacts()
+    return true
   }
 
   async function loadTerms() {
@@ -431,6 +607,20 @@ export const useStudioStore = defineStore('studio', () => {
     await loadTerms()
   }
 
+  async function updateTerm(id, payload) {
+    const r = await apiFetch(`/studio/terms/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '保存术语失败')
+      return false
+    }
+    await loadTerms()
+    return true
+  }
+
   /** 只装配不调用 LLM，用来调 prompt / 看预算 */
   async function previewContext({ task_type, instruction }) {
     if (!work.value) return null
@@ -447,18 +637,26 @@ export const useStudioStore = defineStore('studio', () => {
   /**
    * 流式生成：读 fetch 的 ReadableStream（EventSource 不支持 POST）。
    * 中途出错只记 genError，不抛异常——UI 还要保留已生成的部分。
+   * 点「停止」走 abort：连接一断服务端也会收尾（那一次 run 记为 stopped）。
    */
+  let genAbort = null
+  const genStopped = ref(false)
+
   async function generate({ task_type, instruction, save = false, model = genModel.value }) {
     if (!node.value || generating.value) return
     generating.value = true
+    genStopped.value = false
     genText.value = ''
     genError.value = ''
     genMeta.value = null
+    const ctrl = new AbortController()
+    genAbort = ctrl
     try {
       const resp = await apiFetch(`/studio/nodes/${node.value.id}/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task_type, instruction, save, model }),
+        signal: ctrl.signal,
       })
       if (!resp.ok) {
         genError.value = `HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`
@@ -498,27 +696,39 @@ export const useStudioStore = defineStore('studio', () => {
         }
       }
     } catch (e) {
-      genError.value = String(e?.message || e)
+      // 主动停止不是错误：已经收到的部分要留着，用户可以接着采用
+      if (ctrl.signal.aborted) genStopped.value = true
+      else genError.value = String(e?.message || e)
     } finally {
       generating.value = false
+      if (genAbort === ctrl) genAbort = null
     }
   }
 
+  /** 停止生成：断开这条 SSE，服务端那一侧随之收尾 */
+  function stopGenerate() {
+    if (genAbort) genAbort.abort()
+  }
+
   /** 把生成的文本写回节点（用户在预览条点「采用」），来源按任务给 */
-  async function adoptGenerated({ append = false, source = 'ai_draft' } = {}) {
-    if (!node.value || !genText.value) return
+  async function adoptGenerated({ append = false, source = 'ai_draft', text = '' } = {}) {
+    const body = text || genText.value
+    if (!node.value || !body) return false
     const next = append
-      ? (node.value.content ? node.value.content.replace(/\s+$/, '') + '\n\n' + genText.value : genText.value)
-      : genText.value
-    await saveNode({ content: next }, { snapshot: true, source })
+      ? (node.value.content ? node.value.content.replace(/\s+$/, '') + '\n\n' + body : body)
+      : body
+    // 写库失败就留着预览：清掉的话这段生成结果连重试的机会都没有
+    if (!(await saveNode({ content: next }, { snapshot: true, source }))) return false
     genText.value = ''
     genMeta.value = null
+    return true
   }
 
   function discardGenerated() {
     genText.value = ''
     genMeta.value = null
     genError.value = ''
+    genStopped.value = false
   }
 
   // ==================== 版本历史 ====================
@@ -1278,14 +1488,16 @@ export const useStudioStore = defineStore('studio', () => {
   return {
     works, work, tree, node, stats, templates, sources, facts, terms, issues,
     loading, saving, error,
-    generating, genText, genMeta, genError,
+    generating, genText, genMeta, genError, genStopped, stopGenerate,
     genModel, genModelLabel, modelGroups, allGenModels, setGenModel, loadGenModels,
     activeWorkId, activeNodeId, template,
-    loadTemplates, fetchWorks, createWork, updateWork, selectWork, selectNode, deleteWork,
-    saveNode, createNode, deleteNode, moveNode,
-    loadSources, addSource, loadSource, searchSources, extractFacts, deleteSource,
-    loadFacts, addFact, deleteFact,
-    loadTerms, addTerm, deleteTerm,
+    loadTemplates, fetchWorks, createWork, updateWork, setWorkStatus, globalSearch,
+    ideas, dailyWrites, loadIdeas, addIdea, useIdea, deleteIdea, loadDailyWrites,
+    selectWork, selectNode, deleteWork,
+    saveNode, createNode, importNodes, deleteNode, moveNode,
+    loadSources, addSource, loadSource, searchSources, extractFacts, deleteSource, updateSource,
+    loadFacts, addFact, deleteFact, updateFact,
+    loadTerms, addTerm, deleteTerm, updateTerm,
     previewContext, generate, adoptGenerated, discardGenerated,
     // 版本历史
     versions, versionsBusy, restoring,

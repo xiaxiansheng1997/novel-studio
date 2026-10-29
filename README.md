@@ -58,6 +58,14 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 10. **文风**：右栏「文风」页可以给这一篇定人称 / 时态 / 语气 / 禁忌（三个预设一键填），也能贴几篇自己写过的旧文——
     本地统计句长、段长、口头禅、人称与标点，生成一段「文风画像」跟着 S1 进每次 prompt（不占素材与检索预算，不调模型）。
     发出去的文章在作品弹层里记一条台账（日期 / 链接 / 阅读 / 在看），书架因此能显示「已发 N 篇 · 阅读 X」
+11. **作品多了也找得到**：书架有搜索框（标题 / 主旨即时筛）与「在写 / 已归档」两个视图；归档只改 `works.status`，
+    正文、版本、索引都不动。跨作品搜正文与素材按 `Ctrl+K`（或书架上的「搜正文」），结果分「作品」与「正文片段」两组，
+    点一条直接跳到那一篇的那一节
+12. **写作手感**：书架顶部一条写作日历（今天手写字数 / 连续天 / 近 14 天柱状），下面是「灵感箱」——一句话想法先记着，
+    「用它开写」只把它填进新建表单；生成结果可以逐段勾选后再采用，编辑器顶部有「本节 / 目标」进度
+13. **结构与资料可维护**：左树能折叠（写完的卷先收起来，状态按作品记住；跳到被折叠的节会自动展开祖先），
+    树头「导入」能把旧稿一次搬进来——粘贴或拖 `.txt / .md`，按「第X章 / ## 标题」或空行拆节，看过预览再逐节建；
+    右栏的素材、事实卡、术语都能就地改，素材正文改完会重建这一条的检索索引（不改的话生成还在按旧文字找资料）
 
 ## 两种形态
 
@@ -176,7 +184,7 @@ python -m scripts.cleanup_works --sweep-orphans    # 默认试运行，加 --yes
 ```
 app/
   main.py runtime.py config.py
-  api/      studio_routes.py（80 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
+  api/      studio_routes.py（89 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
   studio/   schema.py store.py content_types.py assembler.py prompting.py tokenize.py chunker.py
             indexer.py retrieval.py summarizer.py graph.py consistency.py soft_rules.py
             scoring.py tasks.py jobs.py jsonutil.py
@@ -196,7 +204,7 @@ web/        旧版静态页 chat.html admin.html live.html（前端未构建时�
 dev.py      frontend / backend / build / all
 scripts/    smoke_studio.py  smoke_m1_tail.py  smoke_m2.py  smoke_m3.py  smoke_m4.py  smoke_soft_rules.py
             measure_baseline.py  shot_studio.py  cleanup_works.py  restore_backup.py  login.py  recon.py  check.ps1
-tests/      pytest（全量 244 例；写作侧用 tmp_path 建临时库，不碰 storage/）
+tests/      pytest（全量 268 例；写作侧用 tmp_path 建临时库，不碰 storage/）
 storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
             backups/nodes（删节前的 JSON 备份）/ backups/works（删作品前的整库副本），已 gitignore>
 ```
@@ -268,7 +276,7 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
 
 ## 文档索引
 
-- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.4）
+- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.7）
 - `docs/m0-baseline.md` — M0 基线实测数据
 - `docs/content-types.md` — 文种与模板配置约定
 - `docs/reverse-proxy.md` — 底座：驱动三家网页端、`/v1` API 用法、风控排查细则

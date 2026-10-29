@@ -344,6 +344,27 @@ CREATE TABLE IF NOT EXISTS publications (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_publications_work ON publications(work_id, published_at DESC);
+
+-- 选题池：一句话想法先落这儿。建一个空作品太重，书架会被「还没想清楚」的东西塞满
+CREATE TABLE IF NOT EXISTS ideas (
+    id TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    status TEXT DEFAULT 'open',       -- open / used / dropped
+    work_id TEXT DEFAULT '',          -- 用它开写之后指向那篇，方便回看
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ideas_status ON ideas(status, created_at DESC);
+
+-- 按天的手写净增字数：每次保存正文时实时累加，不在查询时扫版本表。
+-- 为什么不从 node_versions 算：自动保存不留版本（每几秒一条会把库撑爆），纯手打会统计成 0。
+-- AI 采用的正文不计入（snapshot_source=ai_*），否则夜间跑批会把「今天写了多少」刷爆。
+CREATE TABLE IF NOT EXISTS write_days (
+    day TEXT PRIMARY KEY,             -- YYYY-MM-DD，本地时区
+    chars INTEGER DEFAULT 0,
+    saves INTEGER DEFAULT 0,
+    updated_at REAL NOT NULL
+);
 """
 
 # 内置模板：outline 里的 target_words 是软约束（实测偏差约 ±20%~40%）

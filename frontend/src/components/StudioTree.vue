@@ -2,6 +2,12 @@
   <aside class="tree" aria-label="作品结构">
     <header class="tree-head">
       <span class="tree-title">{{ title }}</span>
+      <button class="tree-all" :title="allFolded ? '全部展开' : '全部收起'" @click="toggleAll">
+        <AppIcon :name="allFolded ? 'chevronDown' : 'chevronUp'" :size="13" />
+      </button>
+      <button class="icon-btn tree-add" title="把已有稿件导入成节" @click="$emit('import')">
+        <AppIcon name="download" :size="14" />
+      </button>
       <button class="icon-btn tree-add" title="新建节点" @click="$emit('create', null)">
         <AppIcon name="plus" :size="15" />
       </button>
@@ -13,13 +19,25 @@
       </p>
 
       <div
-        v-for="n in tree"
+        v-for="n in visibleRows"
         :key="n.id"
         class="tree-row"
         :class="{ 'is-active': n.id === activeId }"
-        :style="{ paddingLeft: 10 + Math.min(n.depth, 3) * 14 + 'px' }"
+        :style="{ paddingLeft: 6 + Math.min(n.depth, 3) * 14 + 'px' }"
         @click="$emit('select', n.id)"
       >
+        <!-- 卷下面几十章时，把写完的卷收起来比拖滚动条好用 -->
+        <button
+          v-if="childful.has(n.id)"
+          class="tree-twist"
+          :class="{ 'is-folded': collapsed.has(n.id) }"
+          :title="collapsed.has(n.id) ? '展开' : '收起'"
+          :aria-expanded="!collapsed.has(n.id)"
+          @click.stop="toggle(n.id)"
+        >
+          <AppIcon name="chevronDown" :size="12" />
+        </button>
+        <span v-else class="tree-twist is-ghost" aria-hidden="true"></span>
         <AppIcon
           :name="n.depth === 0 ? 'folder' : 'file'"
           :size="14"
@@ -64,13 +82,13 @@
     <footer v-if="stats" class="tree-foot">
       <span>{{ stats.nodes }} 个节点</span>
       <span class="tree-sep">·</span>
-      <span>{{ fmt(stats.words) }} 字</span>
+      <span>{{ fmt(stats.words) }}<template v-if="target"> / {{ fmt(target) }}</template> 字</span>
     </footer>
   </aside>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
@@ -78,8 +96,110 @@ const props = defineProps({
   activeId: { type: String, default: '' },
   title: { type: String, default: '结构' },
   stats: { type: Object, default: null },
+  // 作品目标字数（0 = 没设）：树底显示「已写 / 目标」，比只报数字有方向
+  target: { type: Number, default: 0 },
+  // 折叠状态按作品分开存：同一本书下次打开还是上次收起来的样子
+  workId: { type: String, default: '' },
 })
-defineEmits(['select', 'create', 'remove', 'move'])
+defineEmits(['select', 'create', 'remove', 'move', 'import'])
+
+// 树是扁平数组（按 path 排序），折叠只影响这一屏的渲染，不动数据结构
+const collapsed = ref(new Set())
+const storageKey = computed(() => `studio:tree-folded:${props.workId || 'default'}`)
+
+function readFolded() {
+  try {
+    const raw = localStorage.getItem(storageKey.value)
+    const list = raw ? JSON.parse(raw) : []
+    collapsed.value = new Set(Array.isArray(list) ? list : [])
+  } catch {
+    // 隐私模式或坏数据：折叠失效而已，树得照常显示，不能因此白屏
+    collapsed.value = new Set()
+  }
+}
+
+function persist() {
+  try {
+    localStorage.setItem(storageKey.value, JSON.stringify([...collapsed.value]))
+  } catch {
+    /* 写不进去就只在本次会话有效 */
+  }
+}
+
+readFolded()
+
+// 有子节点的行才给三角：扁平数组里「下一行更深」就是有孩子
+const childful = computed(() => {
+  const out = new Set()
+  const t = props.tree
+  for (let i = 0; i < t.length - 1; i += 1) {
+    if (t[i + 1].depth > t[i].depth) out.add(t[i].id)
+  }
+  return out
+})
+
+const allFolded = computed(
+  () => childful.value.size > 0 && [...childful.value].every((id) => collapsed.value.has(id))
+)
+
+/**
+ * 可见行：沿扁平数组走一遍，用栈记住祖先；栈里任何一层被收起，这一行就不出现。
+ * 被藏住的行也要入栈——否则它的子孙会被当成根节点漏出来。
+ */
+const visibleRows = computed(() => {
+  const out = []
+  const stack = []
+  for (const n of props.tree) {
+    while (stack.length && stack[stack.length - 1].depth >= n.depth) stack.pop()
+    if (!stack.some((a) => collapsed.value.has(a.id))) out.push(n)
+    stack.push(n)
+  }
+  return out
+})
+
+function toggle(id) {
+  const next = new Set(collapsed.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  collapsed.value = next
+  persist()
+}
+
+function toggleAll() {
+  collapsed.value = allFolded.value ? new Set() : new Set(childful.value)
+  persist()
+}
+
+function ancestorsOf(index) {
+  const out = []
+  let depth = props.tree[index].depth
+  for (let i = index - 1; i >= 0 && depth > 0; i -= 1) {
+    if (props.tree[i].depth < depth) {
+      out.push(props.tree[i].id)
+      depth = props.tree[i].depth
+    }
+  }
+  return out
+}
+
+/** 选中被折叠的节时先把祖先展开：从搜索结果跳进来，不该看到「选中了但人不在」。 */
+function revealActive() {
+  if (!props.activeId) return
+  const idx = props.tree.findIndex((n) => n.id === props.activeId)
+  if (idx < 0) return
+  const hidden = ancestorsOf(idx).filter((id) => collapsed.value.has(id))
+  if (!hidden.length) return
+  const next = new Set(collapsed.value)
+  hidden.forEach((id) => next.delete(id))
+  collapsed.value = next
+  persist()
+}
+
+watch(() => [props.activeId, props.tree.length], revealActive, { immediate: true })
+watch(() => props.workId, () => {
+  readFolded()
+  revealActive()
+})
 
 // 同层上下移只能跟同一个父节点下的兄弟换：后端也是这么找邻居的（只在同 parent_id 里取
 // 紧邻的前/后一个），所以「首/末行该不该置灰」也按同一套分组算。
@@ -134,8 +254,26 @@ function fmt(n) {
   text-transform: uppercase;
   color: var(--text-faint);
 }
-.tree-add {
+.tree-all {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: background-color 0.15s var(--ease), color 0.15s var(--ease);
+}
+.tree-all:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+.tree-add {
+  margin-left: 2px;
   width: 26px;
   height: 26px;
 }
@@ -180,6 +318,32 @@ function fmt(n) {
   width: 2px;
   border-radius: 2px;
   background: var(--run);
+}
+.tree-twist {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: -2px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: transform 0.15s var(--ease), background-color 0.15s var(--ease);
+}
+.tree-twist.is-folded {
+  transform: rotate(-90deg);
+}
+/* 叶子节点留同宽的占位：有没有三角，标题的起始位置都一致 */
+.tree-twist.is-ghost {
+  cursor: default;
+}
+.tree-twist.is-ghost:hover {
+  background: transparent;
+  color: var(--text-faint);
 }
 .tree-icon {
   flex-shrink: 0;

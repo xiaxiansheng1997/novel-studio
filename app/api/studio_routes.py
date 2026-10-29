@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 import time
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import quote
@@ -32,6 +33,7 @@ from app.studio import (
     publish,
     retrieval,
     summarizer,
+    tokenize,
     voice,
     wechat,
 )
@@ -78,7 +80,8 @@ class WorkUpdate(BaseModel):
     premise: Optional[str] = None
     # 公众号摘要（≤120 字）：发布页要单独填，不填会被截正文前 54 字
     digest: Optional[str] = None
-    status: Optional[str] = None
+    # 书架只认这三态：归档是从书架收起，不删任何东西
+    status: Optional[Literal["active", "paused", "archived"]] = None
     scale: Optional[str] = None
     subtype: Optional[str] = None
     template_id: Optional[str] = None
@@ -137,6 +140,26 @@ class TermCreate(BaseModel):
     forbidden: list[str] = Field(default_factory=list)
 
 
+class SourceUpdate(BaseModel):
+    title: Optional[str] = None
+    url: Optional[str] = None
+    published_at: Optional[str] = None
+    content: Optional[str] = None
+
+
+class FactUpdate(BaseModel):
+    statement: Optional[str] = None
+    confidence: Optional[float] = None
+    valid_until: Optional[str] = None
+
+
+class TermUpdate(BaseModel):
+    term: Optional[str] = None
+    definition: Optional[str] = None
+    preferred: Optional[str] = None
+    forbidden: Optional[list[str]] = None
+
+
 class GenerateRequest(BaseModel):
     task_type: str = "article_draft"
     instruction: str = ""
@@ -170,6 +193,53 @@ _VERSION_SOURCES = {"human", "ai_draft", "ai_polish"}
 @router.get("/studio/works", dependencies=[Depends(verify_key)])
 async def list_works(request: Request, kind: str = "", status: str = "", limit: int = 100):
     return await _store(request).list_works(kind=kind, status=status, limit=limit)
+
+
+def _hit_snippet(text: str, q: str, width: int = 140) -> str:
+    """命中处附近的窗口。原文里找得到就围绕它截，找不到（中文被分词切开了）就取开头。"""
+    flat = re.sub(r"\s+", " ", text or "").strip()
+    if not flat:
+        return ""
+    pos = flat.find(q) if q else -1
+    start = max(0, pos - width // 3) if pos > 0 else 0
+    piece = flat[start:start + width]
+    return ("…" if start else "") + piece + ("…" if start + width < len(flat) else "")
+
+
+@router.get("/studio/search", dependencies=[Depends(verify_key)])
+async def search_all(request: Request, q: str = "", limit: int = 20):
+    """跨作品检索：标题/主旨 + 正文 FTS。
+
+    原先前端只能在某一篇里搜（`POST /studio/works/{id}/search`），作品一多就答不了
+    「我之前在哪篇写过这个」。标题命中单独给一组：正文 FTS 不索引标题。
+    """
+    q = (q or "").strip()[:200]
+    if not q:
+        return {"query": "", "works": [], "hits": [], "count": 0}
+    store = _store(request)
+    works = await store.search_works_meta(q, limit=3)
+    match = tokenize.match_query(q)
+    rows = await store.search_chunks_global(match, limit=max(1, min(limit, 50))) if match else []
+    hits: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for r in rows:
+        # 同一节命中多个块时只留最相关的那一块：这张表要答「去哪几节看」，不是片段全集
+        key = (r["work_id"], r.get("node_id") or r.get("source_id") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        hits.append({
+            "work_id": r["work_id"],
+            "work_title": r.get("work_title") or "",
+            "work_status": r.get("work_status") or "",
+            "node_id": r.get("node_id") or "",
+            "node_title": r.get("node_title") or "",
+            "ordinal": int(r.get("ordinal") or 0),
+            "source_kind": r.get("source_kind") or "body",
+            "snippet": _hit_snippet(r.get("text") or "", q),
+        })
+    return {"query": q, "works": works, "hits": hits, "count": len(hits)}
+
 
 
 @router.post("/studio/works", dependencies=[Depends(verify_key)])
@@ -230,6 +300,78 @@ async def get_tree(work_id: str, request: Request):
 async def get_stats(work_id: str, request: Request):
     await _require_work(request, work_id)
     return await _store(request).stats(work_id)
+
+
+class IdeaCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+
+
+class IdeaUpdate(BaseModel):
+    text: Optional[str] = Field(default=None, max_length=500)
+    status: Optional[Literal["open", "used", "dropped"]] = None
+    work_id: Optional[str] = None
+
+
+@router.get("/studio/ideas", dependencies=[Depends(verify_key)])
+async def list_ideas(request: Request, status: str = "open"):
+    """选题池。status 传空串看全部（含已经用掉的）。"""
+    return await _store(request).list_ideas(status=status)
+
+
+@router.post("/studio/ideas", dependencies=[Depends(verify_key)])
+async def create_idea(body: IdeaCreate, request: Request):
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="想法不能为空")
+    return await _store(request).add_idea(text)
+
+
+@router.patch("/studio/ideas/{idea_id}", dependencies=[Depends(verify_key)])
+async def update_idea(idea_id: str, body: IdeaUpdate, request: Request):
+    store = _store(request)
+    if not await store.update_idea(idea_id, **body.model_dump(exclude_none=True)):
+        raise HTTPException(status_code=404, detail="想法不存在或无更新")
+    return await store.get_idea(idea_id)
+
+
+@router.delete("/studio/ideas/{idea_id}", dependencies=[Depends(verify_key)])
+async def delete_idea(idea_id: str, request: Request):
+    if not await _store(request).delete_idea(idea_id):
+        raise HTTPException(status_code=404, detail="想法不存在")
+    return {"ok": True}
+
+
+def streak_days(rows: list[dict[str, Any]], today: date) -> int:
+    """连续写作天数。今天还没写不算断，从昨天往回数。"""
+    have = {r["day"] for r in rows if int(r.get("chars") or 0) > 0}
+    cursor = today if today.isoformat() in have else today - timedelta(days=1)
+    n = 0
+    while cursor.isoformat() in have:
+        n += 1
+        cursor -= timedelta(days=1)
+    return n
+
+
+@router.get("/studio/stats/daily", dependencies=[Depends(verify_key)])
+async def daily_writes(request: Request, days: int = 30):
+    """按天净增字数 + 连续天数。
+
+    数据从 `node_versions` 现算（不额外记一份）：今天还没写不算断，从昨天往回数——
+    中午打开看到「连续 6 天」突然变 0，只会让人以为统计坏了。
+    """
+    rows = await _store(request).daily_writes(days=max(1, min(days, 180)))
+    have = {r["day"]: r for r in rows}
+    today = date.today()
+    today_s = today.isoformat()
+    streak = streak_days(rows, today)
+    return {
+        "days": rows,
+        "today": int(have.get(today_s, {}).get("chars") or 0),
+        "saves_today": int(have.get(today_s, {}).get("saves") or 0),
+        "streak": streak,
+        "total": sum(int(r["chars"] or 0) for r in rows),
+    }
+
 
 
 # ==================== 节点 ====================
@@ -396,6 +538,30 @@ async def get_source(source_id: str, request: Request):
     return src
 
 
+@router.patch("/studio/sources/{source_id}", dependencies=[Depends(verify_key)])
+async def update_source(source_id: str, body: SourceUpdate, request: Request):
+    """改素材标题/出处/正文。
+
+    正文一改，旧的 chunks 还在按老文字做检索——所以这里顺手重建这一条的索引。
+    只改标题时 `index_source` 会按 content_hash 自己跳过，不白跑分词。
+    """
+    store = _store(request)
+    payload = body.model_dump(exclude_none=True)
+    if not payload:
+        raise HTTPException(status_code=400, detail="没有可更新字段")
+    if "content" in payload and not payload["content"].strip():
+        raise HTTPException(status_code=400, detail="正文不能为空：不想留这条请直接删")
+    row = await store.update_source(source_id, **payload)
+    if row is None:
+        raise HTTPException(status_code=404, detail="素材不存在")
+    if "content" in payload:
+        try:
+            await indexer.index_source(store, row)
+        except Exception as exc:  # noqa: BLE001 - 建索引失败不该让保存失败
+            logger.warning(f"[studio] 素材改后索引失败 id={source_id}: {exc}")
+    return row
+
+
 @router.delete("/studio/sources/{source_id}", dependencies=[Depends(verify_key)])
 async def delete_source(source_id: str, request: Request):
     ok = await _store(request).delete_source(source_id)
@@ -452,6 +618,19 @@ async def add_fact(work_id: str, body: FactCreate, request: Request):
     )
 
 
+@router.patch("/studio/facts/{fact_id}", dependencies=[Depends(verify_key)])
+async def update_fact(fact_id: str, body: FactUpdate, request: Request):
+    payload = body.model_dump(exclude_none=True)
+    if not payload:
+        raise HTTPException(status_code=400, detail="没有可更新字段")
+    if "statement" in payload and not payload["statement"].strip():
+        raise HTTPException(status_code=400, detail="陈述不能为空")
+    row = await _store(request).update_fact(fact_id, **payload)
+    if row is None:
+        raise HTTPException(status_code=404, detail="事实不存在")
+    return row
+
+
 @router.delete("/studio/facts/{fact_id}", dependencies=[Depends(verify_key)])
 async def delete_fact(fact_id: str, request: Request):
     ok = await _store(request).delete_fact(fact_id)
@@ -476,6 +655,22 @@ async def upsert_term(work_id: str, body: TermCreate, request: Request):
         preferred=body.preferred,
         forbidden=body.forbidden,
     )
+
+
+@router.patch("/studio/terms/{term_id}", dependencies=[Depends(verify_key)])
+async def update_term(term_id: str, body: TermUpdate, request: Request):
+    payload = body.model_dump(exclude_none=True)
+    if not payload:
+        raise HTTPException(status_code=400, detail="没有可更新字段")
+    if "term" in payload and not payload["term"].strip():
+        raise HTTPException(status_code=400, detail="术语不能为空")
+    try:
+        row = await _store(request).update_term(term_id, **payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="术语不存在")
+    return row
 
 
 @router.delete("/studio/terms/{term_id}", dependencies=[Depends(verify_key)])
@@ -600,6 +795,7 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
         started = time.perf_counter()
         parts: list[str] = []
         error = ""
+        stopped = False  # 客户端点「停止」：连接断了，收尾时不能再往里写
         yield _sse({
             "event": "meta",
             "run_id": run_id,
@@ -624,18 +820,27 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
             error = str(exc)
             logger.error(f"[studio] 生成失败 node={node_id}: {exc}")
             yield _sse({"event": "error", "message": error})
+        except BaseException:  # noqa: BLE001 - 中止走这条：GeneratorExit / CancelledError
+            # 生成器已经被关掉，这里再 yield 会抛「async generator ignored GeneratorExit」；
+            # 但 run 必须收尾，否则 runs 里永远停在 running，成本统计跟着失真。
+            stopped = True
+            raise
         finally:
             text = "".join(parts)
             elapsed = int((time.perf_counter() - started) * 1000)
-            await store.finish_run(
-                run_id,
-                status="ok" if not error else "failed",
-                output_chars=len(text),
-                error=error,
-                elapsed_ms=elapsed,
-            )
+            try:
+                await store.finish_run(
+                    run_id,
+                    status="stopped" if stopped else ("ok" if not error else "failed"),
+                    output_chars=len(text),
+                    error="客户端中止" if stopped else error,
+                    elapsed_ms=elapsed,
+                )
+            except Exception as exc:  # noqa: BLE001 - 收尾失败不能盖掉真正的中止
+                logger.warning(f"[studio] run 收尾失败 run={run_id}: {exc}")
             # 只有明确要求保存时才写库；前端先展示、用户点「采用」再落，避免污染原稿
-            if body.save and text and not error:
+            # 中止时半截稿不写库：那会把原稿替换成一段没写完的话
+            if body.save and text and not error and not stopped:
                 content = (node.get("content") or "") if body.task_type == "continue" else ""
                 merged = (content + ("\n\n" if content else "") + text) if content else text
                 # 落库的也是 AI 写的内容，来源按任务标：润色那一版混进「AI 草稿」里，
@@ -662,13 +867,14 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
                             await consistency.run_checks(store, _work, fresh, resolved=_resolved)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(f"[studio] 检查失败 node={node_id}: {exc}")
-            yield _sse({
-                "event": "done",
-                "chars": len(text),
-                "elapsed_ms": elapsed,
-                "saved": bool(body.save and text and not error),
-            })
-            yield "data: [DONE]\n\n"
+            if not stopped:
+                yield _sse({
+                    "event": "done",
+                    "chars": len(text),
+                    "elapsed_ms": elapsed,
+                    "saved": bool(body.save and text and not error),
+                })
+                yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         event_stream(),

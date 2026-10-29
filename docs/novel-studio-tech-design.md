@@ -1208,18 +1208,28 @@ POST   /studio/issues/{issue_id}/resolve
 GET    /studio/works/{id}/sources         # 列表只给 标题/日期/字数/used，不带正文
 POST   /studio/works/{id}/sources         # 导入即建索引；不建的话 S_src 只能退回「最近 5 条开头」
 GET    /studio/sources/{id}               # 单条全文（v2.2 补：之前连正文都点不开）
+PATCH  /studio/sources/{id}               # {title|url|published_at|content}；改正文顺手重建索引（v2.7）
 DELETE /studio/sources/{id}
 POST   /studio/sources/{id}/facts/extract # {limit, model}：从素材抽事实卡，自动带 source_id（v2.2）
 GET/POST/DELETE /studio/works/{id}/facts  # POST 认 source_id，事实才追得到出处
+PATCH  /studio/facts/{id}                 # 改陈述/有效期；出处不在这里换（v2.7）
 GET/POST/DELETE /studio/works/{id}/terms
+PATCH  /studio/terms/{id}                 # 改词/统一写法/禁用说法；撞 UNIQUE 回 400（v2.7）
 GET    /studio/templates?kind=&subtype=
-        # 更正（v2.2）：这三组从来只有 GET/POST/DELETE，旧版这里写的 PATCH 一直没实现过
+        # 更正（v2.2）：这三组当时只有 GET/POST/DELETE，旧版这里写的 PATCH 一直没实现过；
+        # 三条 PATCH 是 v2.7 才真正补上的
 
 # 检索与调试
 POST   /studio/context/preview              # 已实现：只装配不调用 LLM，返回各桶明细
 POST   /studio/works/{id}/search            # 已实现：{q, top_k, scope: body|source}，纯 FTS5
+GET    /studio/search?q=&limit=             # 跨作品：标题/主旨 LIKE + 正文 FTS，同一节只留一块（v2.5）
 POST   /studio/works/{id}/index             # 已实现：{force, include_sources}
 GET    /studio/works/{id}/index/status
+
+# 选题池与写作统计（v2.6）
+GET/POST /studio/ideas                       # 一句话想法；POST {text: 1..500}
+PATCH/DELETE /studio/ideas/{id}              # status: open|used|dropped；used 时带 work_id
+GET    /studio/stats/daily?days=             # 手写净增字数 / 连续天数（write_days 实时累加）
 
 # 任务队列（M4，已实现）
 POST   /studio/works/{id}/batch             # {task_type, node_ids, only_empty, limit, priority,
@@ -1293,6 +1303,18 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 11. **文风页（v2.4）**：右栏新增「文风」tab——上半是「这一篇的写法」（人称/时态/语气/禁忌 + 三个预设），
    下半是「我的文风样本」（贴旧文，加一篇重算一次）与可手改的「文风画像」。样本是全局的，写法是逐篇的，
    两者进的是同一个 S1，谁覆盖谁见 6.5。作品弹层里另有可折叠的「发布记录」，书架卡片上显示「已发 N 篇 · 阅读 X」。
+12. **书架视图（v2.5）**：搜索框只筛卡片（标题 / 主旨），`Ctrl+K` 另开全库搜索——标题/主旨一组、正文片段一组，
+   片段围绕命中处截 140 字，同一节只留最相关的一块，点一条带着 `?node=` 跳到那一篇的那一节。
+   「在写 / 已归档」是两个视图而不是筛选器：归档只改 `works.status`（`active/paused/archived` 白名单，乱填 422），
+   正文、版本、索引都不动，归档的旧文照样搜得到。作品卡右上角悬停出「归档 / 恢复」，与旁边的删除语义完全不同。
+13. **写作手感四件（v2.6）**：书架顶部一条写作日历（今天手写字数 / 连续天 / 近 14 天柱状），下面是「灵感箱」：
+   一句话想法记下来，「用它开写」只填新建表单（kind/scale 仍由人挑）；生成预览按空行切段、逐段勾选后再采用；
+   编辑器顶部显示 `当前 / 目标` 与细进度条（超过 110% 变黄），树底显示「已写 / 目标」。
+14. **结构可维护（v2.7）**：左树每行前面有折叠三角，卷下面几十章时先把写完的收起来；折叠状态按作品存
+   `localStorage`，从搜索结果跳进被折叠的节会自动展开祖先，不会出现「选中了但人不在」。树头「导入」把
+   旧稿一次搬进来：粘贴或拖 `.txt / .md`，按「第X章 / 第X节 / ## 标题」或空行拆节，先看预览（几节、多少字、
+   每节开头一句）再导；导完统一重建一次索引——逐节导会触发几十次「选中 + 重拉整棵树」。右栏的素材详情、
+   事实卡、术语都改成行内可编辑：素材正文改了按 `content_hash` 重建这一条的索引，事实卡改文字不丢出处。
 
 ### 12.1 图谱力导向视图（`frontend/src/components/GraphMap.vue`）
 
@@ -1327,6 +1349,9 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | **插在 M5 之前 · 素材链路**（已完成 2026-10-27） | S_src 改为按本节检索（`kinds=("source",)`，每条约 2 块，命中不了退回最近导入并告警）、导入即建索引、`GET /studio/sources/{id}` 单条详情、`sources.used` 接上（只在 prompt 真发出去时 +1）、`POST /studio/sources/{id}/facts/extract` 抽事实卡并带 `source_id`、前端拖 `.txt/.md` 批量导入 / 素材搜索 / 单条详情 / 抽事实 / 生成告警上屏 | 全量 206 passed，**零真实模型调用**：两条素材各讲一件事时只注入相关那条、第 7 条素材建索引后能被检索到、没索引时退回并给出「未建索引」告警、`context/preview` 不记用量而真生成一次 `used` +1、抽事实卡落库带出处且不改 `used` | 已完成 |
 | **插在 M5 之前 · 公众号链路**（已完成 2026-10-29） | 微信兼容 HTML 导出（全内联样式、`format=html`）、一键复制富文本（`ClipboardItem`）、发布前检查（段落过长/半角标点/连续空行/摘要缺失/结尾无引导/风险词）、`works.digest` 摘要列与 AI 写摘要、配图占位 `[图：…]` 与配图清单、`article/wechat` 子类与 `tpl_wechat` 模板 | 全量 220 passed，**零真实模型调用**：导出的 HTML 里没有 `<style>`/class 而正文里的标签被转义、列表/引用/代码/配图占位都认、老库能补上 `digest` 列、摘要超 120 字被截、风险词命中只提示不拦截 | 已完成 |
 | **插在 M5 之前 · 公众号第二轮**（已完成 2026-10-29） | 文风画像（`voice.py` 本地统计句长/段长/人称/口头禅/标点，注入 S1 且预算 1200→2000）、`style_json` 终于有写入入口（三个预设 + 四项）、三套版式主题（`?theme=`）、文末引导与「往期推荐」、换标题与转发语两个接口、`publications` 发布台账与书架聚合、发布检查补四条（外链/套话开头/通篇不加粗/小标题过长） | 全量 244 passed，**零真实模型调用**：画像只写数字支撑得出的结论且代码块不参与统计、有画像才出现在 S1、三套版式输出不同且未知主题退回默认、文末与往期可单独关掉、往期不列当前这篇也不列没链接的、`used` 口径不受影响、台账聚合与 404 都对、老库 `DROP TABLE` 后重开能补出三张表 | 已完成 |
+| **插在 M5 之前 · 书架检索与归档**（已完成 2026-10-29） | 跨作品检索（`GET /studio/search`：标题/主旨 LIKE + 正文 FTS，同节去重、命中处截 140 字）、书架搜索框、在写/已归档两个视图（`works.status` 白名单）、`Ctrl+K` 全库搜索弹层与 `?node=` 定位 | 全量 252 passed，**零真实模型调用**：搜「排版」能跨两篇命中并说清哪一节、书名不建索引也搜得到、同一节多块只出一条、归档后列表/搜索都还对、非法状态 422 | 已完成 |
+| **插在 M5 之前 · 写作手感四件**（已完成 2026-10-29） | 灵感箱（`ideas` 表 + 用它开写）、写作日历（`write_days` 实时累加手写净增字数，AI 采用与回滚不计）、段落级采用（逐段勾选）、目标字数进度（编辑器与树底） | 全量 260 passed，**零真实模型调用**：手打不留版本也算、AI 采用与回滚不算、删改记 0 不记负、今天没写从昨天数、勾掉的段落不会写进正文 | 已完成 |
+| **插在 M5 之前 · 三件结构/资料维护**（已完成 2026-10-29） | 左树折叠（按作品记在 `localStorage`，选中被折叠的节自动展开祖先）、导入旧稿成节（`ImportDocDialog`：粘贴/拖 `.txt/.md`，按标题或空行拆，预览后逐节建，最后统一重建索引）、素材/事实/术语可编辑（三条 PATCH；素材正文改后重建这一条索引） | 全量 268 passed，**零真实模型调用**：改素材正文后旧词搜不到、新词当场命中，只改标题不丢索引；改事实卡保留 `source_id`；术语改名撞重回 400 而非 500；导入 3 节字数进树而 `/stats/daily` 今天仍是 0 | 已完成 |
 | **M5 向量（可选）** | fastembed 接入、向量召回、RRF 融合、检索评测 | 语义查询召回优于纯关键词 | 3-4 天 |
 
 总计约 **4-5 周**（连续开发）；业余时间按 8-10 周估。M1 结束时系统就可用（能写单篇与单章），后续都是增强。
@@ -1447,6 +1472,7 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | 30 | 素材链路 | `tests/test_studio_sources.py`（11 例，全假 gateway + tmp 库，零网络） | 导了素材却像没导：按不按相关、能不能点开、用没用上 | 已测：全量 206 passed。关键回归：两条素材各讲一件事时只注入相关那条（旧写法会把最新那条排版规范也塞进来）、第 7 条素材建索引后能被检索到（旧写法固定只取最新 5 条）、没建索引时退回「最近导入」且 warnings 里写清「这一轮是退化的」、命中块标「第 1 段 / 原文第 1 字起 / 全文 N 字」、导入即建索引（`search?scope=source` 当场能命中）、`context/preview` 不记用量而真生成一次 `used` +1、`GET /studio/sources/{id}` 给全文且 404 不含糊、抽事实卡带 `source_id` 且解析不出时 400 不落库 |
 | 31 | 公众号发布链路 | `tests/test_publish.py`（14 例，全假 gateway + tmp 库） | 发出去那一下会不会被排版毁掉、会不会踩词 | 已测：全量 220 passed。关键回归：导出 HTML 全部内联且正文里的 `<script>` 被转义、代码围栏里的空行不切块、标题默认不进正文、`[图：…]` 变占位块且不进字数、发布检查能报出摘要缺失/长段/半角标点/风险词/无结尾引导、干净稿不误报、老库 `DROP COLUMN digest` 后重开能补上、摘要超过 120 字被截、没正文时写摘要 400 且不调模型 |
 | 32 | 公众号第二轮 | `tests/test_publish_plus.py`（24 例，全假 gateway + tmp 库，零网络） | 「像不像我写的」「每篇都要手工补的几步」有没有真的落地 | 已测：全量 244 passed。关键回归：文风画像只写数字支撑得出的结论（样本里没有破折号就不出现「破折号 0.0 个」）、代码块不参与句长统计、没贴样本时 S1 里不出现「按作者自己的文风写」、三套版式产出不同样式而未知主题退回默认、文末与往期能单独关掉、往期不列当前这篇也不列没链接的、换标题会去掉编号并丢掉解释行、转发语在模型不吐 JSON 时退回按行切、台账聚合出书架要的数字、老库 `DROP TABLE` 三张表后重开能补齐 |
+| 33 | 结构/资料维护三件 | `tests/test_edit_entities.py`（8 例，全假 gateway + tmp 库，零网络） | 改素材/事实/术语会不会把索引和出处弄丢 | 已测：全量 268 passed。关键回归：改素材正文后旧词搜不到、新词当场命中；只改标题既不重建索引也不丢；改事实卡保留 `source_id` 与 `source_title`；术语改成已有名字回 400 且不留半改状态；空 `{}` 与空正文都是 400；导入 3 节后 `word_count` 有值而 `/stats/daily` 今天与总计都是 0 |
 
 ## 17. 与现有代码的接入点
 
@@ -1467,6 +1493,8 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | `app/studio/wechat.py` / `publish.py` / `risk-words.yaml`、`frontend/src/components/WechatDialog.vue` | 无（纯函数 + 本地词表；弹层只用 `navigator.clipboard` 与 `ClipboardItem`） | 新增文件；`studio_routes` 加 `export?format=html` / `publish-check` / `digest`，`works` 加 `digest` 列（`_migrate` 补），`StudioView` 头部加「公众号」入口 |
 | `tests/test_publish.py` | `wechat.render_article / split_blocks / extract_images / stats`、`publish.check / risk_hits`、`store.update_work(digest=)`、`GET export?format=html`、`GET publish-check`、`POST digest` | 否（同为假 gateway + tmp 库；迁移用例会临时 `DROP COLUMN digest` 再重开） |
 | `app/studio/voice.py` | `tokenize.tokens`（常用词统计）、`store.get_setting/set_setting`（画像落 `settings`）、`assembler.assemble`（S1 注入） | 新增文件；`assembler` 加一次 `get_setting` 并把 S1 预算提到 2,000 |
+| `frontend/src/components/ImportDocDialog.vue` | `store.importNodes`（逐节 `POST /studio/works/{id}/nodes`，最后统一 `reindex`）、`AppIcon`、全局 `.btn` / `.field` | 新增文件；`StudioTree` 加折叠三角与「导入」入口、`StudioView` 接线；`StudioPanel` 素材/事实/术语改行内编辑 |
+| `tests/test_edit_entities.py` | `store.update_source/update_fact/update_term`、`indexer.index_source`（按 `content_hash` 增量重建）、`PATCH /studio/sources|facts|terms/{id}` | 否（同为假 gateway + tmp 库；导入用例走的是已有的建节点接口） |
 | `tests/test_publish_plus.py` | `voice.analyze/build/profile_text/traits`、`wechat.styles/render_article(theme, footer, archive)`、`publish.check` 新增四条、`store.add_voice_sample/publication_summary/archive_links`、`GET /studio/voice*`、`PUT /studio/settings/{key}`、`POST /works/{id}/titles|share`、`publications` 五个接口 | 否（同为假 gateway + tmp 库；迁移用例会临时 `DROP TABLE` 三张新表再重开） |
 | `frontend/src/utils/diff.js` | 无（不引依赖，现有 deps 里没有 diff 库） | 新增文件；`StudioPanel.vue` 加「历史」页、`StudioTree.vue` 加上下移、`StudioView.vue` 接回滚与备份提示 |
 | `storage/studio.sqlite` | — | 新增文件 |
@@ -1491,3 +1519,11 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 *v2.3（2026-10-29）· 公众号发布链路*：素材链路做完之后再问「还有什么对发公众号有帮助」，查下来生成能力已经够用，缺的是**最后一公里**：导出只有 `.md`，而公众号编辑器不认 Markdown，粘进去是一堆井号；发布页要的摘要、封面、配图系统一个都没有；段落长度、半角标点、风险词也没人管。这次补上五件事：①**富文本导出**——`GET /export?format=html` 产出全内联样式的 HTML（公众号会剥掉 `<style>` 与 class，只留 style），正文里先转义再套行内格式，列表/引用/代码块/配图占位都认；②**一键复制**——`WechatDialog` 用 `ClipboardItem` 把 `text/html` 与 `text/plain` 一起写进剪贴板，不支持的浏览器退化成「选中预览再复制」；③**发布前检查**——新模块 `publish.py`，纯本地判：段落超过 120 字、中文句子里混半角标点、连续空行、行尾空格、摘要缺失或超 120 字、结尾没有互动引导、正文没有配图占位，外加 `risk-words.yaml` 里的绝对化/医疗/金融/诱导分享/迷信五类风险词（命中只提示改写，不拦截、不扣分，时政类没有内置：变化快、误报代价高，留给作者自己补）；④**摘要**——`works` 加 `digest` 列（`_migrate` 里独立判列，早先那句「ref_hash 在就 return」会挡住后续所有新列），`POST /works/{id}/digest` 让模型写 ≤120 字并落库，作品弹层里也能改；⑤**公众号文风**——`content-types.yaml` 加 `article/wechat` 子类与 `tpl_wechat` 模板（口语、每段 ≤100 字、小标题直给结论、每 2-3 段插一个「[图：画面]」占位）。全量 220 passed，仍**零真实模型调用**。*
 
 *v2.4（2026-10-29）· 公众号第二轮*：v2.3 之后接着问「还有没有对写作有帮助的」，查下来剩下的都是**每篇都要手工补的那几步**，以及一处从来没生效过的配置。①**`works.style_json` 是死配置**——`assembler._style_text()` 会读人称/时态/语气/禁忌并注入 S1，但全前端没有一处写它，所以永远是空串：每篇都只能吃 `tpl_wechat` 的通用口吻，想固定「像我」得在每节提示词里重说一遍。现在作品弹层与右栏「文风」页都能写，另给三个预设（像聊天 / 像专栏 / 像报告）。②**没有「我的文风样本」**——素材喂的是事实，模板给的是文体，而「像不像我写的」取决于句长、段长、人称、口头禅与标点，这些全是可测的量：新增 `voice.py`，纯本地统计（切句切段数数比值，不做词性分析），输出一段只含「数字支撑得出的结论」的画像（样本里没有破折号就不写破折号），跟着 S1 进 prompt。**刻意不用模型总结文风**：那只会得到一堆「文笔细腻」这类没法验证、也没法照做的形容词。③**S1 预算被挤出事故**：画像进来才发现 1,200 装不下，而 `_head` 截的是尾部——先没的正是「禁忌」，于是提到 2,000，并把顺序定成「文体 → 画像 → 逐篇 style_json」（个体覆盖底色）。④**排版只有一套皮肤**——样式全是模块常量，现在三套（纸张 / 极简 / 暖色），弹层里切换、存进 `settings.theme`，只改排版不改正文。⑤**每篇都手工贴同样的结尾**——文末引导存成全局设置，导出时自动追加，可选「往期推荐」（从台账取同子类、带链接、最新一条，当前这篇不列）。⑥**摘要只有一条、标题只有一个**——转发语（提问 / 结论 / 坦白三种口气，模型不吐 JSON 就按行切）与换标题（按全文出 6 个候选，显示字数与「列表页只露前 20 字」的截断预览，点「用这个」才改作品标题）都进了弹层。⑦**发布检查还漏三处最常出的事故**——正文外链（订阅号里点不动）、首段以「随着…」开头或超过 80 字、过千字全文一处加粗都没有，另加小标题超过 20 字会折行。⑧**发完就丢**——`publications` 表记日期/链接/阅读/在看，书架显示「已发 N 篇 · 阅读 X」。顺带把 `publications` 加进 `_NO_FK_TABLES` 与 `_ORPHAN_WHERE`：它写了 `ON DELETE CASCADE`，但连接从没开 `PRAGMA foreign_keys`，级联其实不生效——这种「看起来有外键」的表最容易被漏清。全量 244 passed（新增 24 例），5 条变异全部变红，仍**零真实模型调用**。*
+
+*v2.4.1（2026-10-29）· 三处「会咬人」的体验修复*：公众号链路闭环之后再问「还有没有其它功能性或体验上的问题」，查下来最该修的不是缺功能，而是三处会真丢东西、或者说挡住手的地方。①**保存失败一直在骗人**——`saveNode` 只在 `r.ok` 时更新本地状态，失败既不写 `error` 也不回 `false`，而 `flushSave` 不看结果直接写 `saved`：后端 500 或断网时右上角照样显示「已保存」，关掉页面这段字就没了；也没有 `beforeunload`。现在 `saveNode` 返回布尔并把失败写进 `error`，顶部状态多一个 `error` 态（变红、点一下重试、文案「保存失败」），切到别的标签页先存一次（`visibilitychange`），真正关页/刷新交给 `beforeunload` 拦；换节、回书架、点生成、回滚版本四个入口都先 flush，存不上就当场说明——生成这条尤其重要：装配读的是库里的正文，没存上就生成等于拿旧稿喂模型。采用生成结果也改了：写库失败不再顺手清空预览，否则那段结果连重试的机会都没有。②**右栏 8 个 tab 在 312px 里横滑**——上一轮加「文风」之后 `.tabs` 靠 `overflow-x: auto` 兜着，「历史」「告警」默认在可视区外；改 `flex-wrap: wrap` 两行铺开，不做「更多」菜单。③**生成停不下来**——`generate` 没有 AbortController，三千字跑到一半想换提示词只能关页面；前端接 `signal`，预览条在生成期间给「停止生成」，停下后已生成的部分保留并可照常采用。服务端顺手修了一个一直存在的隐患：`event_stream` 的 `finally` 里有 `yield`，客户端一断连、生成器收到 `GeneratorExit` 时会抛「async generator ignored GeneratorExit」；现在 `except BaseException` 标记中止，`finally` 只做 `finish_run(status="stopped")`，不再写库也不再推 `done`（半截稿写进原稿比不写更坏）。全量 245 passed，仍**零真实模型调用**。*
+
+*v2.5（2026-10-29）· 书架检索与归档*：上一轮把「会咬人」的三处修完，接着做的是**作品一多就先坏的那一步**。①**书架只有一个平铺列表**——没有搜索、没有筛选、没有排序，`works.status` 从建表起就写着 `active / paused / archived`，但全前端一个入口都没有，`fetchWorks` 也只传 `kind`：写了三十篇之后，要么滚，要么凭记忆。现在书架顶部有搜索框（标题 / 主旨即时筛）与「在写 / 已归档」两个视图；归档走 `PATCH /studio/works/{id}`（`status` 收成 `Literal` 白名单，乱填 422），只改这一列，正文、版本、索引都不动，作品卡悬停出「归档 / 恢复」。②**跨作品搜不到正文**——`POST /studio/works/{id}/search` 必须先选定一篇，而人真正想问的是「我之前在哪篇写过这个」。新增 `GET /studio/search`：标题/主旨走 LIKE 单独一组（正文 FTS 不索引标题），正文与素材走同一套 FTS 但不加 `work_id`，同一节命中多块只留最相关的一块，片段围绕命中处截 140 字。前端 `Ctrl+K` 唤出弹层，↑↓ 选择、Enter 打开，跳转带 `?node=`，进去直接落在那一节。③**归档不是删除**——归档的旧文仍然打得开、搜得到（有专门用例盯着），否则「整理书架」会变成「把资料埋掉」。全量 252 passed（新增 7 例），仍**零真实模型调用**。*
+
+*v2.6（2026-10-29）· 写作手感四件*：书架与编辑器都够用了，剩下的是「每天都会碰到的小摩擦」。①**灵感箱**——一句话想法原先只能「建一个空作品」，书架会被还没想清楚的东西塞满；现在落在 `ideas` 表（`open/used/dropped`），「用它开写」只把标题与主旨填进新建表单，kind/scale 仍由人挑（猜错类型比不填更麻烦），开完标成 `used` 并记下 `work_id`。②**写作日历**——口径是**手写净增字数**：每次保存用新字数减旧字数，正数计进 `write_days`，负数记 0；AI 采用（`snapshot_source=ai_*`）与版本回滚不计。**第一版从 `node_versions` 上算，写完就发现是错的**：自动保存不留版本（每几秒一条会把库撑爆），纯手打会统计成 0——于是改成在 `update_node` 里实时累加。连续天数从今天往回数，今天还没写就从昨天数，避免中午打开看到「连续 6 天」突然变 0。③**段落级采用**——生成长文只有几段能用时，不必先整段采用再手删：预览按空行切段、逐段勾选（全选/全不选），只把勾中的拼成正文；写库失败时预览仍留着。④**目标字数进度**——大纲给每节的 `target_words` 终于显示出来（编辑器顶部「1200 / 目标 1500」+ 细进度条，超 110% 变黄），树底显示「已写 / 目标」。全量 260 passed（新增 8 例），仍**零真实模型调用**。*
+
+*v2.7（2026-10-29）· 三件结构/资料维护*：功能不缺了，缺的是**写长之后每天都要多做一遍的动作**。①**左树不能折叠**——`StudioTree` 一直是「扁平数组 + `paddingLeft` 缩进」的假树，卷下面几十章只能拖滚动条；现在每行前面有三角（`childful` 靠「下一行更深」判，不动数据结构），折叠状态按作品存 `localStorage`，选中被折叠的节自动展开祖先——否则从 `Ctrl+K` 跳进来会看到「选中了但人不在」。②**旧稿进不来**——书架空态一直写着「先把已有稿件粘进来」，实际只能一节一节新建再粘；新增 `ImportDocDialog`：粘贴或拖 `.txt/.md`，按「第X章 / 第X节 / `## 标题`」自动拆（拆不出两节就退到空行），先给预览（几节、多少字、每节开头），导的时候不在循环里 `select`，最后统一重拉树 + 刷字数 + 重建一次索引。**导入的正文不算「今天写的字」**：`create_node` 本来就不记 `write_days`，没有在别处补——搬运旧稿不该刷高日历。③**素材/事实/术语只能加和删**——v2.2 的接口清单里就写着「这三组只有 GET/POST/DELETE」，抄错一个字只能整条重导，而重导会让 `sources.used` 与事实卡的 `source_id` 一起断；现在补上三条 PATCH，素材改正文后按 `content_hash` 重建这一条索引（只改标题时 `index_source` 自己跳过），术语改成已有名字回 400 并给一句「已经有同名术语了」。全量 268 passed（新增 8 例），仍**零真实模型调用**。*

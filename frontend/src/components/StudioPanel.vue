@@ -88,13 +88,33 @@
           <a v-if="srcDetail.url" class="src-link" :href="srcDetail.url" target="_blank" rel="noreferrer">
             {{ srcDetail.url }}
           </a>
-          <pre class="src-content">{{ srcDetail.content }}</pre>
-          <div class="src-detail-act">
-            <button class="btn btn-sm" :disabled="factsBusy" @click="extractFacts(srcDetail)">
-              {{ factsBusy ? '抽取中…' : '抽事实卡' }}
-            </button>
-            <button class="btn btn-sm" @click="removeSource(srcDetail)">删除</button>
-          </div>
+          <!-- 只删不能改的话，抄错一个字就得整条重导，已抽事实卡的出处一起断 -->
+          <template v-if="srcEditing">
+            <input v-model="srcDraft.title" class="field" placeholder="标题" />
+            <input v-model="srcDraft.url" class="field" placeholder="来源链接（可空）" />
+            <input v-model="srcDraft.published_at" class="field" placeholder="资料日期 YYYY-MM（可空）" />
+            <textarea v-model="srcDraft.content" class="field" rows="12"></textarea>
+            <p class="src-count">{{ (srcDraft.content || '').length }} 字</p>
+            <div class="src-detail-act">
+              <button class="btn btn-sm" :disabled="srcSaving" @click="cancelEditSource">取消</button>
+              <button
+                class="btn btn-primary btn-sm"
+                :disabled="srcSaving || !srcDraft.content.trim()"
+                @click="saveSourceEdit"
+              >{{ srcSaving ? '保存中…' : '保存' }}</button>
+            </div>
+          </template>
+          <template v-else>
+            <pre class="src-content">{{ srcDetail.content }}</pre>
+            <div class="src-detail-act">
+              <button class="btn btn-sm" @click="startEditSource">改</button>
+              <button class="btn btn-sm" :disabled="factsBusy" @click="extractFacts(srcDetail)">
+                {{ factsBusy ? '抽取中…' : '抽事实卡' }}
+              </button>
+              <button class="btn btn-sm" @click="removeSource(srcDetail)">删除</button>
+            </div>
+          </template>
+          <p v-if="srcError" class="warn-line">{{ srcError }}</p>
           <p v-if="factsNote" class="hint">{{ factsNote }}</p>
         </div>
       </section>
@@ -103,16 +123,34 @@
       <section v-else-if="tab === 'facts'" class="section">
         <p class="hint">把素材压成「一句可引用的话」，生成时优先使用。</p>
         <div v-for="f in store.facts" :key="f.id" class="item">
-          <div class="item-main">
-            <span class="item-title">{{ f.statement }}</span>
-            <span class="item-meta">
-              {{ f.source_title || '无来源' }}
-              <template v-if="f.valid_until"> · 有效至 {{ f.valid_until }}</template>
-            </span>
+          <!-- 卡抄错一个字就删了重建，会把「这条事实来自哪条素材」一起丢掉 -->
+          <div v-if="factEdit === f.id" class="edit-box">
+            <textarea v-model="factDraft.statement" class="field" rows="2" placeholder="一句话陈述…" />
+            <input v-model="factDraft.valid_until" class="field" placeholder="有效期 YYYY-MM（可选）" />
+            <div class="row-act">
+              <button class="btn btn-sm" @click="factEdit = ''">取消</button>
+              <button
+                class="btn btn-primary btn-sm"
+                :disabled="busy || !factDraft.statement.trim()"
+                @click="saveFactEdit(f.id)"
+              >保存</button>
+            </div>
           </div>
-          <button class="mini-btn" title="删除" @click="store.deleteFact(f.id)">
-            <AppIcon name="trash" :size="13" />
-          </button>
+          <template v-else>
+            <div class="item-main">
+              <span class="item-title">{{ f.statement }}</span>
+              <span class="item-meta">
+                {{ f.source_title || '无来源' }}
+                <template v-if="f.valid_until"> · 有效至 {{ f.valid_until }}</template>
+              </span>
+            </div>
+            <button class="mini-btn" title="改" @click="startEditFact(f)">
+              <AppIcon name="edit" :size="13" />
+            </button>
+            <button class="mini-btn" title="删除" @click="store.deleteFact(f.id)">
+              <AppIcon name="trash" :size="13" />
+            </button>
+          </template>
         </div>
         <p v-if="!store.facts.length" class="empty">还没有事实卡。</p>
 
@@ -137,13 +175,31 @@
       <section v-else-if="tab === 'terms'" class="section">
         <p class="hint">技术类必用：统一写法，禁用说法会在检查时报出。</p>
         <div v-for="t in store.terms" :key="t.id" class="item">
-          <div class="item-main">
-            <span class="item-title">{{ t.term }}</span>
-            <span class="item-meta">写作「{{ t.preferred || t.term }}」</span>
+          <div v-if="termEdit === t.id" class="edit-box">
+            <input v-model="termDraft.term" class="field" placeholder="术语" />
+            <input v-model="termDraft.preferred" class="field" placeholder="统一写作（默认同术语）" />
+            <input v-model="termDraft.forbiddenText" class="field" placeholder="禁用说法，逗号分隔" />
+            <div class="row-act">
+              <button class="btn btn-sm" @click="termEdit = ''">取消</button>
+              <button
+                class="btn btn-primary btn-sm"
+                :disabled="busy || !termDraft.term.trim()"
+                @click="saveTermEdit(t.id)"
+              >保存</button>
+            </div>
           </div>
-          <button class="mini-btn" title="删除" @click="store.deleteTerm(t.id)">
-            <AppIcon name="trash" :size="13" />
-          </button>
+          <template v-else>
+            <div class="item-main">
+              <span class="item-title">{{ t.term }}</span>
+              <span class="item-meta">写作「{{ t.preferred || t.term }}」</span>
+            </div>
+            <button class="mini-btn" title="改" @click="startEditTerm(t)">
+              <AppIcon name="edit" :size="13" />
+            </button>
+            <button class="mini-btn" title="删除" @click="store.deleteTerm(t.id)">
+              <AppIcon name="trash" :size="13" />
+            </button>
+          </template>
         </div>
         <p v-if="!store.terms.length" class="empty">还没有术语。</p>
 
@@ -531,6 +587,13 @@ const srcError = ref('')
 const srcQuery = ref('')
 const srcHits = ref([])
 const srcDetail = ref(null)
+const srcEditing = ref(false)
+const srcDraft = ref({ title: '', url: '', published_at: '', content: '' })
+const srcSaving = ref(false)
+const factEdit = ref('')
+const factDraft = ref({ statement: '', valid_until: '' })
+const termEdit = ref('')
+const termDraft = ref({ term: '', preferred: '', forbiddenText: '' })
 const factsBusy = ref(false)
 const factsNote = ref('')
 const srcChars = computed(() => (src.value.content || '').length)
@@ -823,6 +886,103 @@ async function openSource(id) {
   if (!srcDetail.value) srcError.value = store.error || '打不开这条素材'
 }
 
+function startEditSource() {
+  const s = srcDetail.value
+  if (!s) return
+  srcDraft.value = {
+    title: s.title || '',
+    url: s.url || '',
+    published_at: s.published_at || '',
+    content: s.content || '',
+  }
+  srcEditing.value = true
+}
+
+function cancelEditSource() {
+  srcEditing.value = false
+}
+
+/**
+ * 保存素材改动。正文变了后端会重建这一条的索引；回来换成新行，
+ * 否则界面上还是旧文字，看着像没存上。
+ */
+async function saveSourceEdit() {
+  if (!srcDetail.value || srcSaving.value) return
+  srcSaving.value = true
+  try {
+    const row = await store.updateSource(srcDetail.value.id, {
+      title: srcDraft.value.title.trim(),
+      url: srcDraft.value.url.trim(),
+      published_at: srcDraft.value.published_at.trim(),
+      content: srcDraft.value.content,
+    })
+    if (!row) {
+      srcError.value = store.error || '保存失败'
+      return
+    }
+    srcDetail.value = row
+    srcEditing.value = false
+    factsNote.value = ''
+  } finally {
+    srcSaving.value = false
+  }
+}
+
+function startEditFact(f) {
+  factEdit.value = f.id
+  factDraft.value = { statement: f.statement || '', valid_until: f.valid_until || '' }
+}
+
+async function saveFactEdit(id) {
+  busy.value = true
+  try {
+    const ok = await store.updateFact(id, {
+      statement: factDraft.value.statement.trim(),
+      valid_until: factDraft.value.valid_until.trim(),
+    })
+    if (ok) factEdit.value = ''
+  } finally {
+    busy.value = false
+  }
+}
+
+/** 禁用说法在库里是 JSON 数组，编辑框里用中文逗号展示 */
+function forbiddenText(raw) {
+  try {
+    const arr = JSON.parse(raw || '[]')
+    return Array.isArray(arr) ? arr.join('，') : ''
+  } catch {
+    return ''
+  }
+}
+
+function startEditTerm(t) {
+  termEdit.value = t.id
+  termDraft.value = {
+    term: t.term || '',
+    preferred: t.preferred || '',
+    forbiddenText: forbiddenText(t.forbidden),
+  }
+}
+
+async function saveTermEdit(id) {
+  busy.value = true
+  try {
+    const forbidden = termDraft.value.forbiddenText
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const ok = await store.updateTerm(id, {
+      term: termDraft.value.term.trim(),
+      preferred: termDraft.value.preferred.trim(),
+      forbidden,
+    })
+    if (ok) termEdit.value = ''
+  } finally {
+    busy.value = false
+  }
+}
+
 async function removeSource(s) {
   if (!s?.id) return
   const name = s.title || '未命名素材'
@@ -902,10 +1062,12 @@ defineExpose({ refreshContext })
 }
 .tabs {
   display: flex;
+  /* 8 个 tab 在 312px 里排不下：原来靠横向滚动，后两个（历史 / 告警）默认在可视区外。
+     两行铺开比横滑稳，也不用另做「更多」菜单 */
+  flex-wrap: wrap;
   gap: 2px;
   padding: 8px 6px 0;
   border-bottom: 1px solid var(--line-soft);
-  overflow-x: auto;
 }
 .tab {
   display: inline-flex;
@@ -988,6 +1150,14 @@ defineExpose({ refreshContext })
   font-size: 10.5px;
   color: var(--text-faint);
   font-family: theme('fontFamily.mono');
+}
+/* 行内编辑：右栏只有三百来像素，输入框吃满、按钮跟在下面一行 */
+.edit-box {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 .mini-btn {
   display: inline-flex;
