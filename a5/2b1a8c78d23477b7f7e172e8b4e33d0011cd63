@@ -1,0 +1,301 @@
+frontend/src/components/AlertBanner.vue
+  s_5d9673cd305b89::t_85f12c21eb4e49 116,119,123
+  s_85cd431edb9d78::t_832be5ecef809d 12,47-52
+  s_aa8c5aad306f92::t_b10116dc778f37 117,120,124-125,129
+  s_85cd431edb9d78::t_3678dcb6dd9821 3-6
+  s_85cd431edb9d78::t_758f1f772ccb70 53
+frontend/src/views/ConsoleView.vue
+  s_85cd431edb9d78::t_f36c2e8c9f5c5e 181,746-749
+  s_85cd431edb9d78::t_a2ae80df5dfcdc 593,769-770,773,782,832-833,840,842-847,850-851,854-855
+  s_85cd431edb9d78::t_d20fd41bb944c2 179,256,374,534,563
+  s_85cd431edb9d78::t_025225c4d29971 271
+  s_85cd431edb9d78::t_a9138957424036 1144,1150-1155,1160-1163
+  s_85cd431edb9d78::t_125392c14bdadc 1669-1745,1748,1750,1752-1797,1800-1847,1849-1905,1907-1916,1918-1994
+  s_85cd431edb9d78::t_df285e51c907e1 285,502,647,671,774-776,778-781,958-959
+  s_85cd431edb9d78::t_a146420e28f906 142-143,145-146,150-151,153-154,610-611
+  s_85cd431edb9d78::t_7f2ab13e877962 860-894,910-957,960-1022,1024,1028-1143,1145-1149,1156-1159,1164-1191
+  s_85cd431edb9d78::t_d230fe16714090 644-646,648-651,654-658,660-670,672-676,678-681,687-689,691-693,714-719
+  s_85cd431edb9d78::t_de29a6a4f5db48 248-250,252-255,257-264,266-270,272-284,286-300,302-373,375-501,503-533,535-562,564-586
+  s_85cd431edb9d78::t_3e5b77e6a7ff9b 35-36
+  s_85cd431edb9d78::t_de256057571c2f 4-5,7-8,20-34,37-62,69,115,118,134,141,144,147-149,167-178,180,182-206,246-247,251,265,301,587,594,599,601-609,612-622,624,629-630,635-643,685-686,694-701,712-713,720-745,750-760,765,771-772,806,816-830,1212,1215,1233,1235,1238-1240,1244,1250-1251,1264-1322,1324-1333,1335-1337,1367,1392-1393,1463,1466,1473-1475,1478-1479,1483,1500,1509,1516,1526,1551-1594,1613,1625,1647-1649,1652-1654,1666-1668,1746-1747,1749,1751,1798-1799,1848,1906,1917,2003-2010,2030-2035
+  s_85cd431edb9d78::t_9bb64eeb8ac72e 652-653,659,677,690,702-711,777,852-853,895-896,898-909,1023,1025-1027
+  s_85cd431edb9d78::t_6f64886cc50763 897
+frontend/src/components/StudioPanel.vue
+  s_85cd431edb9d78::t_ae344d26aa42a1 1205,1588-1633
+  s_aa8c5aad306f92::t_b10116dc778f37 1660
+  s_85cd431edb9d78::t_42fbd533ce57a0 1669,1686
+  s_85cd431edb9d78::t_b695e678930b95 1184,1336,1363,1559
+  s_85cd431edb9d78::t_30d39bff0fb66d 398-428,755-780
+  s_85cd431edb9d78::t_7efe901f13b17c 868-875
+  s_85cd431edb9d78::t_9105a69afdc298 1401
+  s_5d9673cd305b89::t_85f12c21eb4e49 1278,1359,1481,1483,1657,1668,1685,1712,1732
+  s_85cd431edb9d78::t_ca61032e3fcde7 524
+  s_8bef4fc28f4c3e::t_d71fe88a3c70f0 1411,1535
+  s_85cd431edb9d78::t_b254876c22333e 2,18,569-579,600,607-612,861-862,1149-1154,1197-1204
+  s_85cd431edb9d78::t_253fcaf35600d5 781
+  s_85cd431edb9d78::t_7b3f7cd2863fb9 876
+app/core/auth.py
+  s_85cd431edb9d78::t_d8f5d2ec949c2e 16-18
+frontend/src/utils/storage.js
+  s_85cd431edb9d78::t_335f9d4ae1999b 9
+frontend/src/components/MessageBubble.vue
+  s_85cd431edb9d78::t_28604ec18cba03 32,45-46
+  s_85cd431edb9d78::t_397d44ebc8edfb 179,183-185,188-190,221,233,243,249-250,287,312
+  s_85cd431edb9d78::t_3b606215b830a9 294
+frontend/src/views/StudioView.vue
+  s_85cd431edb9d78::t_93e13b5e095bc0 1026-1029
+  s_5d9673cd305b89::t_85f12c21eb4e49 1570,1602,1607,1638,1641,1691,1833,1841,1844,1957,2217,2271,2275,2282,2284,2311,2340,2450
+  s_85cd431edb9d78::t_2422a1bd099684 1605-1606,1717,1852
+  s_85cd431edb9d78::t_ca7668f649435a 749,784,1092,1440-1441
+  s_aa8c5aad306f92::t_b10116dc778f37 1907,2488
+  s_85cd431edb9d78::t_62456052ebd025 983-1002
+  s_85cd431edb9d78::t_db96fe8552e53c 797-798
+  s_85cd431edb9d78::t_7138e36b6ce0a7 585
+  s_85cd431edb9d78::t_74f028a8101b5b 926
+  s_85cd431edb9d78::t_c81bc0ea6b7452 1902-1904
+  s_85cd431edb9d78::t_00b94c03f96a0d 2535-2579
+  s_85cd431edb9d78::t_868cd737d7ed8c 491,505-507,512-514
+  s_85cd431edb9d78::t_d84a1db00aff21 26-28,547-549,573-584,586-588,599,630-633
+  s_2046394cd5485c::t_ffedfd6d3a2324 1885-1891
+  s_77606243477b79::t_4493e400fabada 186,261-294,296-360,606-620,656-661,1003-1006,1016-1019,1030-1038,1882-1884,2000-2099,2179-2180,2232-2233,2236,2242-2245,2324
+  s_85cd431edb9d78::t_75f12f9a3cdf4e 295
+  s_85cd431edb9d78::t_d56220c5347c35 2210-2211,2276,2359,2380
+  s_85cd431edb9d78::t_5ad5eaa23cc039 634
+docs/reverse-proxy.md
+  s_85cd431edb9d78::t_42428bd8f386b5 49-50
+  s_85cd431edb9d78::t_0690685cdc92df 144
+frontend/src/assets/main.css
+  s_85cd431edb9d78::t_be1b0f7091b468 210-212
+  s_85cd431edb9d78::t_dc64f6e578a84f 32,109-112,118,154,175-178,184,222,244-246,252,288
+  s_85cd431edb9d78::t_712a8c25feb9d9 11
+  s_727a6220f2069e::t_9edf846d9fd4c4 475,487
+  s_85cd431edb9d78::t_0f80533140d1ed 282-283
+  s_85cd431edb9d78::t_4c4d1dd076d6a3 31,33,129,132,134,136,140,144,147-148,198,200,202,206,216,270,274
+  s_85cd431edb9d78::t_0b61dda6af16ce 12-21,96
+  s_57313f80432f92::t_3109ce3b933213 298,476-486
+  s_2d23423322b87b::t_1b440d240f7ba6 52-69,124-128,130-131,133,135,137-139,141,190-197,199,201,203-205,207,258-269,271-273,275
+  s_84e88cf578819d::t_c71dce92dd96a6 40-51,70-86,95,97-108,113-117,119-123,142-143,145-146,149-153,155-174,179-183,185-189,208-209,213-215,217-221,223-243,247-251,253-257,276-281,284-287,289-295,318-319,369-371,374-376,447-449,455-457,460-462,507,526,532,552,564-565,568,597,603,671
+  s_1abccee52568fa::t_36868d0001201c 89-90
+app/api/studio_routes.py
+  s_85cd431edb9d78::t_49d7d56eac699c 2297-2300
+frontend/index.html
+  s_85cd431edb9d78::t_3c357ffa16a587 11-13
+  s_e9af53527df54e::t_4a4f08d95cfcc2 6-10,14-19
+frontend/src/components/ApiKeyDialog.vue
+  s_aa8c5aad306f92::t_b10116dc778f37 195,211,239
+  s_85cd431edb9d78::t_fb49a36627617c 14
+  s_8bef4fc28f4c3e::t_d71fe88a3c70f0 130
+  s_5d9673cd305b89::t_85f12c21eb4e49 139,237-238,242
+frontend/src/stores/studio.js
+  s_85cd431edb9d78::t_d2128e4c38905e 1420-1421,1429,1431
+  s_85cd431edb9d78::t_0751d178d6f158 36
+app/config.py
+  s_85cd431edb9d78::t_47b02fdfec02d9 38
+frontend/src/components/GlobalSearch.vue
+  s_5d9673cd305b89::t_85f12c21eb4e49 198,278,307
+  s_aa8c5aad306f92::t_b10116dc778f37 188
+frontend/vite.config.js
+  s_85cd431edb9d78::t_31776446117d9c 4-7,9-10,21-22,30
+  s_85cd431edb9d78::t_83fb06b0851147 8,14-18
+  s_85cd431edb9d78::t_6bb2154bafaf0f 24-29,31
+frontend/src/App.vue
+  s_727a6220f2069e::t_9edf846d9fd4c4 9,11,13-24
+frontend/src/components/GraphMap.vue
+  s_aa8c5aad306f92::t_b10116dc778f37 28,72,87,124,162-163,165-171,173,624,747
+  s_5d9673cd305b89::t_85f12c21eb4e49 634,732,767,867,869,898
+  s_85cd431edb9d78::t_87f9d8ea7466dc 899
+  s_8bef4fc28f4c3e::t_d71fe88a3c70f0 831
+frontend/src/main.js
+  s_85cd431edb9d78::t_aa97c71cf17f48 5
+app/studio/store.py
+  s_85cd431edb9d78::t_c498fa10676865 2490-2496,2506-2509
+frontend/src/utils/writer.js
+  s_85cd431edb9d78::t_0570111c2963cf 1-92,97-99,102-123
+  s_85cd431edb9d78::t_4d8688eef225d8 93-96,100-101
+frontend/src/utils/theme.js
+  s_85cd431edb9d78::t_94fd48045cbe71 23-40,45,65
+  s_85cd431edb9d78::t_7b9538c79d8405 2-4,9,13,15-18,41-44,46,58,60,70,75
+  s_85cd431edb9d78::t_2215caae756885 1,8,10-12,14,19-22,47-57,59,61-64,66-69,71-74
+  s_85cd431edb9d78::t_fad809a0a1ed08 5-7
+app/api/admin_routes.py
+  s_85cd431edb9d78::t_7c0d4802d0b61d 177,209-213
+  s_be4b59cd4e10e8::t_f8f4e404081f23 15,74-76,127-130,158-173,176,188-199,201,204-206,208
+frontend/src/components/StudioTree.vue
+  s_5d9673cd305b89::t_85f12c21eb4e49 272,305,309,407
+frontend/src/components/VersionDiff.vue
+  s_5d9673cd305b89::t_85f12c21eb4e49 147,172,174,275-276,279-280
+  s_aa8c5aad306f92::t_b10116dc778f37 137,175
+frontend/src/components/AskPanel.vue
+  s_85cd431edb9d78::t_525d71dbeaca14 2-36,39-52,54-58,61-63,65-73,75-95,101-103,107-116,118,121-123,125,128,131-133,135,139,144,147,150-164,168-170,172-185,188-194,197-201,204-210,212,214-215,217-221,225,232,236-241,244-251,254-255,260-263,267-274,276-282,284,287-290,293,296-298,300-306,310-314,319-320,339-340,343,357,362-404,407-426,429-438,440,453,455,457,459-460,463-464,467-468,470,472-473,475-476,478-500,504-507,510,512-513,515,519-554,556-565,567-586,588-590,592,594-597,602,604,607,614,618-620,627-630,657-662,664,666-667,669-671,673-675,677-678,680-681
+  s_85cd431edb9d78::t_558700b88168e6 53,60,64,632-634,638-639,641-647,649-651,653-655
+  s_85cd431edb9d78::t_45b7786b366197 439
+  s_85cd431edb9d78::t_2a8dd1b15669b7 635-636
+frontend/tailwind.config.js
+  s_84e88cf578819d::t_c71dce92dd96a6 8-9,11-16,19-21,24-26,29-30,32-35,49-51
+frontend/src/components/WechatDialog.vue
+  s_5d9673cd305b89::t_85f12c21eb4e49 365,404,466,517,605
+  s_aa8c5aad306f92::t_b10116dc778f37 355,469
+dev.py
+  s_85cd431edb9d78::t_a2ab816b6c0bc2 26-28,45
+frontend/src/components/ImportDocDialog.vue
+  s_aa8c5aad306f92::t_b10116dc778f37 256,403
+  s_5d9673cd305b89::t_85f12c21eb4e49 266
+frontend/src/components/AppNav.vue
+  s_85cd431edb9d78::t_82ac651d738129 24,32
+  s_85cd431edb9d78::t_580d1daa7467df 22,68,71
+  s_d52d24c47532e9::t_27ecde774a4c62 23,30,33
+  s_85cd431edb9d78::t_c62970123a61d3 138,165
+  s_727a6220f2069e::t_9edf846d9fd4c4 25-29,31,34-38,62,190-215
+  s_5d9673cd305b89::t_85f12c21eb4e49 125-126,130-131,162,166,233
+tests/test_alerts.py
+  s_be4b59cd4e10e8::t_f8f4e404081f23 4,8-9,80-83,98-129
+frontend/src/stores/chat.js
+  s_85cd431edb9d78::t_5997ab8bb778b7 21,25
+frontend/src/components/TransformDialog.vue
+  s_5d9673cd305b89::t_85f12c21eb4e49 218,326,378,380
+  s_aa8c5aad306f92::t_b10116dc778f37 208
+frontend/src/components/InputArea.vue
+  s_85cd431edb9d78::t_9ef2977412ef3e 99,111-112,128,132,169,173,176-177,181-183,186-187,208
+frontend/src/components/LiveConsole.vue
+  s_85cd431edb9d78::t_b670f07eb45c02 498,541,564-566,568-571,577-590,619
+  s_934c1342e15b3d::t_7f88b681f089a4 1110,1117-1118,1144,1158,1176,1215,1234,1261,1275,1316,1327-1329,1332-1334,1393,1430,1444,1509,1511,1532-1533,1535,1560,1593,1631,1639-1640
+  s_85cd431edb9d78::t_6e1df7a81d3ffa 267,270-281,284,289-299,1093-1095,1100-1109,1111-1116,1139,1141,1143,1149-1150
+  s_85cd431edb9d78::t_357380c43b47b9 2-6,9,249
+  s_85cd431edb9d78::t_da4f90718d3fbd 282,1126-1135
+  s_85cd431edb9d78::t_8165d058801346 35,634,639
+  s_85cd431edb9d78::t_ffbbd5ca536ac3 497,499,540,542-548,567,620
+README.md
+  s_85cd431edb9d78::t_c3d0e57865887d 34
+  s_85cd431edb9d78::t_43a62c2c77f9e3 37,60,82-83,198-199,228-229
+frontend/src/router.js
+  s_85cd431edb9d78::t_a3c8104a947a2f 5,14-19
+  s_85cd431edb9d78::t_db11e175018767 8-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a52b1a8c78d23477b7f7e172e8b4e33d0011cd63",
+  "prompts": {},
+  "sessions": {
+    "s_1abccee52568fa": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793324455973972100",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_2046394cd5485c": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793325461237534700",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_2d23423322b87b": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793324125894983500",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_57313f80432f92": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793327211869242200",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_5d9673cd305b89": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793324418161791600",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_727a6220f2069e": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793324542234226600",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_77606243477b79": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793325370125183300",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_84e88cf578819d": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793323708962036500",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_8bef4fc28f4c3e": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793324319004238400",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_934c1342e15b3d": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793342354301975500",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_aa8c5aad306f92": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793324267766242900",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_be4b59cd4e10e8": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793328239764556800",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_d52d24c47532e9": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793326840531329300",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_e9af53527df54e": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793323761671960900",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
