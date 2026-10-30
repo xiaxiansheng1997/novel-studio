@@ -33,11 +33,9 @@ export const useStudioStore = defineStore('studio', () => {
   const facts = ref([])
   const terms = ref([])
   const issues = ref([])
-  // 公众号那一侧：文风画像是全局的，发布台账是按作品的
+  // 公众号那一侧：文风画像是全局的；发布台账已搬到控制台，不在写作台的 store 里
   const voice = ref({ samples: [], profile: '', chars: 0 })
   const settings = ref({})
-  const publications = ref([])
-  const pubSummary = ref([])
   // 选题池是全局的；写作统计只有一份（按天净增字数，从版本表现算）
   const ideas = ref([])
   const dailyWrites = ref({ days: [], today: 0, saves_today: 0, streak: 0, total: 0 })
@@ -1196,67 +1194,6 @@ export const useStudioStore = defineStore('studio', () => {
     return j.copies || []
   }
 
-  async function loadPublications() {
-    if (!work.value) return []
-    const r = await apiFetch(`/studio/works/${work.value.id}/publications`)
-    if (!r.ok) {
-      error.value = await errDetail(r, '读取发布记录失败')
-      return []
-    }
-    publications.value = await r.json()
-    return publications.value
-  }
-
-  async function addPublication(payload) {
-    if (!work.value) return false
-    error.value = ''
-    const r = await apiFetch(`/studio/works/${work.value.id}/publications`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-    if (!r.ok) {
-      error.value = await errDetail(r, '记发布失败')
-      return false
-    }
-    await loadPublications()
-    await loadPublicationSummary()
-    return true
-  }
-
-  async function updatePublication(id, patch) {
-    const r = await apiFetch(`/studio/publications/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    })
-    if (!r.ok) {
-      error.value = await errDetail(r, '更新发布记录失败')
-      return false
-    }
-    await loadPublications()
-    await loadPublicationSummary()
-    return true
-  }
-
-  async function deletePublication(id) {
-    const r = await apiFetch(`/studio/publications/${id}`, { method: 'DELETE' })
-    if (!r.ok) {
-      error.value = await errDetail(r, '删除发布记录失败')
-      return false
-    }
-    await loadPublications()
-    await loadPublicationSummary()
-    return true
-  }
-
-  /** 书架用：每个作品发了几篇、总阅读 */
-  async function loadPublicationSummary() {
-    const r = await apiFetch('/studio/publications/summary')
-    if (r.ok) pubSummary.value = await r.json()
-    return pubSummary.value
-  }
-
   // ==================== 加工（多候选） ====================
 
   const transforming = ref(false)
@@ -1448,36 +1385,6 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function pauseQueue(reason = '') {
-    const r = await apiFetch(`/studio/queue/pause?reason=${encodeURIComponent(reason)}`, {
-      method: 'POST',
-    })
-    if (r.ok) queue.value = await r.json()
-    return r.ok
-  }
-
-  async function resumeQueue() {
-    const r = await apiFetch('/studio/queue/resume', { method: 'POST' })
-    if (r.ok) queue.value = await r.json()
-    return r.ok
-  }
-
-  async function triageQueue(verdict) {
-    const r = await apiFetch('/studio/queue/triage', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ verdict }),
-    })
-    if (r.ok) queue.value = await r.json()
-    return r.ok
-  }
-
-  async function retryJob(jobId) {
-    const r = await apiFetch(`/studio/jobs/${jobId}/retry`, { method: 'POST' })
-    if (r.ok) await loadQueue()
-    return r.ok
-  }
-
   const queueActive = computed(() => {
     const q = queue.value
     if (!q) return false
@@ -1510,19 +1417,17 @@ export const useStudioStore = defineStore('studio', () => {
     outlineBusy, generateOutline,
     pipeline, runPipeline,
     assembling, assembleDoc, downloadExport, exportHtml, publishCheck, writeDigest,
-    // 公众号第二轮：文风 / 设置 / 标题 / 转发语 / 台账
-    voice, settings, publications, pubSummary,
+    // 公众号第二轮：文风 / 设置 / 标题 / 转发语
+    voice, settings,
     loadVoice, addVoiceSample, deleteVoiceSample, analyzeVoice, saveVoiceProfile,
     loadSettings, saveSetting, generateTitles, shareCopies,
-    loadPublications, addPublication, updatePublication, deletePublication,
-    loadPublicationSummary,
     transforming, transformResult, transform,
     // M3 图谱与一致性
     graphData, graphBusy, graphNote, checking, issueSummary, isNovel,
     loadGraph, extractGraph, clearGraph, addCard, deleteCard,
     runCheck, resolveIssue, loadIssueSummary,
-    // M4 任务队列
+    // M4 任务队列：写作台只靠这三个画一行进度；明细与控制走控制台的接口
     queue, queueBusy, queueActive,
-    loadQueue, enqueueBatch, pauseQueue, resumeQueue, triageQueue, retryJob,
+    loadQueue, enqueueBatch,
   }
 })

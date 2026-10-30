@@ -185,7 +185,7 @@ function onKey(e) {
   align-items: flex-start;
   justify-content: center;
   padding: 12vh 24px 24px;
-  background: rgba(5, 6, 8, 0.66);
+  background: var(--overlay);
 }
 .box {
   width: min(640px, 100%);
@@ -195,7 +195,7 @@ function onKey(e) {
   border: 1px solid var(--line);
   border-radius: var(--radius-stage, 16px);
   background: var(--panel);
-  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 30px 80px rgba(var(--shade-rgb), 0.5);
   overflow: hidden;
 }
 .head {
@@ -275,7 +275,7 @@ function onKey(e) {
 }
 .hit:hover,
 .hit.is-cursor {
-  background: rgba(255, 255, 255, 0.045);
+  background: rgba(var(--over), 0.045);
   border-color: var(--line-soft);
 }
 .hit-title {
@@ -304,7 +304,7 @@ function onKey(e) {
 .tag {
   padding: 1px 5px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(var(--over), 0.06);
   color: var(--text-faint);
   font-size: 10px;
 }

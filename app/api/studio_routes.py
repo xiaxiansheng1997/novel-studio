@@ -2294,8 +2294,10 @@ async def queue_triage(body: TriageRequest, request: Request):
 
 
 @router.get("/studio/jobs", dependencies=[Depends(verify_key)])
-async def list_jobs(request: Request, work_id: str = "", status: str = "", limit: int = 50):
-    rows = await _store(request).list_jobs(work_id=work_id, status=status, limit=limit)
+async def list_jobs(request: Request, work_id: str = "", status: str = "", limit: int = 50,
+                   newest: bool = False):
+    rows = await _store(request).list_jobs(work_id=work_id, status=status, limit=limit,
+                                          newest=newest)
     # 带上标题，前端不用再拉一次树
     store = _store(request)
     for row in rows:

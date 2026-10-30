@@ -29,7 +29,7 @@
         <p v-if="!message.content && !streaming" class="bubble-empty">（空回复）</p>
       </div>
 
-      <div v-if="!streaming && (message.content || showRegenerate || showEdit)" class="msg-actions">
+      <div v-if="!streaming && (message.content || showRegenerate || showEdit || $slots.actions)" class="msg-actions">
         <button v-if="showRegenerate" class="action-btn" title="重新生成这条回答" @click="$emit('regenerate')">
           <AppIcon name="refresh" :size="13" />
           <span>重新生成</span>
@@ -42,6 +42,8 @@
           <AppIcon :name="copied ? 'check' : 'copy'" :size="13" />
           <span>{{ copied ? '已复制' : '复制' }}</span>
         </button>
+        <!-- 宿主页额外的动作（如写作台的「存为素材 / 记为灵感」） -->
+        <slot name="actions" />
       </div>
     </div>
   </article>
@@ -174,18 +176,18 @@ async function copyText() {
   font-size: 11px;
   font-weight: 600;
   border: 1px solid var(--line);
-  background: #0f1621;
+  background: var(--panel-2);
   color: var(--text-muted);
 }
 .avatar.user {
-  border-color: rgba(56, 189, 248, 0.35);
-  background: rgba(56, 189, 248, 0.1);
-  color: #7dd3fc;
+  border-color: rgba(var(--sky-rgb), 0.35);
+  background: rgba(var(--sky-rgb), 0.1);
+  color: var(--info-fg);
 }
 .avatar.assistant {
-  border-color: rgba(217, 164, 91, 0.35);
-  background: rgba(217, 164, 91, 0.1);
-  color: #e8c48a;
+  border-color: rgba(var(--run-rgb), 0.35);
+  background: rgba(var(--run-rgb), 0.1);
+  color: var(--run-fg);
 }
 .avatar-ai {
   font-family: theme('fontFamily.mono');
@@ -216,7 +218,7 @@ async function copyText() {
   color: var(--text-muted);
 }
 .msg.user .msg-role {
-  color: #bae6fd;
+  color: var(--sky-fg);
 }
 .msg-time {
   font-size: 11px;
@@ -228,7 +230,7 @@ async function copyText() {
   align-items: center;
   gap: 5px;
   font-size: 11px;
-  color: #e8c48a;
+  color: var(--run-fg);
 }
 
 /* 气泡 */
@@ -238,14 +240,14 @@ async function copyText() {
   padding: 12px 15px;
   border-radius: 4px 14px 14px 14px;
   border: 1px solid var(--line);
-  background: #0c121b;
+  background: var(--panel);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 .msg.user .bubble {
   max-width: 82%;
   border-radius: 14px 4px 14px 14px;
-  border-color: rgba(56, 189, 248, 0.22);
-  background: rgba(56, 189, 248, 0.07);
+  border-color: rgba(var(--sky-rgb), 0.22);
+  background: rgba(var(--sky-rgb), 0.07);
 }
 .bubble-empty {
   margin: 0;
@@ -282,13 +284,14 @@ async function copyText() {
   border-left: 2px solid var(--line-strong);
   color: var(--text-muted);
   font-size: 13px;
-  background: rgba(15, 22, 33, 0.6);
+  background: rgba(var(--over), 0.05);
   border-radius: 0 8px 8px 0;
 }
 
 /* 操作 */
 .msg-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 6px;
   opacity: 0;
@@ -306,7 +309,7 @@ async function copyText() {
   padding: 0 9px;
   border-radius: 7px;
   border: 1px solid var(--line-soft);
-  background: #0b1018;
+  background: var(--panel-2);
   color: var(--text-faint);
   font-size: 11px;
   cursor: pointer;

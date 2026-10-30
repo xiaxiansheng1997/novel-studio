@@ -19,6 +19,23 @@
     </div>
 
     <div class="rail-foot">
+      <!-- 主题全站生效：写作台与控制台读同一批变量。
+           themeId 是 <script setup> 里 import 进来的 ref，模板已经替它解过包，写 .value 反而拿不到值 -->
+      <div class="rail-themes" role="group" aria-label="主题">
+        <button
+          v-for="th in THEMES"
+          :key="th.id"
+          type="button"
+          class="rail-swatch"
+          :class="{ 'is-on': th.id === themeId }"
+          :style="{ background: th.swatch, borderColor: th.edge }"
+          :title="`主题：${th.name} · ${th.hint}${th.id === themeId ? '（当前）' : ''}`"
+          :aria-pressed="th.id === themeId"
+          @click="setTheme(th.id)"
+        >
+          <span class="sr-only">{{ th.name }}</span>
+        </button>
+      </div>
       <button
         type="button"
         class="rail-key"
@@ -42,22 +59,20 @@ import { useRoute } from 'vue-router'
 import AppIcon from './AppIcon.vue'
 import ApiKeyDialog from './ApiKeyDialog.vue'
 import { getApiKey } from '../utils/storage'
+import { THEMES, setTheme, themeId } from '../utils/theme'
 
 const route = useRoute()
 const keyOpen = ref(false)
 const hasKey = ref(Boolean(getApiKey()))
 
-// 写作排第一：它是主入口；后三项是调试/备用通道，保留但降级
+// 只有两项：写作是工作台，其余（浏览器/管理/日志/任务…）都收进控制台
 const items = [
   { to: '/studio', label: '写作', icon: 'book' },
-  { to: '/chat', label: '对话', icon: 'chat' },
-  { to: '/live', label: '浏览器', icon: 'monitor' },
-  { to: '/admin', label: '管理', icon: 'sliders' },
+  { to: '/admin', label: '控制台', icon: 'sliders' },
 ]
 
 function isActive(item) {
   if (item.to === '/studio') return route.path === '/' || route.path.startsWith('/studio')
-  if (item.to === '/chat') return route.path.startsWith('/chat')
   return route.path.startsWith(item.to)
 }
 
@@ -107,20 +122,20 @@ onMounted(async () => {
   height: 34px;
   border-radius: 9px;
   text-decoration: none;
-  background: rgba(217, 164, 91, 0.1);
-  border: 1px solid rgba(217, 164, 91, 0.28);
+  background: rgba(var(--run-rgb), 0.1);
+  border: 1px solid rgba(var(--run-rgb), 0.28);
   transition: background-color 0.16s var(--ease), border-color 0.16s var(--ease);
 }
 .rail-logo:hover {
-  background: rgba(217, 164, 91, 0.16);
-  border-color: rgba(217, 164, 91, 0.45);
+  background: rgba(var(--run-rgb), 0.16);
+  border-color: rgba(var(--run-rgb), 0.45);
 }
 .logo-mark {
   font-family: theme('fontFamily.serif');
   font-size: 16px;
   font-weight: 600;
   line-height: 1;
-  color: var(--run);
+  color: var(--run-fg);
 }
 .rail-items {
   display: flex;
@@ -144,11 +159,11 @@ onMounted(async () => {
 }
 .rail-item:hover {
   color: var(--text);
-  background: rgba(217, 164, 91, 0.06);
+  background: rgba(var(--run-rgb), 0.06);
 }
 .rail-item.is-active {
-  color: var(--run);
-  background: rgba(217, 164, 91, 0.1);
+  color: var(--run-fg);
+  background: rgba(var(--run-rgb), 0.1);
 }
 .rail-item.is-active::before {
   content: '';
@@ -172,6 +187,32 @@ onMounted(async () => {
   margin-top: auto;
   color: var(--text-faint);
 }
+.rail-themes {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+}
+.rail-swatch {
+  width: 13px;
+  height: 13px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.16s var(--ease), box-shadow 0.16s var(--ease);
+}
+.rail-swatch:hover {
+  opacity: 0.85;
+}
+.rail-swatch.is-on {
+  opacity: 1;
+  /* 当前主题靠外圈实线表示，不靠颜色：四个色点在暗栏里差别不够大 */
+  box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--run);
+}
 .rail-key {
   position: relative;
   display: inline-flex;
@@ -189,7 +230,7 @@ onMounted(async () => {
 .rail-key:hover {
   color: var(--text);
   border-color: var(--line);
-  background: rgba(217, 164, 91, 0.06);
+  background: rgba(var(--run-rgb), 0.06);
 }
 .rail-key.is-set {
   color: var(--run);

@@ -25,7 +25,7 @@
           :class="{ off: hiddenKinds.has(k) }"
           @click="toggleKind(k)"
         >
-          <i class="dot" :style="{ background: KIND_COLOR[k] || '#6f6c67' }"></i>
+          <i class="dot" :style="{ background: KIND_COLOR[k] || 'var(--text-faint)' }"></i>
           {{ KIND_LABEL[k] || k }}
           <em>{{ countByKind[k] }}</em>
         </button>
@@ -69,7 +69,7 @@
                 :cx="n.x"
                 :cy="n.y"
                 :r="n.r"
-                :fill="KIND_COLOR[n.kind] || '#6f6c67'"
+                :style="{ fill: KIND_COLOR[n.kind] || KIND_FALLBACK }"
                 :class="{ gone: n.status !== 'alive' }"
               />
               <text class="label" :x="n.x" :y="n.y + n.r + 11">{{ n.name }}</text>
@@ -84,7 +84,7 @@
           <template v-if="selected">
             <div class="d-head">
               <span class="d-name">{{ selected.name }}</span>
-              <span class="d-kind" :style="{ background: KIND_COLOR[selected.kind] || '#6f6c67' }">
+              <span class="d-kind" :style="{ background: KIND_COLOR[selected.kind] || 'var(--text-faint)' }">
                 {{ KIND_LABEL[selected.kind] || selected.kind }}
               </span>
             </div>
@@ -121,7 +121,7 @@
             </p>
             <ul class="legend">
               <li v-for="k in kindsPresent" :key="k">
-                <i class="dot" :style="{ background: KIND_COLOR[k] || '#6f6c67' }"></i>
+                <i class="dot" :style="{ background: KIND_COLOR[k] || 'var(--text-faint)' }"></i>
                 {{ KIND_LABEL[k] || k }}
                 <em>{{ countByKind[k] }}</em>
               </li>
@@ -159,15 +159,18 @@ const KIND_LABEL = {
   faction: '势力', rule: '规则', event: '事件', foreshadow: '伏笔',
 }
 const STATUS_LABEL = { dead: '已死亡', destroyed: '已毁', missing: '下落不明' }
+// 类别色一律引用主题 token，不再自带十六进制：换主题时图的图例跟着变。
+// 注意这些值是 CSS 变量，只能进 style（SVG 的 fill 属性不认 var()）。
 const KIND_COLOR = {
-  character: '#d9a45b',   // --run
-  location: '#7e9cf7',    // --info
-  item: '#9b8cf0',        // --iris
-  faction: '#58b09a',
-  rule: '#b0b7c3',
-  event: '#e0a44a',       // --warn
-  foreshadow: '#6f6c67',
+  character: 'var(--run)',
+  location: 'var(--info)',
+  item: 'var(--iris)',
+  faction: 'var(--teal)',
+  rule: 'var(--text-muted)',
+  event: 'var(--warn)',
+  foreshadow: 'var(--text-faint)',
 }
+const KIND_FALLBACK = 'var(--text-faint)'
 
 // 力导向参数：调过的组合是「一团能看清的网」而不是「一个完美的圆」
 const REPULSE = 7200
@@ -618,7 +621,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: rgba(5, 6, 8, 0.66);
+  background: var(--overlay);
 }
 .dlg {
   width: min(1180px, 100%);
@@ -628,7 +631,7 @@ onUnmounted(() => {
   border: 1px solid var(--line);
   border-radius: var(--radius-panel);
   background: var(--panel);
-  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.9);
+  box-shadow: 0 32px 80px -32px rgba(var(--shade-rgb), 0.9);
   overflow: hidden;
 }
 .dlg-head {
@@ -726,7 +729,7 @@ onUnmounted(() => {
   flex: 1;
   min-width: 0;
   background:
-    radial-gradient(circle at 30% 20%, rgba(126, 156, 247, 0.05), transparent 60%),
+    radial-gradient(circle at 30% 20%, rgba(var(--info-rgb), 0.05), transparent 60%),
     var(--bg);
   touch-action: none;
   cursor: grab;
@@ -741,7 +744,7 @@ onUnmounted(() => {
 }
 .link.dead {
   stroke-dasharray: 4 4;
-  stroke: #5a4444;
+  stroke: var(--dead-link);
   opacity: 0.8;
 }
 .link.hi {
@@ -761,7 +764,7 @@ onUnmounted(() => {
   cursor: pointer;
 }
 .node circle {
-  stroke: rgba(236, 233, 228, 0.28);
+  stroke: rgba(var(--over), 0.28);
   stroke-width: 1;
   fill-opacity: 0.86;
   transition: fill-opacity 0.18s var(--ease), stroke 0.18s var(--ease);
@@ -825,7 +828,7 @@ onUnmounted(() => {
   padding: 1px 6px;
   border-radius: 3px;
   font-size: 10px;
-  color: #0b0c0f;
+  color: var(--accent-ink);
 }
 .d-status {
   margin: 0;
@@ -861,9 +864,9 @@ onUnmounted(() => {
 .d-card {
   margin: 0;
   padding: 8px 9px;
-  border-left: 2px solid rgba(217, 164, 91, 0.45);
+  border-left: 2px solid rgba(var(--run-rgb), 0.45);
   border-radius: 0 6px 6px 0;
-  background: rgba(217, 164, 91, 0.05);
+  background: rgba(var(--run-rgb), 0.05);
   font-size: 11.5px;
   line-height: 1.65;
   color: var(--text-muted);
@@ -892,8 +895,8 @@ onUnmounted(() => {
 .r-type {
   padding: 0 4px;
   border-radius: 3px;
-  background: rgba(217, 164, 91, 0.1);
-  color: var(--run);
+  background: rgba(var(--run-rgb), 0.1);
+  color: var(--run-fg);
   font-size: 10px;
   flex-shrink: 0;
 }

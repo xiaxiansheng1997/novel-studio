@@ -6,11 +6,4 @@ export function setApiKey(key) {
   localStorage.setItem('w2a_apikey', key)
 }
 
-export function getTheme() {
-  return localStorage.getItem('w2a_theme') || 'dark'
-}
-
-export function setTheme(t) {
-  localStorage.setItem('w2a_theme', t)
-  document.documentElement.classList.toggle('dark', t === 'dark')
-}
+// 主题相关函数已移到 utils/theme（那里是 w2a_theme 的唯一读写处）

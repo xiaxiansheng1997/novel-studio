@@ -13,8 +13,9 @@ from typing import Optional
 
 from fastapi import HTTPException, Request
 
-# 前端 vite dev server 的默认地址：代理到 8000 时需要被放行
-DEV_ORIGINS = ("http://127.0.0.1:5173", "http://localhost:5173")
+# 前端 vite dev server 的固定地址（见 frontend/vite.config.js 的 port + strictPort）：
+# 代理到 8000 时 Origin 还是 dev 端口，必须被放行。
+DEV_ORIGINS = ("http://127.0.0.1:5273", "http://localhost:5273")
 
 
 def bearer_token(request: Request) -> Optional[str]:

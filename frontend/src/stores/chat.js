@@ -18,11 +18,11 @@ export const useChatStore = defineStore('chat', () => {
     if (r.ok) conversations.value = await r.json()
   }
 
-  async function createConversation(model) {
+  async function createConversation(model, title = '新对话') {
     const r = await apiFetch('/v1/conversations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, title: '新对话' }),
+      body: JSON.stringify({ model, title }),
     })
     const conv = await r.json()
     conversations.value.unshift(conv)

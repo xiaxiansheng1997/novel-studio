@@ -1,8 +1,11 @@
 """告警总线：发布/订阅/增量查询 + /admin/alerts 口令牌。"""
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
+
+import pytest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -74,8 +77,10 @@ async def test_sse_stream_pushes_new_alert() -> None:
         app = SimpleNamespace(state=SimpleNamespace(settings=settings))
         headers: dict = {}
 
-        async def is_disconnected(self) -> bool:
-            return False
+        async def receive(self) -> dict:
+            # 永不返回：模拟「连接一直活着」，收尾时由生成器 cancel 掉这个等待
+            await asyncio.Event().wait()
+            return {}
 
     resp = await stream_alerts(_Req(), token="", since=-1)  # type: ignore[arg-type]
     it = resp.body_iterator
@@ -90,3 +95,35 @@ async def test_sse_stream_pushes_new_alert() -> None:
     finally:
         await it.aclose()
     assert alerts.subscriber_count() == 0  # 关流时必须取消订阅
+
+
+async def test_sse_stream_stops_when_client_disconnects() -> None:
+    """客户端断开（http.disconnect）后，生成器必须立刻收尾并取消订阅。
+
+    回归点：is_disconnected() 在 BaseHTTPMiddleware 下恒为 False，
+    以前这条流会一直挂着（每 15s 空打心跳），订阅者只增不减。
+    """
+    settings = SimpleNamespace(api_key="", allow_origins="", host="127.0.0.1", port=8000)
+    calls = 0
+
+    class _Req:
+        app = SimpleNamespace(state=SimpleNamespace(settings=settings))
+        headers: dict = {}
+
+        async def receive(self) -> dict:
+            nonlocal calls
+            calls += 1
+            if calls == 1:  # GET 的空请求体，之后才是断开
+                return {"type": "http.request", "body": b"", "more_body": False}
+            return {"type": "http.disconnect"}
+
+    resp = await stream_alerts(_Req(), token="", since=-1)  # type: ignore[arg-type]
+    it = resp.body_iterator
+    hello = json.loads((await it.__anext__()).removeprefix("data: ").strip())
+    assert hello["kind"] == "hello"
+    assert alerts.subscriber_count() == 1
+
+    # 必须「马上结束」，而不是又等一个 15s 心跳周期
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(it.__anext__(), timeout=2.0)
+    assert alerts.subscriber_count() == 0

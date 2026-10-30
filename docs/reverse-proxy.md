@@ -46,8 +46,8 @@ python -m scripts.recon qwen      # 抓取真实对话接口
 ```
 
 其他界面：
-- 对话：<http://127.0.0.1:8000/chat>
-- 管理面板（登录态/模型/模式概览）：<http://127.0.0.1:8000/admin>
+- 写作台（含右栏「问一问」）：<http://127.0.0.1:8000/studio>（旧 `/chat` 重定向到 `/studio?panel=ask`）
+- 控制台（状态 / 浏览器 / 日志 / 任务 / 数据 / 配置）：<http://127.0.0.1:8000/admin?tab=live>（旧 `/live` 重定向到这里）
 
 ## 接入 OpenAI 兼容客户端
 
@@ -141,7 +141,7 @@ resp = client.chat.completions.create(
 ## 底座部分的配置项
 
 - `config.yaml`：provider 开关、首页地址、模型列表、并发上限、全局每分钟限流（非敏感）。
-- 浏览器跨域/WS 来源：默认只放行本机与 `5173` 开发端口，需要时用 `W2A_ALLOW_ORIGINS` 追加（逗号分隔，`*` 全放开）。
+- 浏览器跨域/WS 来源：默认只放行本机与 `5273` 开发端口，需要时用 `W2A_ALLOW_ORIGINS` 追加（逗号分隔，`*` 全放开）。
 - 页面绑定覆盖层：`storage/ui-bindings.yaml`（已 gitignore），由 `/live` 的「绑定」行写入；加载时覆盖 `config.yaml` 的 `ui`
   与 `models[].label`，并按绑定的开关重建模式（标准四模式 + 每个自定义场景各一个同名模式；`body_patch`/`label` 仍沿用
   `config.yaml`）。删掉该文件即完全回到 `config.yaml`。

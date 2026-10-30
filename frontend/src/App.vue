@@ -6,11 +6,20 @@
 </template>
 
 <script setup>
-import { onMounted } from 'vue'
+import { onMounted, onUnmounted } from 'vue'
 import AlertBanner from './components/AlertBanner.vue'
-import { setTheme } from './utils/storage'
+import { cycleTheme } from './utils/theme'
 
-onMounted(() => {
-  setTheme('dark')
-})
+// Ctrl+Alt+T 循环主题：写作页里手一直在键盘上，换底色不该去点鼠标。
+// 主题状态在 utils/theme 里，导航栏的色点会跟着亮。
+function onKeydown(e) {
+  if (e.ctrlKey && e.altKey && !e.shiftKey && e.code === 'KeyT') {
+    e.preventDefault()
+    cycleTheme()
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+// 主题初值在 main.js 引用 utils/theme 时就落地了，这里只管切换
 </script>

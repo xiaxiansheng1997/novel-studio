@@ -23,7 +23,9 @@ def run_backend():
 
 
 def run_frontend():
-    print("[frontend] Starting vite dev server on :5173 ...")
+    # 端口不在这里传：frontend/vite.config.js 里写死了 5273 + strictPort，
+    # 两边各写一份迟早对不上。
+    print("[frontend] Starting vite dev server on :5273 ...")
     subprocess.run(["npx", "vite", "--host", "127.0.0.1"], cwd=FRONTEND, shell=True)
 
 
@@ -40,7 +42,7 @@ def run_all():
     t1.start()
     t2.start()
     print("\n=== Web2API Dev ===")
-    print("  Frontend: http://127.0.0.1:5173 (Vite, proxy to backend)")
+    print("  Frontend: http://127.0.0.1:5273 (Vite, proxy to backend)")
     print("  Backend:  http://127.0.0.1:8000 (FastAPI)")
     print("  Press Ctrl+C to stop.\n")
     try:

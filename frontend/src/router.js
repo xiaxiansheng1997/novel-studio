@@ -2,13 +2,21 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
   { path: '/', redirect: '/studio' },
-  // 写作台是主入口；对话/浏览器/管理是「调试与备用通道」，退到次要位置
+  // 写作台是工作台，控制台是它的后勤（状态 / 浏览器 / 日志 / 任务 / 数据 / 配置）
   { path: '/studio', name: 'studio', component: () => import('./views/StudioView.vue') },
   { path: '/studio/:id', name: 'studio-work', component: () => import('./views/StudioView.vue') },
-  { path: '/chat', name: 'chat', component: () => import('./views/ChatView.vue') },
-  { path: '/chat/:id', name: 'chat-conversation', component: () => import('./views/ChatView.vue') },
-  { path: '/admin', name: 'admin', component: () => import('./views/AdminView.vue') },
-  { path: '/live', name: 'live', component: () => import('./views/LiveView.vue') },
+  // 对话已并进写作台的「问一问」：老链接带过去，具体会话用 ?conv= 带
+  { path: '/chat', redirect: () => ({ path: '/studio', query: { panel: 'ask' } }) },
+  {
+    path: '/chat/:id',
+    redirect: (to) => ({ path: '/studio', query: { panel: 'ask', conv: String(to.params.id || '') } }),
+  },
+  { path: '/admin', name: 'console', component: () => import('./views/ConsoleView.vue') },
+  // 老链接：内置浏览器已并进控制台的「浏览器」tab，query（provider / url）原样带过去
+  {
+    path: '/live',
+    redirect: (to) => ({ path: '/admin', query: { ...to.query, tab: 'live' } }),
+  },
 ]
 
 const router = createRouter({

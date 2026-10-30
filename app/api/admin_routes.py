@@ -12,7 +12,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app.core.alerts import latest_seq, recent, subscribe, unsubscribe
+from app.core.alerts import latest_seq, recent, subscribe, subscriber_count, unsubscribe
 from app.core.auth import expected_key, key_matches, origin_ok, verify_key
 from app.core.request_log import get_logs, get_stats
 
@@ -71,7 +71,9 @@ async def admin_status(request: Request):
         adapter = registry.get(row["provider"])
         row["registered"] = adapter is not None
         row["models"] = [m.id for m in (adapter.default_models() if adapter else [])]
-    return {"providers": status}
+    # alerts_streams：活着的告警 SSE 连接数。正常应等于「开着几个页面」；
+    # 只增不减说明断链没被察觉（见 stream_alerts 里的说明）。
+    return {"providers": status, "alerts_streams": subscriber_count()}
 
 
 @router.post("/admin/reload", dependencies=[Depends(verify_key)])
@@ -122,6 +124,10 @@ async def request_logs(limit: int = 50, rid: str = ""):
     return get_logs(limit=limit, rid=rid.strip() or None)
 
 
+# SSE 心跳间隔：这么久没有告警就发一行注释，免得代理把空闲长连接掐掉
+HEARTBEAT_SEC = 15.0
+
+
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -149,8 +155,26 @@ async def stream_alerts(request: Request, token: str = "", since: int = -1):
 
     start = latest_seq() if since < 0 else since
     q = subscribe()
+    # 断链只能自己收：本应用外面套着 RequestLogMiddleware（BaseHTTPMiddleware），
+    # 它给的 request.is_disconnected() 用「一个立刻取消的 CancelScope」包住 receive，
+    # 那个 await 必然被取消 → 永远返回 False。以前这条流在页面关掉/刷新后其实还活着，
+    # 每 15s 空打一次心跳，订阅者只增不减（多刷几次就攒一堆僵尸协程）。
+    # 这里直接挂在 request.receive() 上等真正的 http.disconnect。
+    closed = asyncio.Event()
+
+    async def _watch_disconnect() -> None:
+        try:
+            while True:
+                if (await request.receive())["type"] == "http.disconnect":
+                    break
+        except Exception:  # noqa: BLE001 - 连接被硬拆时 receive 可能直接抛
+            pass
+        finally:
+            closed.set()
 
     async def _gen():
+        watcher = asyncio.create_task(_watch_disconnect())
+        getter = stopper = None
         # 先发一条 hello：EventSource 立即进入 open，前端也能确认链路通了
         yield _sse({
             "seq": latest_seq(),
@@ -161,18 +185,32 @@ async def stream_alerts(request: Request, token: str = "", since: int = -1):
             "ts": time.time(),
         })
         try:
-            while True:
-                if await request.is_disconnected():
+            while not closed.is_set():
+                # 同时等「新告警」和「客户端断开」，谁先到办谁；都没到就发心跳
+                getter = asyncio.create_task(q.get())
+                stopper = asyncio.create_task(closed.wait())
+                done, pending = await asyncio.wait(
+                    {getter, stopper}, timeout=HEARTBEAT_SEC, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                if stopper in done:
                     break
-                try:
-                    item = await asyncio.wait_for(q.get(), timeout=15.0)
-                except asyncio.TimeoutError:
+                if getter not in done:
                     yield ": ping\n\n"  # 注释行心跳，防代理把长连接掐掉
                     continue
-                if item["seq"] <= start:
-                    continue
-                yield _sse(item)
+                item = getter.result()
+                if item["seq"] > start:
+                    yield _sse(item)
         finally:
+            watcher.cancel()
+            # 外层被取消时（CancelledError 落在 await asyncio.wait 上）asyncio.wait
+            # 不替我们收任务：留着的 q.get() 会从队列里吃掉一条谁也不读的告警。
+            for task in (getter, stopper):
+                if task is not None and not task.done():
+                    task.cancel()
             unsubscribe(q)
 
     return StreamingResponse(

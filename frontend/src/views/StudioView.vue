@@ -23,6 +23,9 @@
             <button class="btn btn-sm" title="跨作品搜正文与素材（Ctrl+K）" @click="openSearch()">
               <AppIcon name="search" :size="13" /> 搜正文
             </button>
+            <button class="btn btn-sm" title="立项前先把题名与前提聊出来" @click="askOpen = true">
+              <AppIcon name="chat" :size="13" /> 先聊聊
+            </button>
             <button class="btn btn-primary" @click="showCreate = !showCreate">
               <AppIcon name="plus" :size="15" /> 新建作品
             </button>
@@ -146,9 +149,6 @@
             <span class="work-kind">{{ kindLabel(w) }}</span>
             <span class="work-title">{{ w.title }}</span>
             <span class="work-meta">{{ w.node_count }} 节 · {{ fmt(w.words) }} 字</span>
-            <span v-if="pubOf(w.id)" class="work-pub">
-              已发 {{ pubOf(w.id).pubs }} 篇 · 阅读 {{ fmt(pubOf(w.id).reads) }}
-            </span>
             <span class="work-premise">{{ w.premise || '还没有主旨' }}</span>
           </div>
         </div>
@@ -183,7 +183,7 @@
           @import="importOpen = true"
         />
 
-        <main class="editor">
+        <main class="editor" :style="writerVars">
           <header class="ed-top">
             <button class="icon-btn" title="返回书架" @click="backToShelf">
               <AppIcon name="library" :size="16" />
@@ -220,28 +220,6 @@
                   <span class="work-pop-tip inline">{{ workDigestDraft.length }} 字</span>
                 </div>
                 <p class="work-pop-tip">主旨进每一轮生成的上下文，改完下一节就生效。</p>
-
-                <!-- 发布台账：公众号没有接口，链接与阅读数只能手填；
-                     记下来书架会显示，文末「往期推荐」也从这里取 -->
-                <details v-if="!store.isNovel" class="pub-box">
-                  <summary>发布记录（{{ store.publications.length }}）</summary>
-                  <div v-for="p in store.publications" :key="p.id" class="pub-row">
-                    <span class="pub-date">{{ p.published_at || '未填日期' }}</span>
-                    <span class="pub-num">阅读 {{ fmt(p.reads) }} · 在看 {{ fmt(p.likes) }}</span>
-                    <a v-if="p.url" class="pub-link" :href="p.url" target="_blank" rel="noreferrer">链接</a>
-                    <button class="pub-del" @click="removePub(p)">删</button>
-                  </div>
-                  <p v-if="!store.publications.length" class="work-pop-tip">
-                    发出去之后把链接和阅读数记在这里。
-                  </p>
-                  <div class="pub-form">
-                    <input v-model="pubDraft.published_at" class="field" placeholder="2026-10-01" />
-                    <input v-model="pubDraft.url" class="field" placeholder="文章链接（可空）" />
-                    <input v-model.number="pubDraft.reads" class="field" type="number" placeholder="阅读" />
-                    <input v-model.number="pubDraft.likes" class="field" type="number" placeholder="在看" />
-                    <button class="btn btn-sm" @click="savePub">记一条</button>
-                  </div>
-                </details>
 
                 <div class="work-pop-act">
                   <button class="btn btn-sm" @click="workEditOpen = false">取消</button>
@@ -280,6 +258,106 @@
               <button class="btn btn-sm" title="公众号排版预览、发布前检查与一键复制" @click="wechatOpen = true">
                 <AppIcon name="send" :size="13" /> 公众号
               </button>
+              <div class="ed-type-wrap">
+                <button
+                  class="btn btn-sm ed-type-btn"
+                  :class="{ 'is-on': typeOpen }"
+                  :title="`正文排版：${writer.fontSize}px · 行距 ${writer.lineHeight} · ${measureName}`"
+                  :aria-expanded="typeOpen"
+                  @click="typeOpen = !typeOpen"
+                >
+                  <AppIcon name="sliders" :size="13" /> 排版
+                </button>
+                <div v-if="typeOpen" class="type-pop">
+                  <div class="type-row">
+                    <span class="type-label">字号</span>
+                    <div class="type-seg" role="group" aria-label="正文字号">
+                      <button
+                        v-for="s in FONT_SIZES"
+                        :key="s"
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': writer.fontSize === s }"
+                        @click="setFontSize(s)"
+                      >{{ s }}</button>
+                    </div>
+                  </div>
+                  <div class="type-row">
+                    <span class="type-label">行距</span>
+                    <div class="type-seg" role="group" aria-label="正文行距">
+                      <button
+                        v-for="h in LINE_HEIGHTS"
+                        :key="h"
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': writer.lineHeight === h }"
+                        @click="setLineHeight(h)"
+                      >{{ h.toFixed(1) }}</button>
+                    </div>
+                  </div>
+                  <div class="type-row">
+                    <span class="type-label">段宽</span>
+                    <div class="type-seg" role="group" aria-label="正文段宽">
+                      <button
+                        v-for="m in MEASURES"
+                        :key="m.id"
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': writer.measure === m.id }"
+                        :title="m.hint"
+                        @click="setMeasure(m.id)"
+                      >{{ m.name }}</button>
+                    </div>
+                  </div>
+                  <div class="type-row">
+                    <span class="type-label">字体</span>
+                    <div class="type-seg" role="group" aria-label="正文字体">
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': writer.serif }"
+                        title="宋体一类，笔画有粗细，长读不累"
+                        @click="setSerif(true)"
+                      >衬线</button>
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': !writer.serif }"
+                        title="黑体一类，屏幕上看更清爽"
+                        @click="setSerif(false)"
+                      >无衬线</button>
+                    </div>
+                  </div>
+                  <div class="type-row">
+                    <span class="type-label">护眼</span>
+                    <div class="type-seg" role="group" aria-label="正文纸面降亮">
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': !writer.tint }"
+                        @click="setTint(false)"
+                      >关</button>
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': writer.tint }"
+                        title="纸面压暗一档，白天亮环境下不那么晃眼"
+                        @click="setTint(true)"
+                      >降亮</button>
+                    </div>
+                  </div>
+                  <div class="type-foot">
+                    <button type="button" class="type-reset" @click="resetWriter">还原默认</button>
+                    <span class="type-keys">
+                      <kbd class="kbd">Ctrl</kbd><kbd class="kbd">=</kbd>
+                      <span>放大</span>
+                      <kbd class="kbd">Ctrl</kbd><kbd class="kbd">-</kbd>
+                      <span>缩小</span>
+                    </span>
+                  </div>
+                  <p class="type-tip">只改这台浏览器的显示，正文一个字都不动。</p>
+                </div>
+              </div>
               <select
                 class="ed-model"
                 :value="store.genModel"
@@ -410,7 +488,7 @@
               <p v-if="store.pipeline.error" class="pipe-err">{{ store.pipeline.error }}</p>
             </section>
 
-            <!-- 队列：落库的任务，断网与重启都不影响 -->
+            <!-- 队列：写作台只留一行进度（明细、暂停与抽检都在控制台「任务」里） -->
             <section v-if="showQueue" class="pipe queue">
               <header class="pipe-head">
                 <span class="pipe-title">
@@ -424,29 +502,16 @@
                     · 约 {{ Math.ceil(store.queue.eta_sec / 60) }} 分钟
                   </template>
                 </span>
-                <button v-if="store.queue?.paused" class="mini" @click="resumeQ">继续</button>
-                <button v-else class="mini" @click="pauseQ">暂停</button>
-                <button class="mini" @click="queueHidden = true">收起</button>
+                <button class="mini" title="队列明细、单条任务重试/取消、抽检判定" @click="gotoConsole">
+                  去控制台
+                </button>
               </header>
-              <p v-if="store.queue?.paused" class="pipe-err">已暂停：{{ store.queue.reason }}</p>
               <div v-if="store.queue?.current" class="bar">
                 <div class="bar-fill indeterminate"></div>
               </div>
-
-              <!-- 抽检卡点：连续两节判「重写」就整队停下 -->
-              <div v-if="store.queue?.triage?.due" class="triage">
-                <p class="triage-title">抽检：这两节能用吗？连续两次「重写」会暂停整条队列</p>
-                <div class="triage-list">
-                  <div v-for="s in store.queue.triage.samples.slice(0, 2)" :key="s.node_id" class="triage-item">
-                    <span class="triage-name">{{ s.title || s.node_id }}</span>
-                    <span class="triage-score">{{ s.score ?? '—' }}</span>
-                  </div>
-                </div>
-                <div class="triage-act">
-                  <button class="btn btn-sm" @click="doTriage('ok')">可用，继续</button>
-                  <button class="btn btn-sm" @click="doTriage('rewrite')">要重写</button>
-                </div>
-              </div>
+              <p v-if="store.queue?.paused" class="pipe-err">
+                已暂停：{{ store.queue.reason }}（在控制台「任务」里继续）
+              </p>
             </section>
 
             <footer class="gen-bar">
@@ -479,6 +544,9 @@
         <StudioPanel
           ref="panelRef"
           :task="{ task_type: taskType, instruction }"
+          :draft="contentDraft"
+          :initial-tab="initialPanel"
+          :initial-conv="initialConv"
           @locate="locateEvidence"
           @restore="onRestoreVersion"
         />
@@ -502,6 +570,22 @@
       :leaf-kind="importKind"
       @done="onImported"
     />
+
+    <!-- 先聊聊：立项前把题名/前提聊出来，一键回填上面的新建表单 -->
+    <Teleport to="body">
+      <div v-if="askOpen" class="ask-mask" @mousedown.self="askOpen = false">
+        <section class="ask-box" role="dialog" aria-modal="true" aria-label="先聊聊">
+          <header class="ask-box-head">
+            <span class="ask-box-title">先聊聊</span>
+            <span class="ask-box-sub">聊出的题名与前提可以一键填进新建表单</span>
+            <button class="icon-btn" title="关闭" aria-label="关闭" @click="askOpen = false">
+              <AppIcon name="x" :size="16" />
+            </button>
+          </header>
+          <AskPanel shelf :initial-conv="initialConv" @use="onUseFromAsk" />
+        </section>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -512,12 +596,28 @@ import AppNav from '../components/AppNav.vue'
 import AppIcon from '../components/AppIcon.vue'
 import StudioTree from '../components/StudioTree.vue'
 import StudioPanel from '../components/StudioPanel.vue'
+import AskPanel from '../components/AskPanel.vue'
 import TransformDialog from '../components/TransformDialog.vue'
 import WechatDialog from '../components/WechatDialog.vue'
 import GlobalSearch from '../components/GlobalSearch.vue'
 import ImportDocDialog from '../components/ImportDocDialog.vue'
 import { useStudioStore } from '../stores/studio'
 import { apiFetch } from '../utils/api'
+import {
+  FONT_SIZES,
+  LINE_HEIGHTS,
+  MEASURES,
+  bumpFontDown,
+  bumpFontUp,
+  resetWriter,
+  setFontSize,
+  setLineHeight,
+  setMeasure,
+  setSerif,
+  setTint,
+  writer,
+  writerVars,
+} from '../utils/writer'
 
 const store = useStudioStore()
 const route = useRoute()
@@ -526,6 +626,11 @@ const router = useRouter()
 const showCreate = ref(false)
 const creating = ref(false)
 const form = ref({ kind: 'article', scale: 'single', subtype: 'tech', title: '', premise: '', target_words: 5000 })
+
+// 问一问：书架上用弹层（立项前），工作台里是右栏第 9 个 tab
+const askOpen = ref(false)
+const initialPanel = ref('')
+const initialConv = ref('')
 
 const titleDraft = ref('')
 const contentDraft = ref('')
@@ -548,6 +653,12 @@ const subtypes = computed(() => currentKind.value?.subtypes || [])
 
 const transformOpen = ref(false)
 const selectedText = ref('')
+// 排版弹层：开着的状态属于这一屏，不进 store（切作品要收起，见下面的 watch）
+const typeOpen = ref(false)
+// 不展开弹层也能从悬停提示里看到当前档位
+const measureName = computed(
+  () => MEASURES.find((m) => m.id === writer.value.measure)?.name || '标准',
+)
 
 // ---- 作品信息（标题 / 主旨）就地可改 ----
 const workEditOpen = ref(false)
@@ -635,37 +746,7 @@ async function gotoSearchHit(hit) {
   })
 }
 
-// 发布台账：只记「发出去之后才知道」的数，跟正文无关，所以放在作品弹层里
-const pubDraft = ref({ published_at: '', url: '', reads: 0, likes: 0 })
-const pubMap = computed(() => {
-  const out = {}
-  for (const p of store.pubSummary) out[p.work_id] = p
-  return out
-})
-
-function pubOf(id) {
-  return pubMap.value[id]
-}
-
-async function savePub() {
-  const ok = await store.addPublication({
-    published_at: pubDraft.value.published_at.trim(),
-    url: pubDraft.value.url.trim(),
-    reads: Number(pubDraft.value.reads) || 0,
-    likes: Number(pubDraft.value.likes) || 0,
-  })
-  if (!ok) {
-    showNotice(store.error || '保存发布记录失败', true)
-    return
-  }
-  pubDraft.value = { published_at: '', url: '', reads: 0, likes: 0 }
-  showNotice('发布记录已保存')
-}
-
-async function removePub(p) {
-  if (!window.confirm(`删掉「${p.published_at || '未填日期'}」这条发布记录？`)) return
-  await store.deletePublication(p.id)
-}
+// 发布台账已经搬到控制台「数据」：这里只留作品标题/主旨/摘要这三个与写作直接相关的字段
 
 /**
  * 当前作品那一档规模的层级信息，来自 /studio/content-types（content-types.yaml）。
@@ -700,11 +781,9 @@ async function onImported(res) {
   if (res.firstId) await store.selectNode(res.firstId)
 }
 
-// ---- 队列（M4） ----
-const queueHidden = ref(false)
+// ---- 队列（M4）：写作台只显示一行进度，明细与控制都在控制台「任务」 ----
 const qc = computed(() => store.queue?.counts || {})
 const showQueue = computed(() => {
-  if (queueHidden.value) return false
   const q = store.queue
   if (!q) return false
   return store.queueActive || (q.counts?.done || 0) + (q.counts?.failed || 0) > 0
@@ -715,7 +794,8 @@ const queueTitle = computed(() => {
   if (q.triage?.due) return '等待抽检'
   if (q.paused) return '队列已暂停'
   if (q.current) return `正在写：${q.current.title || q.current.task_type}`
-  return `队列已排空 · 完成 ${q.counts?.done || 0} 节`
+  // 完成数在右边 meta 里，标题不再重复一遍
+  return '队列已排空'
 })
 
 const showPipeline = computed(
@@ -843,7 +923,7 @@ const genMetaText = computed(() => {
 /** 下拉框的悬停说明：「自动」到底是什么意思，得写清楚 */
 const modelHint = computed(() =>
   store.genModel
-    ? `生成用 ${store.genModel}（大纲 / 整篇 / 排队 / 加工都跟着走）；该站点的账号要先在 /live 登录上`
+    ? `生成用 ${store.genModel}（大纲 / 整篇 / 排队 / 加工都跟着走）；该站点的账号要先在控制台「浏览器」里登录上`
     : '不指定模型，由后端落到它的默认主力模型；生成后看进度条上的实际模型',
 )
 
@@ -887,8 +967,6 @@ onMounted(async () => {
     store.loadTemplates('article'),
     store.loadContentTypes(),
     store.loadGenModels().catch(() => {}),
-    // 书架上的「已发 · 阅读」来自台账；拉不到就不显示那一行，不影响写作
-    store.loadPublicationSummary().catch(() => {}),
     store.loadIdeas().catch(() => {}),
     store.loadDailyWrites().catch(() => {}),
   ])
@@ -902,7 +980,30 @@ watch(() => route.params.id, (id) => {
   if (id && id !== store.activeWorkId) openWork(id)
 })
 
-watch(() => store.work?.id, () => { workEditOpen.value = false })
+// ?panel=ask 直达右栏「问一问」；没带作品时（/chat 老链接）落在书架上开「先聊聊」
+watch(
+  () => route.query,
+  (q) => {
+    initialPanel.value = q.panel === 'ask' ? 'ask' : ''
+    initialConv.value = typeof q.conv === 'string' ? q.conv : ''
+    if (q.panel === 'ask' && !route.params.id) askOpen.value = true
+  },
+  { immediate: true, deep: true },
+)
+
+/** 「先聊聊」的回答回填新建表单：只是草稿，建不建、怎么改都还由人定 */
+function onUseFromAsk(payload) {
+  form.value.title = String(payload?.title || '').slice(0, 60)
+  form.value.premise = String(payload?.premise || '').slice(0, 400)
+  askOpen.value = false
+  showCreate.value = true
+  nextTick(() => shelfEl.value?.scrollTo({ top: 0, behavior: 'smooth' }))
+}
+
+watch(() => store.work?.id, () => {
+  workEditOpen.value = false
+  typeOpen.value = false
+})
 
 watch(() => store.node?.id, () => {
   titleDraft.value = store.node?.title || ''
@@ -912,12 +1013,29 @@ watch(() => store.node?.id, () => {
 
 // 键盘可达：Ctrl+S 立即存，Ctrl+Enter 生成（见 design-system MASTER.md）
 function onKeydown(e) {
+  if (e.key === 'Escape' && typeOpen.value) {
+    typeOpen.value = false
+    return
+  }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault()
     openSearch()
     return
   }
   if (!(e.ctrlKey || e.metaKey)) return
+  // Ctrl+= / Ctrl+- 调正文字号。用 e.code 判物理键，不看 e.key。
+  // 让开 Alt 是给 Ctrl+Alt+T（切主题）留的，两条快捷键不能互相吞；
+  // Ctrl+Shift+= 不抢——整页放大是浏览器自己的快捷键，抢了就没有退路了。
+  if (!e.altKey && !e.shiftKey && e.code === 'Equal') {
+    e.preventDefault()
+    bumpFontUp()
+    return
+  }
+  if (!e.altKey && e.code === 'Minus') {
+    e.preventDefault()
+    bumpFontDown()
+    return
+  }
   if (e.key === 's') {
     e.preventDefault()
     flushSave()
@@ -971,8 +1089,7 @@ async function openWork(id) {
   await store.selectWork(id)
   await store.loadTemplates(store.work?.kind || 'article')
   if (route.params.id !== id) router.replace(`/studio/${id}`)
-  // 队列可能在关页面期间一直在跑，回来先把状态拉齐
-  queueHidden.value = false
+  // 队列可能在关页面期间一直在跑，回来先把状态拉齐（一行进度要能显示出来）
   await store.loadQueue()
   if (store.queueActive) startQueuePoll()
   // 默认选中第一个有正文的节点，省一次点击；从全库搜索跳进来时先认 ?node=
@@ -1118,7 +1235,6 @@ function toggleWorkEdit() {
     workTitleDraft.value = store.work?.title || ''
     workPremiseDraft.value = store.work?.premise || ''
     workDigestDraft.value = store.work?.digest || ''
-    store.loadPublications()
   }
 }
 
@@ -1317,23 +1433,12 @@ async function doEnqueue() {
   await flushSave()
   const j = await store.enqueueBatch({ instruction: instruction.value })
   if (!j) return
-  queueHidden.value = false
   startQueuePoll()
   if (store.node) await store.selectNode(store.node.id)
 }
 
-async function pauseQ() {
-  await store.pauseQueue('手动暂停')
-}
-
-async function resumeQ() {
-  await store.resumeQueue()
-  startQueuePoll()
-}
-
-async function doTriage(verdict) {
-  await store.triageQueue(verdict)
-  if (store.queueActive) startQueuePoll()
+function gotoConsole() {
+  router.push({ path: '/admin', query: { tab: 'tasks' } })
 }
 
 function resetPipeline() {
@@ -1462,7 +1567,7 @@ async function applyTitle(text, target) {
   color: var(--text-faint);
 }
 .shelf-search:focus-within {
-  border-color: rgba(217, 164, 91, 0.45);
+  border-color: rgba(var(--run-rgb), 0.45);
 }
 .shelf-search .field {
   width: 168px;
@@ -1494,11 +1599,12 @@ async function applyTitle(text, target) {
 }
 .view-chip:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(var(--over), 0.04);
 }
 .view-chip.is-on {
-  color: var(--run);
-  background: rgba(217, 164, 91, 0.1);
+  /* 主色当小字用必须走 --run-fg：--run 是填充/描边档，在带色的底上不够 */
+  color: var(--run-fg);
+  background: rgba(var(--run-rgb), 0.1);
 }
 .write-log {
   display: flex;
@@ -1529,10 +1635,10 @@ async function applyTitle(text, target) {
   width: 4px;
   min-height: 3px;
   border-radius: 1px;
-  background: rgba(255, 255, 255, 0.09);
+  background: rgba(var(--over), 0.09);
 }
 .wl-bar.is-on {
-  background: rgba(217, 164, 91, 0.65);
+  background: rgba(var(--run-rgb), 0.65);
 }
 .ideas {
   margin-bottom: 18px;
@@ -1582,7 +1688,7 @@ async function applyTitle(text, target) {
   border-radius: 5px;
 }
 .idea-row:hover {
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(var(--over), 0.035);
 }
 .idea-text {
   flex: 1;
@@ -1608,7 +1714,7 @@ async function applyTitle(text, target) {
   padding: 0;
   border: none;
   background: transparent;
-  color: var(--run);
+  color: var(--run-fg);
   font-size: inherit;
   font-family: inherit;
   text-decoration: underline;
@@ -1724,7 +1830,7 @@ async function applyTitle(text, target) {
 }
 .work-arch:hover {
   color: var(--run);
-  background: rgba(217, 164, 91, 0.12);
+  background: rgba(var(--run-rgb), 0.12);
 }
 .work-card:hover .work-del,
 .work-card:focus-within .work-del {
@@ -1732,10 +1838,10 @@ async function applyTitle(text, target) {
 }
 .work-del:hover {
   color: var(--danger);
-  background: rgba(228, 120, 120, 0.1);
+  background: rgba(var(--danger-rgb), 0.1);
 }
 .work-card:hover {
-  border-color: rgba(217, 164, 91, 0.45);
+  border-color: rgba(var(--run-rgb), 0.45);
   background: var(--panel-2);
 }
 .work-kind {
@@ -1743,7 +1849,7 @@ async function applyTitle(text, target) {
   font-size: 10px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--run);
+  color: var(--run-fg);
 }
 .work-title {
   font-family: theme('fontFamily.serif');
@@ -1755,65 +1861,6 @@ async function applyTitle(text, target) {
   font-size: 11px;
   color: var(--text-faint);
   font-family: theme('fontFamily.mono');
-}
-.work-pub {
-  font-size: 11px;
-  font-family: theme('fontFamily.mono');
-  color: var(--run);
-}
-/* ---------- 发布记录（作品弹层内） ---------- */
-.pub-box {
-  border-top: 1px solid var(--line-soft);
-  padding-top: 8px;
-}
-.pub-box summary {
-  font-size: 11px;
-  color: var(--text-faint);
-  cursor: pointer;
-}
-.pub-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-.pub-date {
-  font-family: theme('fontFamily.mono');
-  color: var(--text-faint);
-}
-.pub-num {
-  flex: 1;
-  min-width: 0;
-}
-.pub-link {
-  color: var(--run);
-  text-decoration: none;
-}
-.pub-link:hover {
-  text-decoration: underline;
-}
-.pub-del {
-  border: none;
-  background: transparent;
-  font-size: 11px;
-  color: var(--text-faint);
-  cursor: pointer;
-}
-.pub-del:hover {
-  color: var(--danger);
-}
-.pub-form {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  margin-top: 6px;
-}
-.pub-form .btn {
-  grid-column: 1 / -1;
-  height: 26px;
-  font-size: 11px;
 }
 .work-premise {
   font-size: 12px;
@@ -1832,6 +1879,16 @@ async function applyTitle(text, target) {
 
 /* ---------- 编辑器 ---------- */
 .editor {
+  /* 排版可调：两套字体栈在这里给全，utils/writer.js 只按名字挑，不在 JS 里再抄一份 */
+  --w-serif: theme('fontFamily.serif');
+  --w-sans: theme('fontFamily.sans');
+  /* 默认档：实际值由 utils/writer.js 用 :style 覆盖在同一个节点上（内联样式优先）。
+     留这一份是为了 :style 没挂上时正文仍是 17px / 1.9 / 646px，而不是退回浏览器默认字体。 */
+  --w-size: 17px;
+  --w-height: 1.9;
+  --w-measure: 646px;
+  --w-font: var(--w-serif);
+  --w-tint-bg: transparent;
   flex: 1;
   min-width: 0;
   display: flex;
@@ -1842,9 +1899,12 @@ async function applyTitle(text, target) {
   display: flex;
   align-items: center;
   gap: 9px;
+  /* 右栅「问一问」展开时编辑区只剩四百多像素：不折行的话按钮会叠到作品名上 */
+  flex-wrap: wrap;
+  row-gap: 6px;
   padding: 9px 16px;
   border-bottom: 1px solid var(--line-soft);
-  background: rgba(17, 19, 24, 0.7);
+  background: var(--scrim);
 }
 .ed-work-wrap {
   position: relative;
@@ -1894,7 +1954,7 @@ async function applyTitle(text, target) {
   border: 1px solid var(--line);
   border-radius: var(--radius-panel);
   background: var(--panel);
-  box-shadow: 0 18px 44px -20px rgba(0, 0, 0, 0.8);
+  box-shadow: 0 18px 44px -20px rgba(var(--shade-rgb), 0.8);
 }
 .work-pop .fl {
   display: flex;
@@ -1936,6 +1996,106 @@ async function applyTitle(text, target) {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+/* ---------- 排版弹层 ---------- */
+.ed-type-wrap {
+  position: relative;
+  display: flex;
+}
+.ed-type-btn.is-on {
+  border-color: var(--line-strong);
+  background: var(--panel-3);
+  color: var(--text);
+}
+.type-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  width: 250px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+  box-shadow: 0 18px 44px -20px rgba(var(--shade-rgb), 0.8);
+}
+.type-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.type-label {
+  width: 30px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.type-seg {
+  display: flex;
+  gap: 3px;
+}
+.type-chip {
+  height: 22px;
+  min-width: 30px;
+  padding: 0 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: rgba(var(--over), 0.03);
+  color: var(--text-muted);
+  font-family: theme('fontFamily.mono');
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.16s var(--ease), border-color 0.16s var(--ease),
+    background-color 0.16s var(--ease);
+}
+.type-chip:hover {
+  color: var(--text);
+  border-color: var(--line);
+}
+.type-chip.is-on {
+  border-color: rgba(var(--run-rgb), 0.5);
+  background: rgba(var(--run-rgb), 0.14);
+  color: var(--run-fg);
+}
+.type-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 2px;
+  border-top: 1px solid var(--line-soft);
+}
+.type-reset {
+  border: none;
+  background: none;
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.type-reset:hover {
+  color: var(--run);
+}
+.type-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.type-keys .kbd {
+  height: 16px;
+  padding: 0 3px;
+  font-size: 10px;
+}
+.type-tip {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--text-faint);
 }
 .ed-save {
   font-size: 11px;
@@ -2016,8 +2176,8 @@ async function applyTitle(text, target) {
   align-items: center;
   gap: 10px;
   padding: 18px 0 8px;
-  /* 与正文同宽：38em @ 17px */
-  width: min(646px, calc(100% - 64px));
+  /* 与正文同宽：都跟着 --w-measure 走，标题行不会比正文宽出一截 */
+  width: min(var(--w-measure, 646px), calc(100% - 64px));
   margin: 0 auto;
 }
 .ed-title {
@@ -2047,13 +2207,14 @@ async function applyTitle(text, target) {
   white-space: nowrap;
 }
 .ed-count.over {
-  color: var(--warn);
+  /* 超目标字数：小字不能用填充色 --warn（纸/松/素下只有 3.1–4.3），走文字档 */
+  color: var(--warn-fg);
 }
 .ed-prog {
   width: 46px;
   height: 3px;
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(var(--over), 0.08);
   overflow: hidden;
 }
 .ed-prog i {
@@ -2068,17 +2229,20 @@ async function applyTitle(text, target) {
   display: flex;
   justify-content: center;
   padding: 0 32px;
+  /* 护眼档：关的时候是 transparent，开了压一层本主题的暗色分量（--shade-rgb） */
+  background: var(--w-tint-bg, transparent);
 }
 .ed-textarea {
-  width: min(646px, 100%);
+  width: min(var(--w-measure, 646px), 100%);
   height: 100%;
   resize: none;
   border: none;
   background: transparent;
   color: var(--text);
-  font-family: theme('fontFamily.serif');
-  font-size: 17px;
-  line-height: 1.9;
+  /* 排版可调：四个值都来自 .editor 上的 --w-*，默认档位与改动前逐像素一致 */
+  font-family: var(--w-font, var(--w-serif));
+  font-size: var(--w-size, 17px);
+  line-height: var(--w-height, 1.9);
   letter-spacing: 0.01em;
   padding: 8px 0 30px;
   outline: none;
@@ -2104,20 +2268,20 @@ async function applyTitle(text, target) {
   color: var(--text-muted);
   font-size: 11.5px;
   line-height: 1.6;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  box-shadow: 0 8px 24px rgba(var(--shade-rgb), 0.32);
 }
 /* 删除被备份拦住不是「没什么发生」，得看得出一条没删成 */
 .notice--bad {
-  border-color: rgba(217, 107, 107, 0.45);
-  color: var(--danger);
+  border-color: rgba(var(--bad-rgb), 0.45);
+  color: var(--danger-fg);
 }
 
 /* ---------- 生成预览 ---------- */
 .gen {
   margin: 0 32px;
-  border: 1px solid rgba(217, 164, 91, 0.28);
+  border: 1px solid rgba(var(--run-rgb), 0.28);
   border-radius: var(--radius-panel);
-  background: rgba(217, 164, 91, 0.045);
+  background: rgba(var(--run-rgb), 0.045);
   padding: 10px 14px 12px;
   max-height: 34vh;
   display: flex;
@@ -2144,7 +2308,7 @@ async function applyTitle(text, target) {
 .spinner {
   width: 10px;
   height: 10px;
-  border: 1.6px solid rgba(217, 164, 91, 0.3);
+  border: 1.6px solid rgba(var(--run-rgb), 0.3);
   border-top-color: var(--run);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
@@ -2157,7 +2321,7 @@ async function applyTitle(text, target) {
 .gen-text {
   margin: 8px 0 0;
   overflow-y: auto;
-  font-family: theme('fontFamily.serif');
+  font-family: var(--w-font, var(--w-serif));
   font-size: 13.5px;
   line-height: 1.8;
   color: var(--text);
@@ -2173,7 +2337,7 @@ async function applyTitle(text, target) {
   cursor: pointer;
 }
 .gen-para:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(var(--over), 0.04);
 }
 .gen-para-box {
   margin-top: 8px;
@@ -2192,7 +2356,7 @@ async function applyTitle(text, target) {
 .gen-err {
   margin: 8px 0 0;
   font-size: 12px;
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 .gen-stop {
   margin: 8px 0 0;
@@ -2213,7 +2377,7 @@ async function applyTitle(text, target) {
   margin: 6px 0 0;
   font-size: 11.5px;
   line-height: 1.6;
-  color: var(--warn);
+  color: var(--warn-fg);
 }
 .gen-src {
   margin: 4px 0 0;
@@ -2283,7 +2447,7 @@ async function applyTitle(text, target) {
 
 /* 队列：不确定进度用一条缓慢来回的光带，比假百分比诚实 */
 .queue {
-  border-color: rgba(217, 164, 91, 0.28);
+  border-color: rgba(var(--run-rgb), 0.28);
 }
 .pipe .bar-fill.indeterminate {
   width: 38%;
@@ -2297,43 +2461,6 @@ async function applyTitle(text, target) {
   to {
     margin-left: 100%;
   }
-}
-.triage {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  padding: 9px 10px;
-  border: 1px solid rgba(217, 164, 91, 0.35);
-  border-radius: var(--radius-control);
-  background: rgba(217, 164, 91, 0.05);
-}
-.triage-title {
-  margin: 0;
-  font-size: 11.5px;
-  line-height: 1.6;
-  color: var(--text-muted);
-}
-.triage-list {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.triage-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--text);
-}
-.triage-score {
-  margin-left: auto;
-  font-family: theme('fontFamily.mono');
-  font-size: 11px;
-  color: var(--run);
-}
-.triage-act {
-  display: flex;
-  gap: 6px;
 }
 .mini {
   border: 1px solid var(--line);
@@ -2358,7 +2485,7 @@ async function applyTitle(text, target) {
   gap: 8px;
   padding: 10px 32px 14px;
   border-top: 1px solid var(--line-soft);
-  background: rgba(17, 19, 24, 0.8);
+  background: var(--scrim-raised);
 }
 .task-select {
   width: 108px;
@@ -2404,5 +2531,50 @@ async function applyTitle(text, target) {
   .ed-textarea {
     transition: none;
   }
+}
+
+/* 书架上的「先聊聊」弹层：比对话框宽（要读长回答），但不铺满整屏 */
+.ask-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 180;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: var(--overlay);
+  backdrop-filter: blur(3px);
+}
+.ask-box {
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 94vw);
+  height: min(760px, 86vh);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-stage);
+  background: var(--panel);
+  box-shadow: 0 28px 70px -30px rgba(var(--shade-rgb), 0.7);
+  overflow: hidden;
+}
+.ask-box-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  flex-shrink: 0;
+}
+.ask-box-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.ask-box-sub {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.ask-box-head .icon-btn {
+  margin-left: auto;
+  align-self: center;
 }
 </style>

@@ -1,11 +1,12 @@
 <template>
-  <div class="app-shell">
-    <AppNav />
-    <main id="main" class="live-main">
-      <!-- 顶栏：标题 + 连接配置 -->
+  <div class="live-console">
+    <!-- 常驻在控制台「浏览器」tab 里：不再自带 AppNav/app-shell，也不用 <main>
+         （外层 ConsoleView 已经有一个） -->
+    <div class="live-main">
+      <!-- 顶栏：连接配置 -->
       <header class="live-header">
         <div class="title-block">
-          <h1>实时浏览器</h1>
+          <h1>实时画面</h1>
           <span class="pill" :class="connected ? 'pill--on' : 'pill--off'">
             <span class="status-dot" :class="connected ? 'on' : 'off'"></span>
             {{ connected ? '已连接' : '未连接' }}
@@ -31,7 +32,7 @@
           <button class="btn" :disabled="!connected" @click="disconnect">断开</button>
           <button
             class="btn"
-            title="连同后台浏览器一起关掉（管理页的「浏览器」会熄灭）；下次聊天会重新拉起"
+            title="连同后台浏览器一起关掉（控制台「状态」里的浏览器会熄灭）；下次聊天会重新拉起"
             @click="closeBrowser"
           >
             <AppIcon name="x" :size="13" />
@@ -245,7 +246,7 @@
           <div v-if="!logs.length" class="log-empty">暂无事件</div>
         </div>
       </section>
-    </main>
+    </div>
 
     <!-- 点探测到的 chip = 直接把它绑给某个语义，省掉「先记住文案再去下拉里找」这一步 -->
     <Teleport to="body">
@@ -263,22 +264,39 @@
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, nextTick, onMounted, onUnmounted, computed, watch } from 'vue'
 import { getApiKey } from '../utils/storage'
 import { authHeaders } from '../utils/api'
-import AppNav from '../components/AppNav.vue'
-import AppIcon from '../components/AppIcon.vue'
+import AppIcon from './AppIcon.vue'
 
-const route = useRoute()
-// 记住上次用的 provider 与“是否想保持连接”：SPA 路由切到聊天页会卸载本组件，
-// 回来时自动恢复连接，不用再手点「连接」
+// 控制台「浏览器」tab 的常驻内容。ConsoleView 用 v-show 保住本组件不销毁，
+// active=false 只停推屏，切回来再接上（见文件底部那个 watch）。
+const props = defineProps({
+  provider: { type: String, default: '' },
+  initialUrl: { type: String, default: '' },
+  // 打开就自动连：老链接 /live?provider=x、Provider 卡片点进来都属于这种
+  autoConnect: { type: Boolean, default: false },
+  // 所在 tab 是否可见
+  active: { type: Boolean, default: true },
+})
+const emit = defineEmits(['update:provider', 'update:connected'])
+
+// 记住上次用的 provider 与“是否想保持连接”：切走/刷新后回来自动恢复，不用再手点「连接」
 const PROVIDER_KEY = 'w2a_live_provider'
 const WANT_KEY = 'w2a_live_want'
 function savedProvider() { try { return localStorage.getItem(PROVIDER_KEY) || '' } catch (_) { return '' } }
 function wantReconnect() { try { return localStorage.getItem(WANT_KEY) === '1' } catch (_) { return false } }
-const provider = ref(route.query.provider || savedProvider() || 'qwen')
-const url = ref(route.query.url || '')
+const provider = ref(props.provider || savedProvider() || 'qwen')
+const url = ref(props.initialUrl || '')
+watch(() => props.provider, (v) => {
+  // 从外面（URL query / Provider 卡片）改过来了：没连着才跟随，别把正在推屏的会话换掉
+  if (!v || v === provider.value || connected.value) return
+  provider.value = v
+})
+watch(provider, (v) => {
+  try { localStorage.setItem(PROVIDER_KEY, v) } catch (_) { /* 隐私模式下不可用，忽略 */ }
+  emit('update:provider', v)
+})
 const connected = ref(false)
 const statusText = ref('未连接')
 const frameSrc = ref('')
@@ -476,6 +494,9 @@ const modeOptions = computed(() => {
   return list.map((m) => ({ id: m.id, label: m.label || m.id }))
 })
 let ws = null
+// 这条 socket 是给哪个站点开的 + 什么时候开始握手：connect() 靠它们判断「同站且还活着」就不再开第二条
+let wsProvider = ''
+let wsStartedAt = 0
 let composing = false
 let logicalW = 1280, logicalH = 800, dsf = 1
 
@@ -516,6 +537,15 @@ function toggleRecord() {
 }
 
 function connect() {
+  // 同一个站点已经连着/正在握手：直接返回。
+  // 控制台点 Provider 卡片时，onMounted（autoConnect）与父组件的 nextTick(openProvider)
+  // 会各叫一次；握手还没完成时只看 connected 拦不住，会关掉第一条再造一条，
+  // 旧 socket 的 onclose 晚到还会把 connected 重置成 false。
+  // 10 秒还没握上就不再护着它（后端卡住时人要能手动重连）。
+  const alive = ws && wsProvider === provider.value
+    && (ws.readyState === WebSocket.OPEN
+      || (ws.readyState === WebSocket.CONNECTING && Date.now() - wsStartedAt < 10000))
+  if (alive) return
   if (ws) { ws.close(); ws = null }
   // 换一个站点就是一个新页面，上次的探测结果留着会误导
   probeItems.value = []
@@ -531,16 +561,33 @@ function connect() {
   if (apiKey) params.set('token', apiKey)
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const qs = params.toString() ? '?' + params.toString() : ''
-  ws = new WebSocket(`${proto}://${location.host}/ws/live/${provider.value}${qs}`)
-  ws.onopen = () => {
+  const sock = new WebSocket(`${proto}://${location.host}/ws/live/${provider.value}${qs}`)
+  ws = sock
+  wsProvider = provider.value
+  wsStartedAt = Date.now()
+  // 所有回调先校验「还是不是当前 socket」：重连时旧连接的 close/error 晚到，
+  // 不拦就会把新连接的 connected/statusText 改回去，表现为「画面在动但显示未连接」。
+  sock.onopen = () => {
+    if (ws !== sock) return
     connected.value = true
     statusText.value = '已连接'
     appendLog('连接成功')
     loadBindings()
   }
-  ws.onclose = () => { connected.value = false; statusText.value = '未连接'; frameSrc.value = ''; appendLog('连接已断开') }
-  ws.onerror = () => { statusText.value = '连接错误'; appendLog('WebSocket 连接错误') }
-  ws.onmessage = (ev) => {
+  sock.onclose = () => {
+    if (ws !== sock) return
+    connected.value = false
+    statusText.value = '未连接'
+    frameSrc.value = ''
+    appendLog('连接已断开')
+  }
+  sock.onerror = () => {
+    if (ws !== sock) return
+    statusText.value = '连接错误'
+    appendLog('WebSocket 连接错误')
+  }
+  sock.onmessage = (ev) => {
+    if (ws !== sock) return
     const d = JSON.parse(ev.data)
     if (d.t === 'meta') { logicalW = d.w || 1280; logicalH = d.h || 800; dsf = d.dsf || 1 }
     else if (d.t === 'frame') { frameSrc.value = 'data:image/jpeg;base64,' + d.data }
@@ -569,6 +616,8 @@ function connect() {
 
 function closeSocket() {
   if (ws) { ws.close(); ws = null }
+  wsProvider = ''
+  wsStartedAt = 0
   connected.value = false
   statusText.value = '未连接'
   frameSrc.value = ''
@@ -582,12 +631,12 @@ function disconnect() {
   // 用户主动断开：下次进来不要再自动连
   try { localStorage.setItem(WANT_KEY, '0') } catch (_) { /* 忽略 */ }
   closeSocket()
-  appendLog('已断开画面：浏览器仍在后台运行（管理页的「浏览器」仍亮），下次连接会秒开；要彻底关掉请点「关闭浏览器」')
+  appendLog('已断开画面：浏览器仍在后台运行（控制台「状态」里的浏览器仍亮），下次连接会秒开；要彻底关掉请点「关闭浏览器」')
 }
 
 async function closeBrowser() {
   // 断开只停推屏，后台浏览器/标签页还在（后台聊天要复用，也能避免反复重启）。
-  // 要彻底关掉走 full=1：管理页的「浏览器」状态才会变灰。
+  // 要彻底关掉走 full=1：控制台「状态」里的浏览器才会变灰。
   try { localStorage.setItem(WANT_KEY, '0') } catch (_) { /* 忽略 */ }
   closeSocket()
   const headers = apiHeaders()
@@ -1041,10 +1090,30 @@ function onKeyDown(e) {
 onMounted(() => {
   window.addEventListener('mouseup', onMouseUp)
   window.addEventListener('blur', onBlur)
-  // 带 ?provider= 进来（管理页跳转）或上次会话还开着：直接恢复连接
-  if (route.query.provider || wantReconnect()) {
+  // 带 provider 进来（Provider 卡片 / 老 /live 链接）或上次会话还开着：直接恢复连接
+  if (!props.active) return
+  if (props.autoConnect || wantReconnect()) {
     appendLog('自动恢复上次连接：' + provider.value)
     connect()
+  }
+})
+
+// 控制台切 tab 不销毁本组件（v-show），挂载钩子不会再来一次：
+// 隐藏时停流省电（CDP 推屏是持续流量），切回来重连，provider 选择保留。
+// 注意：这不算「用户主动断开」，不碰 WANT_KEY，否则切走一次就再也不自动连了。
+let resumeOnShow = false
+watch(() => props.active, (on) => {
+  if (on) {
+    if (!resumeOnShow) return
+    resumeOnShow = false
+    appendLog('回到「浏览器」：重新连接画面')
+    connect()
+    return
+  }
+  if (ws || connected.value) {
+    resumeOnShow = true
+    closeSocket()
+    appendLog('已切走：暂停推屏（切回来自动重连）')
   }
 })
 onUnmounted(() => {
@@ -1054,21 +1123,31 @@ onUnmounted(() => {
   if (moveRaf) cancelAnimationFrame(moveRaf)
   closeSocket()
 })
+
+// 推流状态外显：控制台的 tab 上有个点，切到别的 tab 也知道浏览器还开着
+watch(connected, (v) => emit('update:connected', v))
+
+// 父组件点 Provider 卡片时直接切到某个 provider 并连上（不只是改下拉值）
+function openProvider(p) {
+  if (p) provider.value = p
+  connect()
+}
+defineExpose({ openProvider })
 </script>
 
 <style scoped>
-.app-shell {
+.live-console {
   display: flex;
-  height: 100vh;
-  height: 100dvh;
-  /* 兜住 dvh：它算错时整块只剩上半截。100% 走 main.css 的 html/body/#app 高链 */
+  flex-direction: column;
   height: 100%;
-  overflow: hidden;
-  background: #0b0c0f;
+  min-height: 0;
+  background: var(--bg);
 }
 .live-main {
   flex: 1;
   min-width: 0;
+  /* 日志区固定高度，剩下的都给画面：没有 min-height:0 时 flex 子项会撑破容器 */
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -1076,7 +1155,7 @@ onUnmounted(() => {
   margin: 0;
   padding: 7px 20px;
   border-bottom: 1px solid var(--line-soft);
-  background: #070b12;
+  background: var(--panel);
   font-size: 11.5px;
   line-height: 1.6;
   color: var(--text-faint);
@@ -1094,7 +1173,7 @@ onUnmounted(() => {
   flex-wrap: wrap;
   padding: 12px 20px;
   border-bottom: 1px solid var(--line-soft);
-  background: rgba(10, 14, 22, 0.9);
+  background: var(--scrim-raised);
 }
 .title-block {
   display: flex;
@@ -1133,7 +1212,7 @@ onUnmounted(() => {
   flex-wrap: wrap;
   padding: 10px 20px;
   border-bottom: 1px solid var(--line-soft);
-  background: #080c13;
+  background: var(--panel);
 }
 .type-bar {
   display: flex;
@@ -1152,7 +1231,7 @@ onUnmounted(() => {
   padding: 0 10px;
   border-radius: 8px;
   border: 1px solid var(--line-soft);
-  background: #111318;
+  background: var(--panel-2);
   color: var(--text);
   font-size: 12.5px;
   outline: none;
@@ -1179,7 +1258,7 @@ onUnmounted(() => {
   width: 13px;
   height: 13px;
   margin: 0;
-  accent-color: #d9a45b;
+  accent-color: var(--run);
   cursor: pointer;
 }
 .auto-send.on {
@@ -1193,7 +1272,7 @@ onUnmounted(() => {
   gap: 8px;
   padding: 9px 20px;
   border-bottom: 1px solid var(--line-soft);
-  background: #070b12;
+  background: var(--panel);
 }
 .mode-head {
   display: flex;
@@ -1234,7 +1313,7 @@ onUnmounted(() => {
   padding: 3px 9px;
   border-radius: 999px;
   border: 1px solid var(--line-soft);
-  background: #0c121b;
+  background: var(--panel-2);
   font-size: 11.5px;
   color: var(--text-muted);
   cursor: pointer;
@@ -1245,14 +1324,14 @@ onUnmounted(() => {
 }
 /* 已经绑给某个语义的控件：标出来，避免同一个文案绑两处 */
 .probe-chip.used {
-  border-color: rgba(56, 189, 248, 0.4);
-  background: rgba(56, 189, 248, 0.08);
-  color: #7dd3fc;
+  border-color: rgba(var(--sky-rgb), 0.4);
+  background: rgba(var(--sky-rgb), 0.08);
+  color: var(--info-fg);
 }
 .probe-chip.on {
-  border-color: rgba(217, 164, 91, 0.35);
-  background: rgba(217, 164, 91, 0.08);
-  color: #e8c48a;
+  border-color: rgba(var(--run-rgb), 0.35);
+  background: rgba(var(--run-rgb), 0.08);
+  color: var(--run-fg);
 }
 .probe-chip b {
   font-weight: 500;
@@ -1311,7 +1390,7 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .bind-tag b {
-  color: var(--run);
+  color: var(--run-fg);
   font-weight: 600;
 }
 .bind-x {
@@ -1348,7 +1427,7 @@ onUnmounted(() => {
   color: var(--text-faint);
 }
 .bind-notes.is-bad {
-  color: #fca5a5;
+  color: var(--danger-fg);
 }
 .chip-mask {
   position: fixed;
@@ -1362,7 +1441,7 @@ onUnmounted(() => {
   border: 1px solid var(--line-strong);
   border-radius: 12px;
   background: var(--panel);
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 18px 44px rgba(var(--shade-rgb), 0.55);
 }
 .chip-pop-t {
   margin: 2px 4px 8px;
@@ -1427,9 +1506,9 @@ onUnmounted(() => {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #223044;
+  background: var(--panel-3);
 }
-.stage-dots span:first-child { background: #3b4453; }
+.stage-dots span:first-child { background: var(--line-strong); }
 .stage-host {
   font-family: theme('fontFamily.mono');
   color: var(--text-muted);
@@ -1450,10 +1529,10 @@ onUnmounted(() => {
   overflow: hidden;
   border-radius: 16px;
   border: 1px solid var(--line);
-  background-color: #0b0c0f;
-  background-image: radial-gradient(rgba(217, 164, 91, 0.08) 1px, transparent 1px);
+  background-color: var(--bg);
+  background-image: radial-gradient(rgba(var(--run-rgb), 0.08) 1px, transparent 1px);
   background-size: 22px 22px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 30px 60px -40px rgba(0, 0, 0, 0.9);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 30px 60px -40px rgba(var(--shade-rgb), 0.9);
 }
 .live-shot {
   max-width: 100%;
@@ -1478,7 +1557,7 @@ onUnmounted(() => {
   margin-bottom: 8px;
   border-radius: 15px;
   border: 1px solid var(--line);
-  background: #0b1018;
+  background: var(--panel);
   color: var(--text-muted);
 }
 .live-placeholder p {
@@ -1511,7 +1590,7 @@ onUnmounted(() => {
   margin: 12px 20px 14px;
   border-radius: 12px;
   border: 1px solid var(--line-soft);
-  background: #080c13;
+  background: var(--panel);
   overflow: hidden;
 }
 .log-head {
@@ -1549,7 +1628,7 @@ onUnmounted(() => {
   gap: 10px;
 }
 .log-time {
-  color: #46566b;
+  color: var(--text-faint);
   flex-shrink: 0;
 }
 .log-text {
@@ -1557,8 +1636,8 @@ onUnmounted(() => {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.log-line.ok .log-text { color: #84c79b; }
-.log-line.err .log-text { color: #fca5a5; }
+.log-line.ok .log-text { color: var(--teal); }
+.log-line.err .log-text { color: var(--danger-fg); }
 .log-empty {
   color: var(--text-faint);
   padding: 4px 0;

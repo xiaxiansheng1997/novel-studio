@@ -31,10 +31,10 @@ cd frontend ; npm install ; npm run build ; cd ..
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-开发时可以直接 `python dev.py all`（后端 :8000 + Vite :5173，热更新）；`build` / `backend` / `frontend` 三个子命令单独起。
+开发时可以直接 `python dev.py all`（后端 :8000 + Vite :5273，热更新）；`build` / `backend` / `frontend` 三个子命令单独起。
 改完代码一键自检：`powershell -ExecutionPolicy Bypass -File scripts\check.ps1`（ruff → pytest → 前端构建）。
 
-**开写之前先把账号登录上**：打开 <http://127.0.0.1:8000/live> → 选站点 → **连接** → 在实时画面里直接登录
+**开写之前先把账号登录上**：打开控制台 <http://127.0.0.1:8000/admin?tab=live>（旧 `/live` 会重定向过去）→ 选站点 → **连接** → 在实时画面里直接登录
 （扫码/密码/滑块）→ **检测登录**。登录态落在持久化 profile 里长期复用，失效时管理面板会提示。
 然后去 <http://127.0.0.1:8000/studio>（站点首页也跳这里）建作品。
 
@@ -57,7 +57,7 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
    补一段文末关注引导并自动带上「往期推荐」；正文里写「[图：画面描述]」就会变成导出时的配图占位
 10. **文风**：右栏「文风」页可以给这一篇定人称 / 时态 / 语气 / 禁忌（三个预设一键填），也能贴几篇自己写过的旧文——
     本地统计句长、段长、口头禅、人称与标点，生成一段「文风画像」跟着 S1 进每次 prompt（不占素材与检索预算，不调模型）。
-    发出去的文章在作品弹层里记一条台账（日期 / 链接 / 阅读 / 在看），书架因此能显示「已发 N 篇 · 阅读 X」
+    发出去的文章在控制台「数据」里记一条台账（日期 / 链接 / 阅读 / 在看），跨作品汇总也在那一页
 11. **作品多了也找得到**：书架有搜索框（标题 / 主旨即时筛）与「在写 / 已归档」两个视图；归档只改 `works.status`，
     正文、版本、索引都不动。跨作品搜正文与素材按 `Ctrl+K`（或书架上的「搜正文」），结果分「作品」与「正文片段」两组，
     点一条直接跳到那一篇的那一节
@@ -79,8 +79,8 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 单 worker 串行队列 + 优先级 + 幂等入队（`idem_key`）；重启把 `running` 退回 `queued` 自动续跑；
 遇到风控或登录失效**整队暂停**；每 `triage_every` 节抽检一次，连续两次判「重写」就熔断停队。
 
-页底队列条显示「排队 N · 完成 N · 约 X 分钟」与当前在跑的那一节，也有暂停/恢复按钮（`POST /studio/queue/resume`）；
-已标 `failed` 的任务用 `POST /studio/jobs/{id}/retry` 重排（会把 attempts 清零）。
+写作台页底只有一行队列进度（排队 / 完成 / 约 X 分钟 / 当前在跑的那一节）；暂停与恢复（`POST /studio/queue/resume`）、
+抽检判定、单条任务的重试与取消（`POST /studio/jobs/{id}/retry`，会把 attempts 清零）都在控制台「任务」（`/admin?tab=tasks`）里。
 每一节用了哪个 model / provider、输入输出各多少字符、耗时与打分，都记在 `runs` 表里，成本可以回看
 （用量是字符估算，不是真实 token）。
 
@@ -195,7 +195,8 @@ app/
             auth.py alerts.py cut.py request_log.py ui_bindings.py
   browser/  playwright_pool.py session_manager.py stream_capture.py cdp_stream.py live_browser.py network_recorder.py ui_modes.py site_session.py
   providers/ _replay.py _browser_base.py  qwen.py doubao.py deepseek.py   ← 底座：驱动三家网页端
-frontend/   Vue 3 + Vite（/studio /chat /admin /live，首页重定向到 /studio；构建产物 dist 由后端托管）
+frontend/   Vue 3 + Vite（写作台 `/studio`（含右栏「问一问」）/ 控制台 `/admin?tab=状态|浏览器|日志|任务|数据|配置`，
+            旧 `/chat`、`/live` 链接会重定向过去；首页重定向到 /studio；构建产物 dist 由后端托管）
 content-types.yaml   文种配置（kinds → scales → subtypes + 模板；article 有 wechat 子类）
 risk-words.yaml      公众号风险词（发布前检查用，改完不用重启）
 docs/       novel-studio-tech-design.md（设计与各里程碑实测）  m0-baseline.md  content-types.md  reverse-proxy.md
@@ -224,8 +225,8 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
 
 队列只在两种情况下主动停：**风控/登录失效** 与 **抽检连续两次判「重写」**。
 
-- 前者处置与底座一样：`GET /live/debug/<key>` 看登录判定 → 去 `/live` 手动过一次验证 → 点「已验证·清除风控冷却」
-  → `POST /studio/queue/resume`（页底队列条上也有按钮）。排查细则见 `docs/reverse-proxy.md`。
+- 前者处置与底座一样：`GET /live/debug/<key>` 看登录判定 → 去控制台「浏览器」（`/admin?tab=live`）手动过一次验证 → 点「已验证·清除风控冷却」
+  → `POST /studio/queue/resume`（控制台「任务」里也有按钮）。排查细则见 `docs/reverse-proxy.md`。
 - 后者是止损阀，说明这一节自己都没通过抽检，先把正文改顺再 `resume`，否则后面每一节都在烂地上继续盖。
 
 ### 日志里反复出现「作品不存在」

@@ -205,7 +205,7 @@ async function copy(t) {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(5, 6, 8, 0.66);
+  background: var(--overlay);
 }
 .dlg {
   width: min(920px, 100%);
@@ -215,7 +215,7 @@ async function copy(t) {
   border: 1px solid var(--line);
   border-radius: var(--radius-stage, 16px);
   background: var(--panel);
-  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.9);
+  box-shadow: 0 32px 80px -32px rgba(var(--shade-rgb), 0.9);
 }
 .dlg-head {
   display: flex;
@@ -323,7 +323,7 @@ async function copy(t) {
 .spinner {
   width: 10px;
   height: 10px;
-  border: 1.6px solid rgba(217, 164, 91, 0.3);
+  border: 1.6px solid rgba(var(--run-rgb), 0.3);
   border-top-color: var(--run);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
@@ -375,9 +375,9 @@ async function copy(t) {
 .cand {
   display: flex;
   flex-direction: column;
-  border: 1px solid rgba(217, 164, 91, 0.22);
+  border: 1px solid rgba(var(--run-rgb), 0.22);
   border-radius: var(--radius-panel);
-  background: rgba(217, 164, 91, 0.04);
+  background: rgba(var(--run-rgb), 0.04);
   overflow: hidden;
 }
 .cand-head {

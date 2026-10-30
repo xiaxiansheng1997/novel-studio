@@ -253,7 +253,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(5, 6, 8, 0.66);
+  background: var(--overlay);
 }
 .box {
   width: min(760px, 100%);
@@ -263,7 +263,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   border: 1px solid var(--line);
   border-radius: var(--radius-stage, 16px);
   background: var(--panel);
-  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 30px 80px rgba(var(--shade-rgb), 0.5);
   overflow: hidden;
 }
 .head {
@@ -400,7 +400,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 .warn-line {
   margin: 0;
   font-size: 12px;
-  color: #fca5a5;
+  color: var(--danger-fg);
 }
 .foot {
   display: flex;

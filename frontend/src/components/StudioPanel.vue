@@ -1,5 +1,5 @@
 <template>
-  <aside class="panel">
+  <aside class="panel" :class="{ 'is-wide': tab === 'ask' }">
     <div class="tabs" role="tablist">
       <button
         v-for="t in tabs"
@@ -15,7 +15,7 @@
       </button>
     </div>
 
-    <div class="panel-body">
+    <div class="panel-body" :class="{ 'is-ask': tab === 'ask' }">
       <!-- 素材 -->
       <section v-if="tab === 'sources'" class="section">
         <div class="src-top">
@@ -395,6 +395,37 @@
           </p>
         </div>
 
+        <!-- 缩略图：右栏只给「谁多、谁连得多」一眼，大图（力导向 + 拖动）在浮层里按需渲染 -->
+        <button
+          v-if="graphEntities.length"
+          class="g-thumb"
+          type="button"
+          title="展开全屏图谱（拖动、筛选、看关系）"
+          @click="graphOpen = true"
+        >
+          <svg class="g-thumb-svg" viewBox="0 0 300 168" aria-hidden="true">
+            <line
+              v-for="l in thumbLinks"
+              :key="l.id"
+              class="g-thumb-link"
+              :x1="thumbPos[l.src_id].x"
+              :y1="thumbPos[l.src_id].y"
+              :x2="thumbPos[l.dst_id].x"
+              :y2="thumbPos[l.dst_id].y"
+            />
+            <circle
+              v-for="n in thumbNodes"
+              :key="n.id"
+              class="g-thumb-dot"
+              :class="{ 'is-dead': n.dead }"
+              :cx="n.x"
+              :cy="n.y"
+              r="3.4"
+            />
+          </svg>
+          <span class="g-thumb-foot">展开全屏 · 拖动、筛选、看关系</span>
+        </button>
+
         <template v-if="store.graphData && store.graphData.stats.entities">
           <div v-for="kind in KIND_ORDER" :key="kind">
             <template v-if="graphByKind[kind] && graphByKind[kind].length">
@@ -490,7 +521,7 @@
       </section>
 
       <!-- 告警 -->
-      <section v-else class="section">
+      <section v-else-if="tab === 'issues'" class="section">
         <div class="ctx-head">
           <span class="hint inline">
             <template v-if="store.issueSummary">
@@ -535,6 +566,17 @@
           以及称呼漂移等 4 条软规则全部是本地比对，不花调用；软规则只出「待确认」，不拖低分数。
         </p>
       </section>
+
+      <!-- 问一问：带上下文提问；回答可以落成素材/灵感（批次三从独立对话页并进来） -->
+      <section v-else-if="tab === 'ask'" class="section ask-wrap">
+        <AskPanel
+          :work-id="store.work?.id || ''"
+          :work-title="store.work?.title || ''"
+          :node-title="store.node?.title || ''"
+          :node-content="draft"
+          :initial-conv="initialConv"
+        />
+      </section>
     </div>
 
     <GraphMap
@@ -555,12 +597,19 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
+import AskPanel from './AskPanel.vue'
 import GraphMap from './GraphMap.vue'
 import VersionDiff from './VersionDiff.vue'
 import { useStudioStore } from '../stores/studio'
 
 const props = defineProps({
   task: { type: Object, default: () => ({ task_type: 'article_draft', instruction: '' }) },
+  // 编辑器里未落盘的草稿：「问一问」附带本节时要发这一份，不是库里的旧正文
+  draft: { type: String, default: '' },
+  // 写作台 URL 的 ?panel=ask
+  initialTab: { type: String, default: '' },
+  // /chat/:id 老链接带过来的会话
+  initialConv: { type: String, default: '' },
 })
 const emit = defineEmits(['locate', 'restore'])
 
@@ -703,6 +752,33 @@ const graphCards = computed(() => store.graphData?.cards || [])
 const cardForm = ref({ kind: 'character', name: '', summary: '', status: '' })
 const graphOpen = ref(false)
 
+// 缩略图不跑力导向：那要量尺寸、还会抽帧抖一阵；环形定死位置就够看出密度和孤岛。
+// 两个上限（44 点 / 140 线）是为了不让 300px 宽的图变成一团黑。
+const THUMB_MAX = 44
+const thumbNodes = computed(() => {
+  const list = graphEntities.value.slice(0, THUMB_MAX)
+  const n = Math.max(1, list.length)
+  return list.map((e, i) => {
+    const a = (Math.PI * 2 * i) / n - Math.PI / 2
+    return {
+      id: e.id,
+      x: 150 + 64 * Math.cos(a),
+      y: 84 + 56 * Math.sin(a),
+      dead: e.status !== 'alive',
+    }
+  })
+})
+const thumbPos = computed(() => {
+  const out = {}
+  for (const n of thumbNodes.value) out[n.id] = n
+  return out
+})
+const thumbLinks = computed(() =>
+  graphRelations.value
+    .filter((r) => thumbPos.value[r.src_id] && thumbPos.value[r.dst_id])
+    .slice(0, 140),
+)
+
 // ---- 历史（版本） ----
 // 来源标签必须与库里的 source 枚举对齐：都是 ai_draft，作者得分清哪条是模型抽风
 const SOURCE_LABEL = { ai_draft: 'AI 草稿', ai_polish: 'AI 润色', human: '手改' }
@@ -782,10 +858,21 @@ const tabs = computed(() => {
     { id: 'context', label: '上下文', count: 0 },
     { id: 'versions', label: '历史', count: store.versions.length },
     { id: 'issues', label: '告警', count: store.issues.length },
+    // 问一问放最后：它是「写的时候顺嘴问一句」，不是素材侧栏的一部分
+    { id: 'ask', label: '问一问', count: 0 },
   ]
   // 单篇文档不建图，隐藏而不是置灰：多一个永远没数据的面板只会让人困惑
   return all.filter((t) => !t.novelOnly || store.isNovel)
 })
+
+// 写作台 URL 的 ?panel=ask 直达：放在 tabs 定义之后，immediate 时才不会碰到 TDZ
+watch(
+  () => props.initialTab,
+  (v) => {
+    if (v && tabs.value.some((t) => t.id === v)) tab.value = v
+  },
+  { immediate: true },
+)
 
 // 切作品时把三件套与记忆状态拉齐，否则 tab 上的计数会显示成 0，看着像没数据
 async function loadAll() {
@@ -1059,6 +1146,12 @@ defineExpose({ refreshContext })
   background: var(--panel);
   border-left: 1px solid var(--line-soft);
   min-height: 0;
+  transition: width 0.2s var(--ease);
+}
+/* 问一问要看长回答：三百像素的侧栏里读大段文字是刑具。
+   取 min(520px, 40vw)：宽屏够读，窄屏也不把正文挤没 */
+.panel.is-wide {
+  width: min(520px, 40vw);
 }
 .tabs {
   display: flex;
@@ -1088,7 +1181,7 @@ defineExpose({ refreshContext })
   color: var(--text-muted);
 }
 .tab.is-active {
-  color: var(--run);
+  color: var(--run-fg);
   border-bottom-color: var(--run);
 }
 .tab-count {
@@ -1100,6 +1193,15 @@ defineExpose({ refreshContext })
   flex: 1;
   overflow-y: auto;
   padding: 12px;
+}
+/* 问一问自己管滚动与间距，不套侧栏那圈 padding */
+.panel-body.is-ask {
+  padding: 0;
+  overflow: hidden;
+}
+.ask-wrap {
+  height: 100%;
+  gap: 0;
 }
 .section {
   display: flex;
@@ -1173,7 +1275,7 @@ defineExpose({ refreshContext })
   cursor: pointer;
 }
 .mini-btn:hover {
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(var(--over), 0.07);
   color: var(--danger);
 }
 .add-box {
@@ -1231,7 +1333,7 @@ defineExpose({ refreshContext })
   color: var(--text-faint);
 }
 .src-count.bad {
-  color: var(--warn);
+  color: var(--warn-fg);
 }
 .src-hits {
   display: flex;
@@ -1254,11 +1356,11 @@ defineExpose({ refreshContext })
   cursor: pointer;
 }
 .src-hit:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(var(--over), 0.06);
 }
 .src-hit-title {
   font-size: 11.5px;
-  color: var(--run);
+  color: var(--run-fg);
 }
 .src-hit-text {
   font-size: 11px;
@@ -1296,7 +1398,7 @@ defineExpose({ refreshContext })
 }
 .src-link {
   font-size: 10.5px;
-  color: var(--run);
+  color: var(--run-fg);
   word-break: break-all;
   text-decoration: none;
 }
@@ -1306,7 +1408,7 @@ defineExpose({ refreshContext })
   overflow: auto;
   padding: 8px;
   border-radius: 5px;
-  background: var(--ink-700, #1b1f26);
+  background: var(--hover);
   font-size: 11px;
   line-height: 1.65;
   color: var(--text-muted);
@@ -1376,9 +1478,9 @@ defineExpose({ refreshContext })
   gap: 3px;
   padding: 7px 8px;
   border: 1px solid var(--line-soft);
-  border-left: 2px solid rgba(217, 164, 91, 0.45);
+  border-left: 2px solid rgba(var(--run-rgb), 0.45);
   border-radius: 6px;
-  background: rgba(217, 164, 91, 0.035);
+  background: rgba(var(--run-rgb), 0.035);
 }
 .ev-head {
   display: flex;
@@ -1430,7 +1532,7 @@ defineExpose({ refreshContext })
 .bar {
   height: 4px;
   border-radius: 2px;
-  background: var(--ink-700, #1b1f26);
+  background: var(--hover);
   overflow: hidden;
 }
 .bar-fill {
@@ -1454,7 +1556,7 @@ defineExpose({ refreshContext })
   margin: 2px 0 0;
   font-size: 11.5px;
   line-height: 1.6;
-  color: var(--warn);
+  color: var(--warn-fg);
 }
 .raw {
   margin-top: 6px;
@@ -1483,6 +1585,52 @@ defineExpose({ refreshContext })
 }
 
 /* 图谱：实体按类型分组，状态用淡色标签，不抢主文的注意力 */
+/* 缩略图：一张定格的环，点开才渲染大图（力导向在 GraphMap 里） */
+.g-thumb {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-control);
+  background: var(--panel-2);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.18s var(--ease);
+}
+.g-thumb:hover {
+  border-color: var(--line-strong);
+}
+.g-thumb:focus-visible {
+  outline: 2px solid var(--run);
+  outline-offset: 1px;
+}
+.g-thumb-svg {
+  display: block;
+  width: 100%;
+  height: 116px;
+  background: radial-gradient(circle at 35% 25%, rgba(var(--info-rgb), 0.05), transparent 62%);
+}
+.g-thumb-link {
+  stroke: var(--line-strong);
+  stroke-width: 0.8;
+  opacity: 0.7;
+}
+.g-thumb-dot {
+  fill: var(--run);
+  opacity: 0.85;
+}
+.g-thumb-dot.is-dead {
+  fill: var(--text-faint);
+  opacity: 0.55;
+}
+.g-thumb-foot {
+  padding: 0 0 6px;
+  font-size: 10.5px;
+  text-align: center;
+  color: var(--text-faint);
+}
 .g-kind {
   margin: 10px 0 2px;
   font-size: 10.5px;
@@ -1506,10 +1654,10 @@ defineExpose({ refreshContext })
   flex-shrink: 0;
   padding: 0 5px;
   border-radius: 3px;
-  border: 1px solid rgba(214, 108, 96, 0.35);
+  border: 1px solid rgba(var(--clash-rgb), 0.35);
   font-size: 10px;
   line-height: 15px;
-  color: #d9705f;
+  color: var(--clash-fg);
 }
 .g-card-tag {
   margin-left: auto;
@@ -1517,8 +1665,8 @@ defineExpose({ refreshContext })
   width: 14px;
   height: 14px;
   border-radius: 3px;
-  border: 1px solid rgba(217, 164, 91, 0.45);
-  color: var(--run);
+  border: 1px solid rgba(var(--run-rgb), 0.45);
+  color: var(--run-fg);
   font-size: 9px;
   line-height: 12px;
   text-align: center;
@@ -1534,8 +1682,8 @@ defineExpose({ refreshContext })
 .g-rt {
   padding: 0 4px;
   border-radius: 3px;
-  background: rgba(217, 164, 91, 0.1);
-  color: var(--run);
+  background: rgba(var(--run-rgb), 0.1);
+  color: var(--run-fg);
   font-size: 10px;
 }
 .g-fs {
@@ -1561,7 +1709,7 @@ defineExpose({ refreshContext })
 .issue-ev {
   margin: 0;
   padding-left: 7px;
-  border-left: 2px solid rgba(214, 108, 96, 0.4);
+  border-left: 2px solid rgba(var(--clash-rgb), 0.4);
   font-size: 11.5px;
   line-height: 1.65;
   color: var(--text-faint);
@@ -1581,7 +1729,7 @@ defineExpose({ refreshContext })
 }
 /* 待确认的软规则：左边用中性色，不与硬告警抢注意力 */
 .issue.soft {
-  border-left: 2px solid rgba(126, 156, 247, 0.35);
+  border-left: 2px solid rgba(var(--info-rgb), 0.35);
 }
 .issue.soft .item-title {
   color: var(--text-muted);

@@ -269,7 +269,7 @@ function fmt(n) {
   transition: background-color 0.15s var(--ease), color 0.15s var(--ease);
 }
 .tree-all:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(var(--over), 0.08);
   color: var(--text);
 }
 .tree-add {
@@ -302,11 +302,11 @@ function fmt(n) {
   transition: background-color 0.15s var(--ease), color 0.15s var(--ease);
 }
 .tree-row:hover {
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(var(--over), 0.035);
   color: var(--text);
 }
 .tree-row.is-active {
-  background: rgba(217, 164, 91, 0.1);
+  background: rgba(var(--run-rgb), 0.1);
   color: var(--text);
 }
 .tree-row.is-active::before {
@@ -404,7 +404,7 @@ function fmt(n) {
   cursor: pointer;
 }
 .op:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(var(--over), 0.08);
   color: var(--text);
 }
 /* 到边了不是出错：置灰但保留占位，不然一行宽度会随悬停跳动 */

@@ -2487,7 +2487,13 @@ class StudioStore:
         return (cur.rowcount or 0) > 0
 
     async def list_jobs(self, *, work_id: str = "", status: str = "",
-                        limit: int = 100) -> list[dict[str, Any]]:
+                        limit: int = 100, newest: bool = False) -> list[dict[str, Any]]:
+        """任务列表。
+
+        默认按队列顺序（priority 高的先、同优先级按入队时间）——那是 worker 领活的顺序；
+        `newest=True` 换成按更新时间倒序，给控制台的「刚刚发生了什么」用：
+        只拿前 N 条队列顺序的话，任务一多，最新的反而永远看不到。
+        """
         assert self._db is not None
         sql = "SELECT * FROM jobs WHERE 1 = 1"
         params: list[Any] = []
@@ -2497,7 +2503,10 @@ class StudioStore:
         if status:
             sql += " AND status = ?"
             params.append(status)
-        sql += " ORDER BY priority DESC, created_at ASC, rowid ASC LIMIT ?"
+        if newest:
+            sql += " ORDER BY updated_at DESC, rowid DESC LIMIT ?"
+        else:
+            sql += " ORDER BY priority DESC, created_at ASC, rowid ASC LIMIT ?"
         params.append(max(1, min(limit, _MAX_LIMIT)))
         async with self._lock:
             cur = await self._db.execute(sql, params)

@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     cdp_stream: bool = True
     # 流式空闲超时（秒）：超过该时间没有新数据则结束本次读取
     stream_idle_timeout: float = 60.0
-    # 允许的浏览器来源（逗号分隔）；`*` 表示全部放行。不等时只放行本机与 5173 开发端口
+    # 允许的浏览器来源（逗号分隔）；`*` 表示全部放行。不等时只放行本机与 5273 开发端口
     allow_origins: str = ""
 
     def resolved_storage_dir(self) -> Path:

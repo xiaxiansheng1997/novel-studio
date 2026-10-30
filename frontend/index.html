@@ -3,6 +3,20 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <script>
+    // 首帧防闪：CSS 变量生效前先把 data-theme 定下来。
+    // 主题 id 与 src/utils/theme.js 的 THEMES 必须一致，改一边记得改另一边。
+    (function () {
+      var known = ['ink', 'paper', 'sage', 'slate']
+      // 禁站点数据的浏览器里 localStorage 直接抛；这段脚本挂了首帧就没主题了，兜住
+      var saved = null
+      try { saved = localStorage.getItem('w2a_theme') } catch (e) {}
+      var id = saved === 'dark' ? 'ink' : known.indexOf(saved) >= 0 ? saved : 'ink'
+      var root = document.documentElement
+      root.dataset.theme = id
+      root.classList.toggle('dark', id === 'ink')
+    })()
+  </script>
   <meta name="theme-color" content="#0B0C0F" />
   <meta name="description" content="Novel Studio · 长篇连载与单篇文档的写作工作台" />
   <title>Novel Studio · 写作台</title>

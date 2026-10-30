@@ -5,37 +5,34 @@ export default {
   theme: {
     extend: {
       colors: {
-        // 墨色分层：近黑到抬升，写作时长时间注视不刺眼
+        // 色名一律转成 CSS 变量：单一来源，主题切换只改变量值，不再维护第二份 hex。
+        // 代价是这些色名不能用 Tailwind 的透明度修饰符（如 bg-ink-900/50）—— 全仓已核，无人这么写。
         ink: {
-          950: '#0B0C0F',
-          900: '#111318',
-          800: '#15181E',
-          700: '#1B1F26',
-          600: '#22262F',
-          500: '#2A2F39',
+          950: 'var(--bg)',
+          900: 'var(--canvas)',
+          800: 'var(--panel-2)',
+          700: 'var(--hover)',
+          600: 'var(--panel-3)',
+          500: 'var(--panel-4)',
         },
-        // 描边：soft 同层分隔，DEFAULT 卡片，strong 聚焦/悬浮
         line: {
-          soft: '#1A1E25',
-          DEFAULT: '#262B34',
-          strong: '#363C48',
+          soft: 'var(--line-soft)',
+          DEFAULT: 'var(--line)',
+          strong: 'var(--line-strong)',
         },
-        // 文字：暖白而不是纯白，降低蓝光刺激
         txt: {
-          DEFAULT: '#ECE9E4',
-          muted: '#A9A6A0',
-          faint: '#6F6C67',
+          DEFAULT: 'var(--text)',
+          muted: 'var(--text-muted)',
+          faint: 'var(--text-faint)',
         },
-        // 主色：墨金。写作工具要安静、有质感，不用荧光绿
         run: {
-          DEFAULT: '#D9A45B',
-          dim: '#B8863F',
-          soft: 'rgba(217, 164, 91, 0.12)',
+          DEFAULT: 'var(--run)',
+          dim: 'var(--run-dim)',
         },
-        info: '#7E9CF7',
-        iris: '#9B8CF0',
-        warn: '#E0A44A',
-        danger: '#E47878',
+        info: 'var(--info)',
+        iris: 'var(--iris)',
+        warn: 'var(--warn)',
+        danger: 'var(--danger)',
       },
       fontFamily: {
         sans: ['Inter', '"Segoe UI"', 'system-ui', '"Microsoft YaHei"', 'sans-serif'],
@@ -49,9 +46,9 @@ export default {
         stage: '16px',
       },
       boxShadow: {
-        card: 'inset 0 1px 0 rgba(255,255,255,0.03), 0 24px 48px -32px rgba(0,0,0,0.9)',
-        pop: '0 18px 40px -16px rgba(0,0,0,0.85)',
-        focus: '0 0 0 2px rgba(217,164,91,0.32)',
+        card: 'var(--shadow-card)',
+        pop: 'var(--shadow-pop)',
+        focus: 'var(--ring)',
       },
     },
   },

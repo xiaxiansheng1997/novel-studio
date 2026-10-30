@@ -11,7 +11,7 @@
 
         <p class="key-hint">
           服务端设置了 <code>W2A_API_KEY</code> 时填写；保存后所有
-          <code>/v1</code>、<code>/admin</code>、<code>/live</code> 请求都会带上
+          <code>/v1</code>、<code>/admin</code> 请求（含画面推送的 WebSocket）都会带上
           <code>Authorization: Bearer</code>。服务端没设口令就留空。
         </p>
 
@@ -127,7 +127,7 @@ function clearKey() {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(3, 6, 11, 0.68);
+  background: var(--overlay);
   backdrop-filter: blur(3px);
 }
 .key-box {
@@ -136,7 +136,7 @@ function clearKey() {
   border: 1px solid var(--line);
   border-radius: var(--radius-panel);
   background: var(--panel);
-  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 22px 60px rgba(var(--shade-rgb), 0.55);
 }
 .key-head {
   display: flex;
@@ -192,7 +192,7 @@ function clearKey() {
   padding: 0 11px;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  background: #111318;
+  background: var(--panel);
   color: var(--text);
   font-family: theme('fontFamily.mono');
   font-size: 12.5px;
@@ -208,7 +208,7 @@ function clearKey() {
   color: var(--run);
 }
 .key-msg.is-bad {
-  color: #fca5a5;
+  color: var(--danger-fg);
 }
 .key-foot {
   display: flex;
@@ -234,12 +234,12 @@ function clearKey() {
   border-color: var(--line-strong);
 }
 .key-btn.primary {
-  border-color: rgba(217, 164, 91, 0.4);
-  background: rgba(217, 164, 91, 0.14);
-  color: #e8c48a;
+  border-color: rgba(var(--run-rgb), 0.4);
+  background: rgba(var(--run-rgb), 0.14);
+  color: var(--run-fg);
 }
 .key-btn.primary:hover:not(:disabled) {
-  background: rgba(217, 164, 91, 0.22);
+  background: rgba(var(--run-rgb), 0.22);
 }
 .key-btn:disabled {
   opacity: 0.55;

@@ -1,12 +1,15 @@
 <template>
   <Transition name="alert-fade">
-    <div v-if="current" class="alert-banner" :class="'level-' + (current.level || 'warn')" role="alert">
+    <div v-if="current"
+         class="alert-banner"
+         :class="'level-' + (current.level || 'warn')"
+         role="alert">
       <AppIcon name="alert" :size="16" class="alert-icon" />
       <div class="alert-body">
         <span class="alert-title">{{ title }}</span>
         <span class="alert-msg">{{ current.message }}</span>
       </div>
-      <router-link class="alert-action" to="/live" @click="dismiss">去处理</router-link>
+      <router-link class="alert-action" :to="actionTo" @click="dismiss">去处理</router-link>
       <button class="alert-close" type="button" aria-label="关闭告警" @click="dismiss">
         <AppIcon name="x" :size="13" />
       </button>
@@ -40,6 +43,13 @@ const title = computed(() => {
   const label = KIND_LABEL[current.value.kind] || '运行告警'
   return current.value.provider ? `${current.value.provider} · ${label}` : label
 })
+
+// 「去处理」直达控制台的浏览器 tab，并把告警里的 provider 带上
+// （以前指向独立的 /live，那条路由现在重定向到同一个位置）
+const actionTo = computed(() => ({
+  path: '/admin',
+  query: { tab: 'live', ...(current.value?.provider ? { provider: current.value.provider } : {}) },
+}))
 
 function connect() {
   if (es) {
@@ -103,20 +113,20 @@ onUnmounted(() => {
   width: min(720px, calc(100vw - 100px));
   padding: 10px 12px;
   border-radius: 12px;
-  border: 1px solid rgba(250, 204, 21, 0.45);
-  background: rgba(41, 33, 8, 0.92);
+  border: 1px solid rgba(var(--spark-rgb), 0.45);
+  background: var(--toast-warn);
   backdrop-filter: blur(8px);
-  box-shadow: 0 18px 48px -20px rgba(0, 0, 0, 0.9);
-  color: #fde68a;
+  box-shadow: 0 18px 48px -20px rgba(var(--shade-rgb), 0.9);
+  color: var(--spark-fg);
 }
 .alert-banner.level-error {
-  border-color: rgba(248, 113, 113, 0.5);
-  background: rgba(45, 16, 16, 0.92);
-  color: #fecaca;
+  border-color: rgba(var(--alert-rgb), 0.5);
+  background: var(--toast-err);
+  color: var(--danger-fg-hv);
 }
 .alert-banner.level-info {
   border-color: var(--line-strong);
-  background: rgba(12, 18, 27, 0.92);
+  background: var(--toast-info);
   color: var(--text-muted);
 }
 .alert-icon {

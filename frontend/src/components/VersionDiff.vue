@@ -134,7 +134,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(5, 6, 8, 0.66);
+  background: var(--overlay);
 }
 .dlg {
   width: min(1080px, 100%);
@@ -144,7 +144,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   border: 1px solid var(--line);
   border-radius: var(--radius-panel);
   background: var(--panel);
-  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.9);
+  box-shadow: 0 32px 80px -32px rgba(var(--shade-rgb), 0.9);
   overflow: hidden;
 }
 .dlg-head {
@@ -169,10 +169,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   color: var(--text);
 }
 .v-src {
-  border: 1px solid rgba(217, 164, 91, 0.38);
+  border: 1px solid rgba(var(--run-rgb), 0.38);
   border-radius: 999px;
-  background: rgba(217, 164, 91, 0.12);
-  color: #e8c48d;
+  background: rgba(var(--run-rgb), 0.12);
+  color: var(--run-fg);
   font-size: 11px;
   font-weight: 500;
   line-height: 1;
@@ -272,12 +272,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   color: var(--text-faint);
 }
 .ln.add {
-  border-left: 2px solid rgba(126, 156, 247, 0.55);
-  background: rgba(126, 156, 247, 0.09);
+  border-left: 2px solid rgba(var(--info-rgb), 0.55);
+  background: rgba(var(--info-rgb), 0.09);
 }
 .ln.del {
-  border-left: 2px solid rgba(228, 120, 120, 0.5);
-  background: rgba(228, 120, 120, 0.08);
+  border-left: 2px solid rgba(var(--danger-rgb), 0.5);
+  background: rgba(var(--danger-rgb), 0.08);
   color: var(--text-muted);
 }
 .dlg-foot {

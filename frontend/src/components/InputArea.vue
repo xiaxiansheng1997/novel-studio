@@ -96,7 +96,7 @@ defineExpose({ setText, focus: () => textareaEl.value?.focus() })
 <style scoped>
 .composer-area {
   padding: 10px 20px 14px;
-  background: linear-gradient(180deg, rgba(11, 12, 15, 0) 0%, #0b0c0f 42%);
+  background: linear-gradient(180deg, rgba(var(--shade-rgb), 0) 0%, var(--bg) 42%);
 }
 .composer {
   display: flex;
@@ -108,8 +108,8 @@ defineExpose({ setText, focus: () => textareaEl.value?.focus() })
   padding: 8px 8px 8px 14px;
   border-radius: 16px;
   border: 1px solid var(--line);
-  background: #0c121b;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 18px 40px -28px rgba(0, 0, 0, 0.9);
+  background: var(--panel);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 18px 40px -28px rgba(var(--shade-rgb), 0.9);
   transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
 }
 .composer-main {
@@ -125,11 +125,11 @@ defineExpose({ setText, focus: () => textareaEl.value?.focus() })
   padding: 0 2px 1px;
 }
 .composer:focus-within {
-  border-color: rgba(217, 164, 91, 0.55);
+  border-color: rgba(var(--run-rgb), 0.55);
   box-shadow: var(--ring), inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 .composer.is-streaming {
-  border-color: rgba(217, 164, 91, 0.28);
+  border-color: rgba(var(--run-rgb), 0.28);
 }
 textarea {
   flex: 1;
@@ -166,25 +166,25 @@ textarea::placeholder {
 }
 .send-btn {
   background: var(--run);
-  color: #04120a;
+  color: var(--accent-ink);
 }
 .send-btn:hover {
   background: var(--run-dim);
-  color: #fff;
+  color: var(--accent-ink);
 }
 .send-btn:disabled {
-  background: #16202d;
-  color: #4d5b70;
+  background: var(--panel-3);
+  color: var(--text-faint);
   cursor: not-allowed;
 }
 .stop-btn {
-  border-color: rgba(248, 113, 113, 0.45);
-  background: rgba(248, 113, 113, 0.12);
-  color: #fca5a5;
+  border-color: rgba(var(--alert-rgb), 0.45);
+  background: rgba(var(--alert-rgb), 0.12);
+  color: var(--danger-fg);
 }
 .stop-btn:hover {
-  background: rgba(248, 113, 113, 0.2);
-  color: #fecaca;
+  background: rgba(var(--alert-rgb), 0.2);
+  color: var(--danger-fg-hv);
 }
 .composer-hint {
   display: flex;
@@ -205,7 +205,7 @@ textarea::placeholder {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: #e8c48a;
+  color: var(--run-fg);
 }
 @media (max-width: 720px) {
   .composer-area {

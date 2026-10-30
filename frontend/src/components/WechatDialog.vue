@@ -352,7 +352,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(5, 6, 8, 0.66);
+  background: var(--overlay);
 }
 .dlg {
   width: min(960px, 100%);
@@ -362,7 +362,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   border: 1px solid var(--line);
   border-radius: var(--radius-stage, 16px);
   background: var(--panel);
-  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.9);
+  box-shadow: 0 32px 80px -32px rgba(var(--shade-rgb), 0.9);
 }
 .dlg-head {
   display: flex;
@@ -401,7 +401,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   cursor: pointer;
 }
 .x:hover {
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(var(--over), 0.07);
   color: var(--text);
 }
 .dlg-body {
@@ -463,10 +463,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 .badge {
   padding: 0 5px;
   border-radius: 8px;
-  background: rgba(214, 108, 96, 0.18);
+  background: rgba(var(--clash-rgb), 0.18);
   font-size: 10px;
   line-height: 15px;
-  color: #d9705f;
+  color: var(--clash-fg);
 }
 .txt {
   margin: 0;
@@ -514,7 +514,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   color: var(--text-muted);
 }
 .checks li.warn {
-  border-left-color: rgba(214, 108, 96, 0.55);
+  border-left-color: rgba(var(--clash-rgb), 0.55);
   color: var(--text);
 }
 .msg {
@@ -602,7 +602,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
   margin-right: 5px;
   padding: 0 4px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(var(--over), 0.08);
   font-size: 10px;
   color: var(--text-faint);
 }

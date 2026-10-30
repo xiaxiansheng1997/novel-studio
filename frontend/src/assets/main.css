@@ -8,6 +8,17 @@
    原则：用「底色分层 + 1px 描边」建立纵深，不堆阴影；
         暖白文字 + 墨金主色，长时间写作不刺眼；文字对比度 ≥ 4.5:1
    ============================================================ */
+/* 墨夜是基线：写在 :root 上，全站四个页面（写作 / 对话 / 浏览器 / 管理）都跟主题，
+   另外三套主题在下面各自的 :root[data-theme] 块里覆盖。
+
+   token 契约（改值前先量对比，别只靠眼睛看）：
+   · 文本三档 text / text-muted / text-faint 得在每一档面板底（bg、canvas、panel、panel-2、
+     panel-3、code-bg、hl-bg）上都 ≥ 4.5:1 —— 最容易踩雷的是弱文字，它偏偏常落在最深的底上
+   · 语义前景（*-fg、--teal）只允许出现在 bg / canvas / panel / panel-2，以及自己 12% 叠底；
+     要往 --panel-3 及更深的层放彩色小字，先量
+   · 填充与描边用 --run / --run-rgb，文字一律 --run-fg；实色按钮上的字用 --accent-ink
+   · 亮主题的 *-hv 比基色更暗，墨夜的更亮 —— 方向反了等于 hover 没反馈
+   实测（四套主题 × 契约内全部组合）：正文 9.0–17.9、次级 6.0–9.3、弱文字 4.7–6.8 */
 :root {
   --bg: #0b0c0f;
   --panel: #111318;
@@ -17,21 +28,274 @@
   --line-strong: #363c48;
   --text: #ece9e4;
   --text-muted: #a9a6a0;
-  --text-faint: #6f6c67;
+  /* 弱文字的下限：得在最深那一档面板底（--panel-3）上也撑住 4.5:1，
+     不能只对着页面底算 —— 改之前先跑 .tmp_patch 那类对比度脚本量一遍 */
+  --text-faint: #918f89;
   --run: #d9a45b;
   --run-dim: #b8863f;
   --info: #7e9cf7;
   --iris: #9b8cf0;
   --warn: #e0a44a;
   --danger: #e47878;
+  /* ---------- 分层底色与主色分量（主题化用，值必须等于上面写死的色） ---------- */
+  --canvas: #111318;
+  --hover: #1b1f26;
+  --panel-3: #22262f;
+  --panel-4: #2a2f39;
+  --over: 255, 255, 255;
+  --run-rgb: 217, 164, 91;
+  --info-rgb: 126, 156, 247;
+  --iris-rgb: 155, 140, 240;
+  --warn-rgb: 224, 164, 74;
+  --danger-rgb: 228, 120, 120;
+  --overlay: rgba(5, 6, 8, 0.66);
+  --shade-rgb: 0, 0, 0;
+  --scrim: rgba(17, 19, 24, 0.7);
+  --scrim-raised: rgba(17, 19, 24, 0.8);
+  --alert-rgb: 248, 113, 113;
+  --spark-rgb: 250, 204, 21;
+  --spark-fg: #fde68a;
+  --spark-fg-hv: #fef3c7;
+  --sky-rgb: 56, 189, 248;
+  --sky-fg: #bae6fd;
+  --clash-rgb: 214, 108, 96;
+  --clash-fg: #d9705f;
+  --bad-rgb: 217, 107, 107;
+  --danger-fg-hv: #fecaca;
+  --toast-warn: rgba(41, 33, 8, 0.92);
+  --toast-err: rgba(45, 16, 16, 0.92);
+  --toast-info: rgba(12, 18, 27, 0.92);
+  --teal: #58b09a;
+  --dead-link: #5a4444;
+  --accent-ink: #0b0c0f;
+  --sel-fg: #f8fafc;
+  --run-fg: #e8c48d;
+  --info-fg: #7dd3fc;
+  --iris-fg: #d6c7f5;
+  --warn-fg: #fcd34d;
+  --danger-fg: #fca5a5;
+  --code-bg: #0a0b0e;
+  --code-border: #262b34;
+  --hl-bg: #15181e;
+  --scroll: #2a2f39;
+  --scroll-hover: #3a404c;
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 24px 48px -32px rgba(0, 0, 0, 0.9);
+  --shadow-pop: 0 18px 40px -16px rgba(0, 0, 0, 0.85);
+  --shadow-lg: 0 32px 80px -32px rgba(0, 0, 0, 0.9);
+  --shadow-sm: 0 8px 24px rgba(0, 0, 0, 0.32);
   --radius-control: 8px;
   --radius-panel: 12px;
+  /* 弹窗这种大块面：对话框组件都在引用它，之前漏了定义，圆角一直没生效 */
+  --radius-stage: 16px;
   --ring: 0 0 0 2px rgba(217, 164, 91, 0.32);
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 
+/* ---------- 暖笺：米色纸面，白天写长文 ----------
+   对比度：正文 9.9–13.8、次级 6.7–9.3、弱文字 4.9–6.8（对全部面板档，最低值在 --panel-3） */
+:root[data-theme='paper'] {
+  --bg: #f1e8d8;
+  --canvas: #fdf8ef;
+  --panel: #f6efe3;
+  --panel-2: #ece0cd;
+  --hover: #e2d3bb;
+  --panel-3: #e2d3bb;
+  --panel-4: #d6c4a8;
+  --line: #ddceb4;
+  --line-soft: #e9dcc6;
+  --line-strong: #c6b394;
+  --text: #2e2823;
+  --text-muted: #4a4239;
+  --text-faint: #5f564b;
+  --run: #8c5d20;
+  --run-dim: #6f4a19;
+  --info: #3d62b8;
+  --iris: #6a54c0;
+  --warn: #a97416;
+  --danger: #b4483c;
+  --over: 46, 40, 35;
+  --run-rgb: 140, 93, 32;
+  --info-rgb: 61, 98, 184;
+  --iris-rgb: 106, 84, 192;
+  --warn-rgb: 169, 116, 22;
+  --danger-rgb: 180, 72, 60;
+  --overlay: rgba(46, 40, 35, 0.42);
+  --shade-rgb: 88, 66, 38;
+  --scrim: rgba(246, 239, 227, 0.72);
+  --scrim-raised: rgba(246, 239, 227, 0.86);
+  --alert-rgb: 190, 80, 70;
+  --spark-rgb: 178, 128, 14;
+  --spark-fg: #71550c;
+  --spark-fg-hv: #6f5008;
+  --sky-rgb: 34, 100, 158;
+  --sky-fg: #215d8b;
+  --clash-rgb: 176, 82, 60;
+  --clash-fg: #904232;
+  --bad-rgb: 176, 72, 64;
+  --danger-fg-hv: #86342c;
+  --toast-warn: rgba(250, 240, 214, 0.95);
+  --toast-err: rgba(250, 228, 224, 0.95);
+  --toast-info: rgba(244, 239, 230, 0.95);
+  --teal: #2b6d5c;
+  --dead-link: #b98f8f;
+  --accent-ink: #fdf8ef;
+  --sel-fg: #2e2823;
+  --run-fg: #794f17;
+  --info-fg: #2c4a94;
+  --iris-fg: #5b48a8;
+  --warn-fg: #78530f;
+  --danger-fg: #983b31;
+  --code-bg: #f4ecdd;
+  --code-border: #e4d5bd;
+  --hl-bg: #f6ead2;
+  --scroll: #cdbea4;
+  --scroll-hover: #b6a488;
+  --ring: 0 0 0 2px rgba(140, 93, 32, 0.32);
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 16px 32px -24px rgba(76, 60, 36, 0.3);
+  --shadow-pop: 0 18px 40px -16px rgba(76, 60, 36, 0.26);
+  --shadow-lg: 0 32px 80px -32px rgba(76, 60, 36, 0.35);
+  --shadow-sm: 0 8px 24px rgba(76, 60, 36, 0.18);
+  color-scheme: light;
+}
+
+/* ---------- 松间：低亮度绿底，最省力 ---------- */
+:root[data-theme='sage'] {
+  --bg: #d9e3d7;
+  --canvas: #f2f6f0;
+  --panel: #e4ebe2;
+  --panel-2: #d3dece;
+  --hover: #c8d5c4;
+  --panel-3: #c8d5c4;
+  --panel-4: #bcccc7;
+  --line: #bdccba;
+  --line-soft: #cedeca;
+  --line-strong: #a4b7a2;
+  --text: #25302a;
+  --text-muted: #3f4b44;
+  --text-faint: #4e5a52;
+  --run: #3d6446;
+  --run-dim: #2f4d37;
+  --info: #3c66ae;
+  --iris: #6152b4;
+  --warn: #8a6a1c;
+  --danger: #b04b46;
+  --over: 37, 48, 42;
+  --run-rgb: 61, 100, 70;
+  --info-rgb: 60, 102, 174;
+  --iris-rgb: 97, 82, 180;
+  --warn-rgb: 138, 106, 28;
+  --danger-rgb: 176, 75, 70;
+  --overlay: rgba(37, 48, 42, 0.4);
+  --shade-rgb: 40, 60, 46;
+  --scrim: rgba(228, 235, 226, 0.72);
+  --scrim-raised: rgba(228, 235, 226, 0.86);
+  --alert-rgb: 176, 75, 70;
+  --spark-rgb: 138, 106, 28;
+  --spark-fg: #6a5012;
+  --spark-fg-hv: #523d0c;
+  --sky-rgb: 34, 96, 146;
+  --sky-fg: #1e5982;
+  --clash-rgb: 164, 78, 60;
+  --clash-fg: #8a3e37;
+  --bad-rgb: 168, 68, 62;
+  --danger-fg-hv: #7f322f;
+  --toast-warn: rgba(240, 234, 208, 0.95);
+  --toast-err: rgba(240, 224, 220, 0.95);
+  --toast-info: rgba(228, 236, 228, 0.95);
+  --teal: #296859;
+  --dead-link: #a89a90;
+  --accent-ink: #f2f6f0;
+  --sel-fg: #25302a;
+  /* 得在「绿调叠底」上也撑住 4.5:1：.pill--on 是 run 12% 压进 --panel-2，
+     底色比纯 --panel-2 更暗一档，#3a5f41 在这种底上只有 4.47 */
+  --run-fg: #345640;
+  --info-fg: #2c4f88;
+  --iris-fg: #4d3f96;
+  --warn-fg: #6a5012;
+  --danger-fg: #8f3a36;
+  --code-bg: #dce5d9;
+  --code-border: #cbdac7;
+  --hl-bg: #dcead5;
+  --scroll: #b9c8b6;
+  --scroll-hover: #a2b5a0;
+  --ring: 0 0 0 2px rgba(61, 100, 70, 0.32);
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 16px 32px -24px rgba(35, 56, 42, 0.28);
+  --shadow-pop: 0 18px 40px -16px rgba(35, 56, 42, 0.24);
+  --shadow-lg: 0 32px 80px -32px rgba(35, 56, 42, 0.32);
+  --shadow-sm: 0 8px 24px rgba(35, 56, 42, 0.16);
+  color-scheme: light;
+}
+
+/* ---------- 素白：亮环境 / 投影演示，对比度最高 ---------- */
+:root[data-theme='slate'] {
+  --bg: #eceef2;
+  --canvas: #ffffff;
+  --panel: #f7f8fa;
+  --panel-2: #eef1f5;
+  --hover: #e4e8ef;
+  --panel-3: #e4e8ef;
+  --panel-4: #d6dce6;
+  --line: #d8dee8;
+  --line-soft: #e6ebf2;
+  --line-strong: #c1cad8;
+  --text: #0f172a;
+  --text-muted: #475569;
+  --text-faint: #4f5d72;
+  --run: #7f5615;
+  --run-dim: #6b4711;
+  --info: #3455b0;
+  --iris: #5b4ac0;
+  --warn: #96650f;
+  --danger: #c0392f;
+  --over: 15, 23, 42;
+  --run-rgb: 127, 86, 21;
+  --info-rgb: 52, 85, 176;
+  --iris-rgb: 91, 74, 192;
+  --warn-rgb: 150, 101, 15;
+  --danger-rgb: 192, 57, 47;
+  --overlay: rgba(15, 23, 42, 0.4);
+  --shade-rgb: 15, 23, 42;
+  --scrim: rgba(247, 248, 250, 0.75);
+  --scrim-raised: rgba(247, 248, 250, 0.9);
+  --alert-rgb: 180, 60, 52;
+  --spark-rgb: 150, 101, 15;
+  --spark-fg: #6f4b0c;
+  --spark-fg-hv: #56390a;
+  --sky-rgb: 30, 100, 168;
+  --sky-fg: #1b5c8c;
+  --clash-rgb: 176, 72, 56;
+  --clash-fg: #a04030;
+  --bad-rgb: 180, 58, 50;
+  --danger-fg-hv: #8f2820;
+  --toast-warn: rgba(255, 248, 224, 0.96);
+  --toast-err: rgba(255, 235, 232, 0.96);
+  --toast-info: rgba(241, 244, 249, 0.96);
+  --teal: #2a7665;
+  --dead-link: #c4a2a2;
+  --accent-ink: #ffffff;
+  --sel-fg: #0f172a;
+  --run-fg: #7a5214;
+  --info-fg: #26418c;
+  --iris-fg: #4b3a9e;
+  --warn-fg: #6f4b0c;
+  --danger-fg: #a32e26;
+  --code-bg: #f1f4f9;
+  --code-border: #e0e6ee;
+  --hl-bg: #e8f0fe;
+  --scroll: #c5cedb;
+  --scroll-hover: #aab6c6;
+  --ring: 0 0 0 2px rgba(127, 86, 21, 0.3);
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 16px 32px -24px rgba(15, 23, 42, 0.18);
+  --shadow-pop: 0 18px 40px -16px rgba(15, 23, 42, 0.2);
+  --shadow-lg: 0 32px 80px -32px rgba(15, 23, 42, 0.25);
+  --shadow-sm: 0 8px 24px rgba(15, 23, 42, 0.12);
+  color-scheme: light;
+}
+
 @layer base {
   html {
+    /* 墨夜是基线，另外三套在各自的 :root[data-theme] 块里覆盖成 light（不在层里，优先级高于本条） */
     color-scheme: dark;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
@@ -51,8 +315,8 @@
     line-height: 1.6;
   }
   ::selection {
-    background: rgba(217, 164, 91, 0.28);
-    color: #f8fafc;
+    background: rgba(var(--run-rgb), 0.28);
+    color: var(--sel-fg);
   }
   :focus-visible {
     outline: none;
@@ -102,14 +366,14 @@
     @apply border-run-dim bg-run-dim text-ink-950;
   }
   .btn-danger {
-    border-color: rgba(248, 113, 113, 0.45);
-    background: rgba(248, 113, 113, 0.1);
-    color: #fca5a5;
+    border-color: rgba(var(--danger-rgb), 0.45);
+    background: rgba(var(--danger-rgb), 0.1);
+    color: var(--danger-fg);
   }
   .btn-danger:hover {
-    border-color: rgba(248, 113, 113, 0.7);
-    background: rgba(248, 113, 113, 0.18);
-    color: #fecaca;
+    border-color: rgba(var(--danger-rgb), 0.7);
+    background: rgba(var(--danger-rgb), 0.18);
+    color: var(--danger-fg);
   }
   .btn-sm {
     height: 28px;
@@ -180,22 +444,22 @@
     white-space: nowrap;
   }
   .pill--on {
-    border-color: rgba(217, 164, 91, 0.38);
-    background: rgba(217, 164, 91, 0.12);
-    color: #e8c48d;
+    border-color: rgba(var(--run-rgb), 0.38);
+    background: rgba(var(--run-rgb), 0.12);
+    color: var(--run-fg);
   }
   .pill--off {
     @apply border-line bg-ink-800 text-txt-faint;
   }
   .pill--warn {
-    border-color: rgba(245, 158, 11, 0.35);
-    background: rgba(245, 158, 11, 0.1);
-    color: #fcd34d;
+    border-color: rgba(var(--warn-rgb), 0.35);
+    background: rgba(var(--warn-rgb), 0.1);
+    color: var(--warn-fg);
   }
   .pill--info {
-    border-color: rgba(56, 189, 248, 0.35);
-    background: rgba(56, 189, 248, 0.1);
-    color: #7dd3fc;
+    border-color: rgba(var(--info-rgb), 0.35);
+    background: rgba(var(--info-rgb), 0.1);
+    color: var(--info-fg);
   }
 
   /* ---------- 其他 ---------- */
@@ -208,6 +472,19 @@
     @apply rounded-md border border-line-soft bg-ink-800 px-2 py-0.5 text-[11px] text-txt-muted;
     font-family: theme('fontFamily.mono');
   }
+  /* 只给读屏看的文本：色点只有颜色，没有文字标签 */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
   .skip-link {
     @apply fixed left-4 top-4 z-50 rounded-control bg-run px-3 py-2 text-sm font-semibold text-ink-950;
     transform: translateY(-200%);
@@ -227,7 +504,7 @@
   }
   .status-dot.on {
     background: var(--run);
-    box-shadow: 0 0 0 3px rgba(217, 164, 91, 0.15);
+    box-shadow: 0 0 0 3px rgba(var(--run-rgb), 0.15);
   }
   .status-dot.off {
     background: var(--danger);
@@ -246,13 +523,13 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a2f39;
+  background: var(--scroll);
   border-radius: 8px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a404c;
+  background: var(--scroll-hover);
   background-clip: content-box;
 }
 
@@ -272,7 +549,7 @@
   margin: 0.45em 0;
 }
 .prose-chat pre {
-  background: #0a0b0e;
+  background: var(--code-bg);
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 12px 14px;
@@ -284,11 +561,11 @@
   font-size: 0.88em;
 }
 .prose-chat :not(pre) > code {
-  background: #1e222a;
-  border: 1px solid var(--line-soft);
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
   padding: 1px 6px;
   border-radius: 5px;
-  color: #d6c7f5;
+  color: var(--iris-fg);
 }
 .prose-chat ul,
 .prose-chat ol {
@@ -317,13 +594,13 @@
   text-align: left;
 }
 .prose-chat th {
-  background: #15181e;
+  background: var(--hl-bg);
   font-weight: 600;
 }
 .prose-chat a {
   color: var(--info);
   text-decoration: none;
-  border-bottom: 1px solid rgba(56, 189, 248, 0.35);
+  border-bottom: 1px solid rgba(var(--info-rgb), 0.35);
 }
 .prose-chat a:hover {
   border-bottom-color: var(--info);
@@ -391,7 +668,7 @@
   position: absolute;
   top: 8px;
   right: 8px;
-  background: #1e222a;
+  background: var(--code-bg);
   border: 1px solid var(--line);
   border-radius: 6px;
   color: var(--text-muted);
