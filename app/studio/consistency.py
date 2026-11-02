@@ -354,7 +354,8 @@ async def run_checks(
     from app.studio import content_types
 
     resolved = resolved or content_types.resolve(
-        work.get("kind") or "article", work.get("scale") or "", work.get("subtype") or "")
+        work.get("kind") or "article", work.get("scale") or "", work.get("subtype") or "",
+        work.get("channel") or "")
     is_novel = (work.get("kind") or "article") == "novel"
     rules = set(resolved.get("checks") or [])
     found: list[dict] = []

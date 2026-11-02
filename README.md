@@ -216,8 +216,18 @@ exe 上跑它们时没通过还会弹一个框。
 
 `content-types.yaml`（`kinds → scales → subtypes` 三层合并；预算、启用的上下文桶、层级、`checks`/`checks_append`），
 **新增文种不改代码**；改完调 `POST /studio/content-types/reload` 立即生效，前端下拉框的数据源是 `GET /studio/content-types`。
+
+同文件的顶层 `channels` 是与文种**正交**的第二个维度：文种管「写什么」，渠道管「发到哪」（公众号要短段与配图位，
+知乎要结论先行，小红书要开头三行给利益点）。「历史 + 公众号」不再需要在两者间二选一。渠道的写法在 S1 里单独成段、
+带「平台要求（公众号）：」前缀——它说「发到哪」，文体要求说「写什么领域」，拼成一句时模型会拿其中一条把另一条顶掉；
+`label`/预算/层级仍归文种管，`checks_append` 与文种合并去重，字数与段落节奏则由渠道决定。第三个维度是文风
+（`works.style_json` 与文风画像），三者合起来才是「这一篇怎么写」。
+
 启动时按它覆盖库内内置模板（`is_builtin=1`），用户自建模板不动；写坏了不会让服务起不来（解析失败回落内置兜底，接口返回里带 `error`）。
-约定见 `docs/content-types.md`。
+**模板库在控制台的「配置」页维护**（新建 / 克隆 / 设为默认 / 收藏 / 删除 / 导入导出；内置行只读，要改先复制一份），
+写作台右栏「模板」页可以换模板、换渠道、内联改骨架，也能把当前这篇已有的节沉淀成一套新骨架。
+新作品的模板按「`kind+subtype+channel` 默认 → `kind+subtype` 默认 → `kind+channel` 默认 → YAML 出厂默认 → 该文种任意一个 → 无」六级链自动挑，
+也可以指定这套或明确「不套模板」。约定见 `docs/content-types.md`。
 
 ## 数据与清理
 
@@ -269,7 +279,7 @@ AI 草稿预览与流水线预览也吃当前字体档，字号给到 15px / 14p
 - `config.yaml`：provider 开关、首页地址、模型列表、**并发上限**、全局每分钟限流（非敏感）。跑批前先确认这里的 `max_concurrency` 与全局限流符合你能接受的频率。
 - 每个 provider 的 `min_interval_sec`（秒，从上一次回复结束算起）：千问默认 3 秒，用于降低人机验证触发率；`0` 关闭。**过夜跑批别把它设成 0**。
 - 人机验证：`W2A_AUTO_SLIDE=1` 自动处理（滑块直接拖）；`W2A_HUMAN_WAIT_SEC=60` 遇到只能人工做的图片点选验证码时，在有头浏览器里等人做完的最长秒数（`0` 不等）；`W2A_RISK_COOLDOWN=60` 验证失败后的风控冷却秒数。
-- `content-types.yaml`（项目根）：文种与模板配置，见上面「文种全部配置化」。
+- `content-types.yaml`（项目根）：文种、渠道与模板配置，见上面「文种全部配置化」。
 - 写作业务库：`<W2A_STORAGE_DIR>/studio.sqlite`（默认 `storage/studio.sqlite`）。
 - 桌面壳依赖：`requirements-desktop.txt`（pywebview / pystray / pillow / pyinstaller），与后端依赖分开；
   `scripts\setup_desktop.ps1` 会两份一起装。壳往后端传 `W2A_CONTROL_PORT` / `W2A_CONTROL_TOKEN`（随机、一次性，停机协议用），
@@ -297,7 +307,7 @@ frontend/   Vue 3 + Vite（写作台 `/studio`（含右栏「问一问」）/ �
 desktop/    桌面壳（不含后端）：launcher.py 窗口+托盘 / serve.py 后端入口带控制口 / backend.py 起停与三级兜底
             control.py 停机协议 / config.py 读 .env 与找项目根 / win32.py 互斥·消息框·杀进程树
             make_icon.py + assets/novel-studio.ico / NovelStudio.spec + build.ps1（打 exe，产物 desktop/dist 已 gitignore）
-content-types.yaml   文种配置（kinds → scales → subtypes + 模板；article 有 wechat 子类）
+content-types.yaml   文种与渠道配置（kinds → scales → subtypes + channels + 模板）
 risk-words.yaml      公众号风险词（发布前检查用，改完不用重启）
 docs/       novel-studio-tech-design.md（设计与各里程碑实测）  m0-baseline.md  content-types.md  reverse-proxy.md
 design-system/  本地生成，已 gitignore（写作台的界面规范）
@@ -386,7 +396,7 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
 
 - `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.10）
 - `docs/m0-baseline.md` — M0 基线实测数据
-- `docs/content-types.md` — 文种与模板配置约定
+- `docs/content-types.md` — 文种、渠道与模板配置约定
 - `docs/reverse-proxy.md` — 底座：驱动三家网页端、`/v1` API 用法、风控排查细则
 
 ## 免责声明

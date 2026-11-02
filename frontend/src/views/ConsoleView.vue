@@ -711,6 +711,125 @@
             <p v-if="!contentTypes.length" class="hint-line">读不到 content-types.yaml：检查服务端配置目录。</p>
           </div>
         </section>
+
+        <!-- 模板库：模板定骨架，渠道定节奏，文风定语气，三者正交 -->
+        <section class="card">
+          <div class="card-head">
+            <span class="card-title">模板库</span>
+            <span class="card-sub">{{ tplLib.length }} 套 · 模板管「写什么」，渠道与文风另算</span>
+            <span class="head-spacer"></span>
+            <span v-if="tplError" class="log-error">{{ tplError }}</span>
+            <input
+              v-model="tplQ"
+              class="field field--sm tpl-search"
+              placeholder="按名字搜"
+              aria-label="搜模板"
+              @keyup.enter="loadTemplates"
+            />
+            <button class="btn btn-sm" :disabled="tplBusy" @click="startCreateTemplate">新建</button>
+            <button class="btn btn-sm" :disabled="tplBusy" @click="tplFile.click()">导入 JSON</button>
+            <input ref="tplFile" type="file" accept="application/json,.json" hidden @change="onTplFile" />
+          </div>
+          <div class="card-body">
+            <!-- 新建与编辑共用一份表单：字段就是模板表那几列，不另开弹层 -->
+            <div v-if="tplForm.open" class="tpl-form">
+              <div class="tpl-form-row">
+                <label class="tpl-fl">
+                  <span>名字</span>
+                  <input v-model="tplForm.name" class="field field--sm" placeholder="历史专题 · 六段" />
+                </label>
+                <label class="tpl-fl">
+                  <span>文种</span>
+                  <select v-model="tplForm.kind" class="field field--sm" :disabled="Boolean(tplForm.id)">
+                    <option value="article">文档</option>
+                    <option value="novel">长篇</option>
+                  </select>
+                </label>
+                <label class="tpl-fl">
+                  <span>文体</span>
+                  <input v-model="tplForm.subtype" class="field field--sm" placeholder="history / tech，可空" />
+                </label>
+                <label class="tpl-fl">
+                  <span>渠道</span>
+                  <select v-model="tplForm.channel" class="field field--sm">
+                    <option value="">不指定</option>
+                    <option v-for="c in channels" :key="c.id" :value="c.id">{{ c.label }}</option>
+                  </select>
+                </label>
+              </div>
+              <label class="tpl-fl">
+                <span>什么时候用（note）</span>
+                <input v-model="tplForm.note" class="field field--sm"
+                       placeholder="比如：三千字以上的历史深稿，要带史料出处" />
+              </label>
+              <label class="tpl-fl">
+                <span>骨架：每行一节，写成「标题 | 要点 | 目标字数」；已解析 {{ tplFormSections.length }} 节</span>
+                <textarea v-model="tplForm.outlineText" class="field" rows="6"
+                          placeholder="开场：一个具体场景 | 用一个反常识的细节抓人 | 400" />
+              </label>
+              <label class="tpl-fl">
+                <span>文风提示（style_prompt，可空）</span>
+                <textarea v-model="tplForm.stylePrompt" class="field" rows="2" />
+              </label>
+              <div class="tpl-form-act">
+                <button class="btn btn-sm btn-primary" :disabled="tplBusy" @click="saveTemplateForm">
+                  {{ tplForm.id ? '保存修改' : '新建' }}
+                </button>
+                <button class="btn btn-sm" @click="tplForm.open = false">取消</button>
+              </div>
+            </div>
+
+            <div class="table-wrap">
+              <table class="req-table">
+                <thead>
+                  <tr>
+                    <th>名字</th>
+                    <th>文种</th>
+                    <th>渠道</th>
+                    <th>来源</th>
+                    <th class="col-ms">节数</th>
+                    <th class="col-ms">用过</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="t in tplLib" :key="t.id">
+                    <td class="path-cell" :title="t.note || t.name">
+                      <span v-if="t.pinned" class="tpl-star" title="已收藏">*</span>
+                      <span v-if="t.is_default" class="tpl-def">默认</span>
+                      {{ t.name }}
+                    </td>
+                    <td class="mono">
+                      {{ kindText(t.kind) }}<template v-if="t.subtype">/{{ t.subtype }}</template>
+                    </td>
+                    <td>{{ t.channel ? channelText(t.channel) : '—' }}</td>
+                    <td>{{ t.is_builtin ? '内置' : (t.source_work_id ? '来自作品' : '自建') }}</td>
+                    <td class="mono col-ms">{{ (t.outline || []).length }}</td>
+                    <td class="mono col-ms">{{ t.use_count || 0 }}</td>
+                    <td class="act-cell">
+                      <button class="mini-link" @click="duplicateTpl(t)">克隆</button>
+                      <button v-if="!t.is_builtin" class="mini-link" @click="startEditTemplate(t)">编辑</button>
+                      <button class="mini-link" @click="setDefaultTpl(t)">设为默认</button>
+                      <button class="mini-link" @click="togglePin(t)">{{ t.pinned ? '取消收藏' : '收藏' }}</button>
+                      <button v-if="!t.is_builtin" class="mini-link" @click="deleteTpl(t)">删除</button>
+                      <button class="mini-link" @click="exportTpl(t)">导出</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-if="!tplLib.length" class="empty-block">
+                <AppIcon name="layers" :size="18" />
+                <span v-if="tplQ">没有匹配的模板</span>
+                <span v-else>模板库是空的：内置模板由 content-types.yaml 播种，检查服务端能否读到</span>
+              </div>
+            </div>
+            <p v-if="tplNote" class="hint-line">{{ tplNote }}</p>
+            <p class="hint-line">
+              内置模板只读（每次启动按 YAML 覆盖）：要改先「克隆」，改副本。
+              渠道与文风在写作台右栏的「模板 / 文风」页里选，不在这张表里。
+            </p>
+          </div>
+        </section>
       </section>
     </main>
   </div>
@@ -721,6 +840,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProviderStore } from '../stores/provider'
 import { apiFetch } from '../utils/api'
+import { decodeTemplate, outlineToText, textToOutline } from '../utils/template'
 import AppNav from '../components/AppNav.vue'
 import AppIcon from '../components/AppIcon.vue'
 import LiveConsole from '../components/LiveConsole.vue'
@@ -809,10 +929,27 @@ const dataBusy = ref(false)
 // ---- 配置 ----
 const settings = ref({})
 const contentTypes = ref([])
+// 渠道与文种平级（channels 段）：模板表格里把 wechat 显示成「公众号」
+const channels = ref([])
 const configError = ref('')
 const reloadNote = ref('')
 const reloadBad = ref(false)
 const reloading = ref(false)
+
+// ---- 模板库 ----
+// 模板 = 骨架（写什么）；渠道 = 平台节奏。两者正交，这张表只管模板本身
+const tplLib = ref([])
+const tplQ = ref('')
+const tplBusy = ref(false)
+const tplNote = ref('')
+const tplError = ref('')
+const tplFile = ref(null)
+const tplForm = ref({
+  open: false, id: '', kind: 'article', name: '', subtype: '',
+  channel: '', note: '', stylePrompt: '', outlineText: '',
+})
+// 骨架文本实时解析成本数：编辑时看不见「现在几节」，改着改着就删没了
+const tplFormSections = computed(() => textToOutline(tplForm.value.outlineText))
 
 const readyCount = computed(() => providers.value.filter(p => p.has_profile).length)
 const totalModels = computed(() => providers.value.reduce((n, p) => n + (p.models?.length || 0), 0))
@@ -1320,7 +1457,7 @@ const voicePreview = computed(() => {
 
 async function loadConfig() {
   configError.value = ''
-  await Promise.all([loadSettings(), loadContentTypes()])
+  await Promise.all([loadSettings(), loadContentTypes(), loadTemplates()])
 }
 
 async function loadSettings() {
@@ -1341,6 +1478,8 @@ async function loadContentTypes() {
   }
   const j = await r.json()
   contentTypes.value = j.kinds || []
+  // 渠道与文种平级（新 YAML 的 channels 段），模板表格里要把 wechat 显示成「公众号」
+  channels.value = j.channels || []
 }
 
 async function errLine(r, label) {
@@ -1352,6 +1491,186 @@ async function errLine(r, label) {
     /* 非 JSON 错误体，退到状态码 */
   }
   return `${label}：${detail || 'HTTP ' + r.status}`
+}
+
+// ---- 模板库：模板 = 骨架（写什么），渠道与文风是另外两个维度 ----
+
+function kindText(kind) {
+  return kind === 'novel' ? '长篇' : '文档'
+}
+
+function channelText(id) {
+  return channels.value.find((c) => c.id === id)?.label || id
+}
+
+async function loadTemplates() {
+  tplError.value = ''
+  const p = new URLSearchParams()
+  if (tplQ.value.trim()) p.set('q', tplQ.value.trim())
+  const r = await apiFetch('/studio/templates?' + p.toString())
+  if (!r.ok) {
+    tplError.value = await errLine(r, '模板库读取失败')
+    return
+  }
+  tplLib.value = (await r.json()).map(decodeTemplate)
+}
+
+function startCreateTemplate() {
+  tplForm.value = {
+    open: true, id: '', kind: 'article', name: '', subtype: '',
+    channel: '', note: '', stylePrompt: '', outlineText: '',
+  }
+  tplNote.value = ''
+}
+
+function startEditTemplate(t) {
+  tplForm.value = {
+    open: true,
+    id: t.id,
+    kind: t.kind || 'article',
+    name: t.name || '',
+    subtype: t.subtype || '',
+    channel: t.channel || '',
+    note: t.note || '',
+    stylePrompt: t.style_prompt || '',
+    // 骨架折成一行一节：直接编 JSON 容易一个逗号写错整份存不进去
+    outlineText: outlineToText(t.outline),
+  }
+  tplNote.value = ''
+}
+
+async function saveTemplateForm() {
+  const f = tplForm.value
+  if (!f.name.trim()) {
+    tplNote.value = '名字不能为空'
+    return
+  }
+  const outline = textToOutline(f.outlineText)
+  if (!outline.length) {
+    tplNote.value = '骨架不能为空：至少一节，没有骨架时 S0 不出内容'
+    return
+  }
+  tplBusy.value = true
+  try {
+    const payload = {
+      name: f.name.trim(),
+      subtype: f.subtype.trim(),
+      channel: f.channel,
+      note: f.note.trim(),
+      style_prompt: f.stylePrompt.trim(),
+      outline,
+    }
+    // kind 只在新建时发：PATCH 不改文种（换了文种，骨架的字数节奏对不上）
+    if (!f.id) payload.kind = f.kind
+    const r = await apiFetch(f.id ? `/studio/templates/${f.id}` : '/studio/templates', {
+      method: f.id ? 'PATCH' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      tplNote.value = await errLine(r, f.id ? '保存失败' : '新建失败')
+      return
+    }
+    tplNote.value = f.id ? '已保存' : `已新建「${payload.name}」`
+    tplForm.value = { ...tplForm.value, open: false, id: '' }
+    await loadTemplates()
+  } finally {
+    tplBusy.value = false
+  }
+}
+
+async function duplicateTpl(t) {
+  tplBusy.value = true
+  try {
+    const r = await apiFetch(`/studio/templates/${t.id}/duplicate`, { method: 'POST' })
+    if (!r.ok) {
+      tplNote.value = await errLine(r, '克隆失败')
+      return
+    }
+    const got = decodeTemplate(await r.json())
+    tplNote.value = `已克隆为「${got.name}」，改它不影响原模板`
+    await loadTemplates()
+  } finally {
+    tplBusy.value = false
+  }
+}
+
+async function setDefaultTpl(t) {
+  const r = await apiFetch(`/studio/templates/${t.id}/default`, { method: 'POST' })
+  if (!r.ok) {
+    tplNote.value = await errLine(r, '设为默认失败')
+    return
+  }
+  const scope = `${kindText(t.kind)}${t.subtype ? '/' + t.subtype : ''}${t.channel ? '/' + channelText(t.channel) : ''}`
+  tplNote.value = `以后新建 ${scope} 且没指定模板时用它`
+  await loadTemplates()
+}
+
+async function togglePin(t) {
+  const r = await apiFetch(`/studio/templates/${t.id}/pin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pinned: !Number(t.pinned || 0) }),
+  })
+  if (!r.ok) {
+    tplNote.value = await errLine(r, '收藏失败')
+    return
+  }
+  await loadTemplates()
+}
+
+async function deleteTpl(t) {
+  if (!window.confirm(`删掉模板「${t.name}」？引用它的作品会被解绑（作品本身不删），之后按同组默认模板走。`)) return
+  const r = await apiFetch(`/studio/templates/${t.id}`, { method: 'DELETE' })
+  if (!r.ok) {
+    tplNote.value = await errLine(r, '删除失败')
+    return
+  }
+  const got = await r.json()
+  tplNote.value = got.unbound ? `已删除，${got.unbound} 本作品被解绑` : '已删除'
+  await loadTemplates()
+}
+
+async function exportTpl(t) {
+  const r = await apiFetch(`/studio/templates/${t.id}/export`)
+  if (!r.ok) {
+    tplNote.value = await errLine(r, '导出失败')
+    return
+  }
+  // 带口令的下载：fetch 取 blob 再点一个临时 <a>，不能直接 href
+  const url = URL.createObjectURL(await r.blob())
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${t.name || 'template'}.template.json`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+async function onTplFile(ev) {
+  const file = ev.target.files?.[0]
+  ev.target.value = '' // 选同一个文件两次也要能触发 change
+  if (!file) return
+  let data
+  try {
+    data = JSON.parse(await file.text())
+  } catch {
+    tplNote.value = '这不是 JSON 文件：选错了或文件坏了'
+    return
+  }
+  const r = await apiFetch('/studio/templates/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!r.ok) {
+    tplNote.value = await errLine(r, '导入失败')
+    return
+  }
+  const got = decodeTemplate(await r.json())
+  tplNote.value = `已导入「${got.name}」`
+  await loadTemplates()
 }
 
 function fmtStamp(ts) {
@@ -2206,6 +2525,53 @@ function alignClass(p) {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
+}
+
+/* ---------- 模板库 ---------- */
+.tpl-search {
+  width: 140px;
+}
+.tpl-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--panel-2);
+}
+.tpl-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tpl-form-row .tpl-fl {
+  flex: 1 1 120px;
+}
+.tpl-fl {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.tpl-form-act {
+  display: flex;
+  gap: 8px;
+}
+/* 收藏与默认是行上两个标记：挤在名字前面，扫一眼就知道哪套在用 */
+.tpl-star {
+  margin-right: 4px;
+  color: var(--warn-fg);
+}
+.tpl-def {
+  margin-right: 4px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(var(--run-rgb), 0.16);
+  color: var(--run-fg);
+  font-size: 10.5px;
 }
 
 @media (max-width: 1100px) {

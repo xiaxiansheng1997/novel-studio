@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import { decodeTemplate } from '../utils/template'
 
 /** 写作台的模型选择单独存一份 key：和聊天页的 w2a_model 互不干扰 */
 const STUDIO_MODEL_KEY = 'w2a_studio_model'
@@ -124,12 +125,201 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function loadTemplates(kind, subtype) {
+  async function loadTemplates(kind, subtype, channel = '') {
     const q = new URLSearchParams()
     if (kind) q.set('kind', kind)
     if (subtype) q.set('subtype', subtype)
+    if (channel) q.set('channel', channel)
     const r = await apiFetch('/studio/templates?' + q.toString())
-    if (r.ok) templates.value = await r.json()
+    if (r.ok) templates.value = (await r.json()).map(decodeTemplate)
+  }
+
+  /**
+   * 库里的 outline_json / checks_json / tags_json 都是 JSON 文本，
+   * 界面要的是数组。解析在 utils/template.js：控制台也要用同一份，
+   * 两边各写一份的话，总有一处忘 try/catch 把一个坏模板变成白屏。
+   */
+
+  // ==================== 模板库（完整 CRUD） ====================
+
+  // 模板库与控制台共用一份：与 `templates`（按当前作品筛过的）分开，
+  // 否则在控制台改完一个模板，写作台下拉框会莫名其妙少几项
+  const templateLib = ref([])
+  const templateBusy = ref(false)
+  const templateNote = ref('')
+
+  /** 模板库列表。四个筛选项全可空（空 = 不过滤） */
+  async function loadTemplateLib({ kind = '', subtype = '', channel = '', q = '' } = {}) {
+    const p = new URLSearchParams()
+    if (kind) p.set('kind', kind)
+    if (subtype) p.set('subtype', subtype)
+    if (channel) p.set('channel', channel)
+    if (q) p.set('q', q)
+    const r = await apiFetch('/studio/templates?' + p.toString())
+    if (!r.ok) {
+      error.value = await errDetail(r, '读模板库失败')
+      return []
+    }
+    templateLib.value = (await r.json()).map(decodeTemplate)
+    return templateLib.value
+  }
+
+  async function createTemplate(payload) {
+    templateNote.value = ''
+    const r = await apiFetch('/studio/templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '新建模板失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    templateLib.value = [got, ...templateLib.value]
+    return got
+  }
+
+  async function updateTemplate(id, patch) {
+    templateNote.value = ''
+    const r = await apiFetch(`/studio/templates/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '改模板失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    const i = templateLib.value.findIndex((t) => t.id === got.id)
+    if (i >= 0) templateLib.value[i] = got
+    if (work.value?.template_id === got.id) await loadTemplates(work.value.kind || 'article')
+    return got
+  }
+
+  /**
+   * 取单条模板（当前作品用的那套）。
+   * 不能指望它就在 `templates` 里：那份列表是按文种/文体筛过的，
+   * 换过文种的作品会拿着一套筛不出来的模板，界面上就变成「无模板」。
+   */
+  async function loadTemplate(id) {
+    if (!id) return null
+    const r = await apiFetch(`/studio/templates/${id}`)
+    if (!r.ok) return null
+    return decodeTemplate(await r.json())
+  }
+
+  /** 删模板。返回解绑了几本作品（服务端会把引用改回 NULL，作品不删） */
+  async function deleteTemplate(id) {
+    const r = await apiFetch(`/studio/templates/${id}`, { method: 'DELETE' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '删模板失败')
+      return null
+    }
+    const got = await r.json()
+    templateLib.value = templateLib.value.filter((t) => t.id !== id)
+    if (work.value?.template_id === id && work.value) {
+      work.value = { ...work.value, template_id: null }
+      await loadTemplates(work.value.kind || 'article')
+    }
+    return got
+  }
+
+  /** 复制一份可改的副本：这是改内置模板的唯一入口 */
+  async function duplicateTemplate(id) {
+    const r = await apiFetch(`/studio/templates/${id}/duplicate`, { method: 'POST' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '复制模板失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    templateLib.value = [got, ...templateLib.value]
+    return got
+  }
+
+  async function setDefaultTemplate(id) {
+    const r = await apiFetch(`/studio/templates/${id}/default`, { method: 'POST' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '设为默认失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    // 同组其它行的 is_default 被服务端清零了，本地同步一份
+    templateLib.value = templateLib.value.map((t) => {
+      if (t.id === got.id) return got
+      if (t.kind === got.kind && (t.subtype || '') === (got.subtype || '')
+        && (t.channel || '') === (got.channel || '')) return { ...t, is_default: 0 }
+      return t
+    })
+    return got
+  }
+
+  async function pinTemplate(id, pinned = null) {
+    const r = await apiFetch(`/studio/templates/${id}/pin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pinned === null ? {} : { pinned }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '收藏失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    const i = templateLib.value.findIndex((t) => t.id === got.id)
+    if (i >= 0) templateLib.value[i] = got
+    return got
+  }
+
+  /** 从作品沉淀模板：本作品的节标题与节拍卡就是最好的骨架模板 */
+  async function templateFromWork(workId, payload = {}) {
+    templateNote.value = ''
+    const r = await apiFetch(`/studio/templates/from-work/${workId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '沉淀模板失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    templateLib.value = [got, ...templateLib.value]
+    return got
+  }
+
+  /** 导出单条模板：与作品包一样走 fetch + blob，不能直接 href */
+  async function exportTemplate(id, name = 'template') {
+    const r = await apiFetch(`/studio/templates/${id}/export`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '导出模板失败')
+      return false
+    }
+    saveBlob(await r.blob(), `${name}.template.json`)
+    return true
+  }
+
+  /** 导入模板文件：一律新建，不覆盖同 id */
+  async function importTemplate(text) {
+    let data
+    try {
+      data = JSON.parse(text)
+    } catch {
+      error.value = '这不是 JSON 文件：选错了或文件坏了'
+      return null
+    }
+    const r = await apiFetch('/studio/templates/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '导入模板失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    templateLib.value = [got, ...templateLib.value]
+    return got
   }
 
   async function fetchWorks(kind = '') {
@@ -875,15 +1065,24 @@ export const useStudioStore = defineStore('studio', () => {
   // ==================== 内容类型（content-types.yaml） ====================
 
   const contentTypes = ref([])
+  // 渠道与文种正交，单独一列：同一套骨架可以发公众号也可以发知乎
+  const channels = ref([])
   const contentTypeError = ref('')
 
-  /** 新增文种只改 YAML，这里只负责取回来渲染下拉框 */
+  /** 新增文种/渠道只改 YAML，这里只负责取回来渲染下拉框 */
   async function loadContentTypes() {
     const r = await apiFetch('/studio/content-types')
     if (!r.ok) return
     const j = await r.json()
     contentTypes.value = j.kinds || []
+    channels.value = j.channels || []
     contentTypeError.value = j.error || ''
+  }
+
+  /** 渠道 id → 显示名。模板卡片、作品卡片都要说「公众号」而不是「wechat」 */
+  function channelLabel(id) {
+    if (!id) return ''
+    return channels.value.find((c) => c.id === id)?.label || id
   }
 
   // ==================== 大纲 ====================
@@ -1548,7 +1747,11 @@ export const useStudioStore = defineStore('studio', () => {
     indexStatus, indexing, summarizing, memoryNote,
     loadIndexStatus, reindex, runSummarize,
     // M1 尾款
-    contentTypes, contentTypeError, loadContentTypes,
+    contentTypes, channels, channelLabel, contentTypeError, loadContentTypes,
+    // 模板库
+    templateLib, templateBusy, templateNote, decodeTemplate,
+    loadTemplateLib, loadTemplate, createTemplate, updateTemplate, deleteTemplate, duplicateTemplate,
+    setDefaultTemplate, pinTemplate, templateFromWork, exportTemplate, importTemplate,
     outlineBusy, generateOutline,
     pipeline, runPipeline,
     assembling, assembleDoc, downloadExport, exportBundle, exportLibrary, importBundle,

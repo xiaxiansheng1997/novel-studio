@@ -102,6 +102,31 @@
         <textarea v-model="form.premise" class="field" rows="2"
                   placeholder="这篇/这本书要讲什么，给谁看，最重要的一句话是什么" />
       </label>
+      <!-- 渠道与模板：渠道换的是排版节奏（公众号短段 + 配图位），模板换的是骨架 -->
+      <div class="create-row">
+        <label v-if="channels.length" class="fl">
+          <span>渠道</span>
+          <select v-model="form.channel" class="field">
+            <option value="">不指定</option>
+            <option v-for="c in channels" :key="c.id" :value="c.id">{{ c.label }}</option>
+          </select>
+        </label>
+        <label class="fl grow">
+          <span>模板</span>
+          <select v-model="form.template_id" class="field">
+            <option value="">按默认（自动挑一套）</option>
+            <option value="__none__">不套模板</option>
+            <option v-for="t in templateOptions" :key="t.id" :value="t.id">
+              {{ t.name }} · {{ t.outline.length }} 节 · 约 {{ outlineWords(t) }} 字
+            </option>
+          </select>
+        </label>
+      </div>
+      <!-- 光看名字选骨架等于盲选：把节标题串出来，一眼看得出是不是自己要的结构 -->
+      <p v-if="pickedTemplate" class="create-skeleton">
+        <span class="cs-label">骨架</span>
+        {{ pickedTemplate.outline.map((s) => s.heading).join(' → ') || '这套模板还没有节，进去自己搭' }}
+      </p>
       <div class="create-foot">
         <label class="fl small">
           <span>目标字数</span>
@@ -202,7 +227,11 @@ const store = useStudioStore()
 
 const showCreate = ref(false)
 const creating = ref(false)
-const form = ref({ kind: 'article', scale: 'single', subtype: 'tech', title: '', premise: '', target_words: 5000 })
+const form = ref({
+  kind: 'article', scale: 'single', subtype: 'tech',
+  channel: '', template_id: '',
+  title: '', premise: '', target_words: 5000,
+})
 
 // 书目搜索只筛卡片：跨作品搜正文走 Ctrl+K 那个弹层，两种搜索混在一个框里会互相误会
 const shelfQ = ref('')
@@ -224,6 +253,36 @@ const kinds = computed(() =>
 const currentKind = computed(() => kinds.value.find((k) => k.id === form.value.kind) || null)
 const scales = computed(() => currentKind.value?.scales || [])
 const subtypes = computed(() => currentKind.value?.subtypes || [])
+// 渠道与文种正交：不在 subtypes 里也不在 kind 下，单拿一份
+const channels = computed(() => store.channels)
+
+/**
+ * 新建时能选的模板。按 kind+subtype 拉（不按 channel 硬筛）：
+ * 渠道只是排版节奏，同一套骨架换个平台照样能用，筛掉反而让人以为没得选。
+ */
+const templateOptions = ref([])
+const pickedTemplate = computed(
+  () => templateOptions.value.find((t) => t.id === form.value.template_id) || null,
+)
+
+function outlineWords(t) {
+  const total = (t.outline || []).reduce((n, s) => n + (Number(s.target_words) || 0), 0)
+  return total >= 10000 ? (total / 10000).toFixed(1) + '万' : String(total)
+}
+
+async function loadTemplateOptions() {
+  if (!form.value.kind) {
+    templateOptions.value = []
+    return
+  }
+  await store.loadTemplates(form.value.kind, form.value.subtype)
+  templateOptions.value = store.templates
+  // 选过的模板可能被删了或被筛出去了：清回「按默认」而不是留一个选不中的值
+  if (form.value.template_id && form.value.template_id !== '__none__'
+    && !templateOptions.value.some((t) => t.id === form.value.template_id)) {
+    form.value.template_id = ''
+  }
+}
 
 // 关掉新建表单就别再记着那条灵感：否则下一次手动新建会被误标成「用它开写」
 watch(showCreate, (on) => {
@@ -235,6 +294,9 @@ watch(kinds, () => {
   if (!kinds.value.some((k) => k.id === form.value.kind)) form.value.kind = kinds.value[0]?.id || 'article'
   applyScaleDefaults()
 }, { immediate: true })
+
+// 文种/文体一变就重拉模板：不同文种的骨架不能混着选
+watch(() => [form.value.kind, form.value.subtype, showCreate.value], loadTemplateOptions)
 
 /** 「先聊聊」的结果回填新建表单：只是草稿，建不建、怎么改都还由人定 */
 watch(() => props.seed, (s) => {
@@ -259,6 +321,7 @@ const visibleWorks = computed(() => {
 function onKindChange() {
   applyScaleDefaults()
   form.value.subtype = subtypes.value[0]?.id || ''
+  form.value.template_id = ''
 }
 
 function applyScaleDefaults() {
@@ -355,14 +418,22 @@ async function create() {
   creating.value = true
   store.error = ''
   try {
-    const w = await store.createWork({ ...form.value })
+    // 「不套模板」发空串，「按默认」发 null（不发这个字段）：服务端靠这个区别决定要不要自动挑
+    const templateId = form.value.template_id === '__none__'
+      ? ''
+      : (form.value.template_id || null)
+    const w = await store.createWork({ ...form.value, template_id: templateId })
     // 从灵感箱开的稿：记下指向，之后在库里能回看这句想法变成了哪篇
     if (pendingIdea.value) {
       await store.useIdea(pendingIdea.value, w.id)
       pendingIdea.value = ''
     }
     showCreate.value = false
-    form.value = { kind: 'article', scale: 'single', subtype: 'tech', title: '', premise: '', target_words: 5000 }
+    form.value = {
+      kind: 'article', scale: 'single', subtype: 'tech',
+      channel: '', template_id: '',
+      title: '', premise: '', target_words: 5000,
+    }
     emit('open', w.id)
   } catch (e) {
     store.error = String(e?.message || e).slice(0, 200)
@@ -377,8 +448,13 @@ function fmt(n) {
 }
 
 function kindLabel(w) {
-  if (w.kind === 'novel') return '长篇'
-  return w.scale === 'series' ? '系列' : (w.subtype || '单篇')
+  const bits = []
+  if (w.kind === 'novel') bits.push('长篇')
+  else bits.push(w.scale === 'series' ? '系列' : (w.subtype || '单篇'))
+  // 渠道单独一维，得让人在书架上就看出这篇是发公众号的
+  const ch = store.channelLabel(w.channel)
+  if (ch) bits.push(ch)
+  return bits.join(' · ')
 }
 
 // ---- 写作日历（近 14 天，今天在最右）----
@@ -660,6 +736,24 @@ function barHeight(chars) {
   display: flex;
   align-items: flex-end;
   gap: 12px;
+}
+/* 骨架预览：一行小字，比让用户在四个名字里猜结构靠谱 */
+.create-skeleton {
+  margin: -4px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+.cs-label {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(var(--run-rgb), 0.12);
+  color: var(--run-fg);
+  font-family: theme('fontFamily.mono');
+  font-size: 10px;
+  letter-spacing: 0.06em;
 }
 .create-foot .btn {
   margin-left: auto;

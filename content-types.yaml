@@ -81,17 +81,6 @@ kinds:
         label: 通用
         template: tpl_general
         instructions: 清楚、具体，避免空话套话
-      wechat:
-        label: 公众号
-        template: tpl_wechat
-        checks_append: [absolute_claim]
-        # 公众号的读法：手机一屏约 3 行，段落一长就没人读下去
-        style_prompt: >-
-          用口语写，像在跟一个具体的人讲话。每段不超过三行（约 100 字），段与段之间空一行；
-          小标题直给结论，不写「第一部分」这类空标题。
-        instructions: >-
-          每 2-3 段插一个「[图：画面描述]」占位，写清画面里有什么；
-          结尾留一句互动或关注引导，不要用「点赞转发加关注」这种硬广腔。
 
   # ---------------- 长篇小说 ----------------
   novel:
@@ -129,6 +118,50 @@ kinds:
       mystery:
         label: 悬疑
         instructions: 线索必须提前埋下；真相揭晓时读者应能回看出伏笔
+
+# ============================================================
+# 渠道：与文种（内容领域）正交的发布平台维度
+#
+# 文种管「写什么」，渠道管「发到哪」——公众号要短段与配图位，知乎要结论先行，
+# 小红书要三行以内给利益点。同一套模板可以发到任何渠道，两者自由组合：
+# 「历史 + 公众号」不再需要在 wechat 与 history 之间二选一。
+#
+# 这里的 style_prompt / instructions 进 S1（写法），checks_append 并入该作品的检查规则；
+# 字数与预算仍归 kinds 管，渠道只影响表达节奏。
+# ============================================================
+channels:
+  wechat:
+    label: 公众号
+    target_words: 2500
+    # 公众号的读法：手机一屏约 3 行，段落一长就没人读下去
+    style_prompt: >-
+      用口语写，像在跟一个具体的人讲话。每段不超过三行（约 100 字），段与段之间空一行；
+      小标题直给结论，不写「第一部分」这类空标题。
+    instructions: >-
+      每 2-3 段插一个「[图：画面描述]」占位，写清画面里有什么；
+      结尾留一句互动或关注引导，不要用「点赞转发加关注」这种硬广腔。
+    checks_append: [absolute_claim]
+  zhihu:
+    label: 知乎
+    target_words: 3000
+    style_prompt: 先给结论再给论证，允许分点；不写「谢邀」这类寒暄
+    instructions: 每个判断后面尽量跟一个具体例子或数据
+  xiaohongshu:
+    label: 小红书
+    target_words: 800
+    style_prompt: 短句，每段一到两句；不用书面连接词
+    instructions: 开头三行内必须出现具体利益点；不要写成长文
+  toutiao:
+    label: 头条
+    target_words: 2000
+    style_prompt: 导语前置，第一段说清发生了什么
+  blog:
+    label: 个人博客
+    target_words: 3000
+  official:
+    label: 自有站点 / 官网
+    target_words: 2500
+    style_prompt: 书面、结构化，可用小标题与列表
 
 # ============================================================
 # 模板：骨架 + 语气 + 检查项
@@ -198,7 +231,8 @@ templates:
 
   - id: tpl_wechat
     kind: article
-    subtype: wechat
+    subtype: general
+    channel: wechat
     name: 公众号文章
     outline:
       - { heading: 开头钩子, prompt: 用一个具体场景或反常识的结论把读者拉进来，不用「随着…」开场, target_words: 300 }

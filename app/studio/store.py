@@ -257,6 +257,39 @@ class StudioStore:
             await self._db.execute("ALTER TABLE works ADD COLUMN digest TEXT DEFAULT ''")
             await self._db.commit()
             logger.info("[studio] works 已补 digest 列（公众号摘要）")
+        if "channel" not in wcols:
+            # 公众号从「文种」降级成「渠道」：老作品一并迁过去。
+            # 不迁的话它们会突然变成「没有渠道」，而界面上看不出这一列曾经存在。
+            await self._db.execute("ALTER TABLE works ADD COLUMN channel TEXT DEFAULT ''")
+            await self._db.execute(
+                "UPDATE works SET channel = 'wechat', subtype = 'general' "
+                "WHERE kind = 'article' AND subtype = 'wechat'"
+            )
+            await self._db.commit()
+            logger.info("[studio] works 已补 channel 列，并把公众号作品从文种迁到渠道")
+
+        cur = await self._db.execute("PRAGMA table_info(templates)")
+        tcols = {r[1] for r in await cur.fetchall()}
+        # 逐个判，不用「有 channel 就全跳过」：再加列时那句话会变成永远跨不过的门
+        new_cols = {
+            "channel": "TEXT DEFAULT ''",
+            "tags_json": "TEXT DEFAULT '[]'",
+            "note": "TEXT DEFAULT ''",
+            "is_default": "INTEGER DEFAULT 0",
+            "pinned": "INTEGER DEFAULT 0",
+            "source_work_id": "TEXT DEFAULT ''",
+            "updated_at": "REAL",
+        }
+        missing = {c: ddl for c, ddl in new_cols.items() if c not in tcols}
+        for col, ddl in missing.items():
+            await self._db.execute(f"ALTER TABLE templates ADD COLUMN {col} {ddl}")
+        if missing:
+            await self._db.execute(
+                "UPDATE templates SET channel = 'wechat', subtype = 'general' "
+                "WHERE channel = '' AND subtype = 'wechat'"
+            )
+            await self._db.commit()
+            logger.info(f"[studio] templates 已补 {len(missing)} 列（渠道/收藏/默认等）")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -275,22 +308,29 @@ class StudioStore:
         tpls = content_types.templates() or BUILTIN_TEMPLATES
         async with self._lock:
             for tpl in tpls:
+                # is_default / pinned 不进 INSERT：那是用户的选择，升级不能把它抹掉。
                 await self._db.execute(
-                    "INSERT INTO templates(id, kind, subtype, name, outline_json, "
-                    "style_prompt, checks_json, is_builtin, created_at) VALUES(?,?,?,?,?,?,?,1,?) "
+                    "INSERT INTO templates(id, kind, subtype, channel, name, outline_json, "
+                    "style_prompt, checks_json, tags_json, note, is_builtin, created_at, updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?) "
                     "ON CONFLICT(id) DO UPDATE SET "
-                    "kind=excluded.kind, subtype=excluded.subtype, name=excluded.name, "
-                    "outline_json=excluded.outline_json, style_prompt=excluded.style_prompt, "
-                    "checks_json=excluded.checks_json "
+                    "kind=excluded.kind, subtype=excluded.subtype, channel=excluded.channel, "
+                    "name=excluded.name, outline_json=excluded.outline_json, "
+                    "style_prompt=excluded.style_prompt, checks_json=excluded.checks_json, "
+                    "tags_json=excluded.tags_json, note=excluded.note, updated_at=excluded.updated_at "
                     "WHERE templates.is_builtin = 1",
                     (
                         tpl["id"],
                         tpl["kind"],
                         tpl.get("subtype", ""),
+                        tpl.get("channel", ""),
                         tpl["name"],
                         json.dumps(tpl["outline"], ensure_ascii=False),
                         tpl.get("style", ""),
                         json.dumps(tpl.get("checks", []), ensure_ascii=False),
+                        json.dumps(tpl.get("tags", []), ensure_ascii=False),
+                        tpl.get("note", ""),
+                        _now(),
                         _now(),
                     ),
                 )
@@ -302,21 +342,213 @@ class StudioStore:
         """改完 content-types.yaml 后调一次，把内置模板重新同步进库。"""
         await self._seed_templates()
 
-    async def list_templates(self, kind: str = "", subtype: str = "") -> list[dict[str, Any]]:
+    async def list_templates(self, kind: str = "", subtype: str = "",
+                             channel: str = "", q: str = "") -> list[dict[str, Any]]:
+        """模板库列表。
+
+        `use_count` 一起给前端：内置模板只能克隆，用得多不多决定它排多前。
+        排序是「收藏 → 用得多的 → 内置优先 → 最近改过的」——常用模板应该
+        一眼就能点到，而不是被一堆内置模板压在后面。
+        """
         assert self._db is not None
-        sql = "SELECT * FROM templates WHERE 1=1"
+        sql = (
+            "SELECT t.*, "
+            "(SELECT COUNT(*) FROM works w WHERE w.template_id = t.id) AS use_count "
+            "FROM templates t WHERE 1=1"
+        )
         params: list[Any] = []
         if kind:
-            sql += " AND kind = ?"
+            sql += " AND t.kind = ?"
             params.append(kind)
         if subtype:
-            sql += " AND subtype = ?"
+            sql += " AND t.subtype = ?"
             params.append(subtype)
-        sql += " ORDER BY is_builtin DESC, created_at ASC"
+        if channel:
+            sql += " AND t.channel = ?"
+            params.append(channel)
+        if q:
+            sql += " AND t.name LIKE ?"
+            params.append(f"%{q}%")
+        sql += " ORDER BY t.pinned DESC, use_count DESC, t.is_builtin DESC, t.updated_at DESC"
         async with self._lock:
             cur = await self._db.execute(sql, params)
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    async def get_template(self, template_id: str) -> Optional[dict[str, Any]]:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT t.*, "
+                "(SELECT COUNT(*) FROM works w WHERE w.template_id = t.id) AS use_count "
+                "FROM templates t WHERE t.id = ?",
+                (template_id,),
+            )
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def create_template(
+        self,
+        *,
+        kind: str,
+        name: str,
+        subtype: str = "",
+        channel: str = "",
+        outline: Optional[list[dict[str, Any]]] = None,
+        style_prompt: str = "",
+        checks: Optional[list[str]] = None,
+        tags: Optional[list[str]] = None,
+        note: str = "",
+        source_work_id: str = "",
+        is_builtin: bool = False,
+        template_id: str = "",
+    ) -> dict[str, Any]:
+        """新建模板。用户自建一律 is_builtin=0；is_builtin 只给导入用。"""
+        assert self._db is not None
+        tid = template_id or _new_id("tpl_u_")
+        now = _now()
+        async with self._lock:
+            await self._db.execute(
+                "INSERT INTO templates(id, kind, subtype, channel, name, outline_json, style_prompt, "
+                "checks_json, tags_json, note, source_work_id, is_builtin, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    tid, kind, subtype, channel, name,
+                    json.dumps(outline or [], ensure_ascii=False),
+                    style_prompt,
+                    json.dumps(checks or [], ensure_ascii=False),
+                    json.dumps(tags or [], ensure_ascii=False),
+                    note, source_work_id, 1 if is_builtin else 0, now, now,
+                ),
+            )
+            await self._db.commit()
+        return await self.get_template(tid)  # type: ignore[return-value]
+
+    async def update_template(self, template_id: str, **fields: Any) -> Optional[dict[str, Any]]:
+        """改模板。outline / tags / checks 传原始对象，这里统一序列化。"""
+        assert self._db is not None
+        mapping = {"tags": "tags_json", "checks": "checks_json", "outline": "outline_json"}
+        allowed = {"kind", "subtype", "channel", "name", "style_prompt", "note",
+                   "tags", "checks", "outline"}
+        updates: dict[str, Any] = {}
+        for key, val in fields.items():
+            if key not in allowed or val is None:
+                continue
+            col = mapping.get(key, key)
+            updates[col] = json.dumps(val, ensure_ascii=False) if col.endswith("_json") else val
+        if not updates:
+            return await self.get_template(template_id)
+        updates["updated_at"] = _now()
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        async with self._lock:
+            cur = await self._db.execute(
+                f"UPDATE templates SET {sets} WHERE id = ?",
+                list(updates.values()) + [template_id],
+            )
+            await self._db.commit()
+        if (cur.rowcount or 0) <= 0:
+            return None
+        return await self.get_template(template_id)
+
+    async def delete_template(self, template_id: str) -> dict[str, Any]:
+        """删模板并解绑引用它的作品。
+
+        先解绑再删：外键虽然是 ON DELETE SET NULL，但那样作品会「悄悄」
+        变回无模板状态，界面上看不出是谁动的手。这里数出解绑了几本回给前端。
+        """
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "UPDATE works SET template_id = NULL, updated_at = ? WHERE template_id = ?",
+                (_now(), template_id),
+            )
+            unbound = int(cur.rowcount or 0)
+            cur = await self._db.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+            deleted = int(cur.rowcount or 0)
+            await self._db.commit()
+        return {"deleted": deleted, "unbound": unbound}
+
+    async def set_default_template(self, template_id: str) -> bool:
+        """把某个模板设成它那组 (kind, subtype, channel) 的默认。
+
+        同组只能有一个默认：否则 pick_template 的命中结果取决于插入顺序，
+        同一类文章今天用 A 明天用 B，却看不出为什么。
+        """
+        assert self._db is not None
+        tpl = await self.get_template(template_id)
+        if not tpl:
+            return False
+        async with self._lock:
+            await self._db.execute(
+                "UPDATE templates SET is_default = 0 "
+                "WHERE kind = ? AND subtype = ? AND channel = ? AND id != ?",
+                (tpl["kind"], tpl.get("subtype") or "", tpl.get("channel") or "", template_id),
+            )
+            await self._db.execute(
+                "UPDATE templates SET is_default = 1, updated_at = ? WHERE id = ?",
+                (_now(), template_id),
+            )
+            await self._db.commit()
+        return True
+
+    async def toggle_template_pin(self, template_id: str,
+                                  pinned: Optional[bool] = None) -> Optional[dict[str, Any]]:
+        """收藏 / 取消收藏。不传 pinned 就是取反。"""
+        tpl = await self.get_template(template_id)
+        if not tpl:
+            return None
+        want = (not bool(tpl.get("pinned"))) if pinned is None else bool(pinned)
+        assert self._db is not None
+        async with self._lock:
+            await self._db.execute(
+                "UPDATE templates SET pinned = ?, updated_at = ? WHERE id = ?",
+                (1 if want else 0, _now(), template_id),
+            )
+            await self._db.commit()
+        return await self.get_template(template_id)
+
+    async def pick_template(self, kind: str, subtype: str = "",
+                            channel: str = "") -> Optional[dict[str, Any]]:
+        """按优先级挑一个模板。
+
+        1) kind+subtype+channel 的默认   2) kind+subtype 的默认
+        3) kind+channel 的默认         4) YAML 里 subtype 声明的出厂默认
+        5) 该 kind 下任意一个            6) 空
+
+        为什么要落到「任意一个」：新建作品时如果连一个模板都没有，单篇写作
+        会退化成完全没有骨架；宁可给一个同类的，让人进去再换。
+        """
+        assert self._db is not None
+        chains: list[tuple[str, tuple[Any, ...]]] = [
+            ("kind = ? AND subtype = ? AND channel = ? AND is_default = 1", (kind, subtype, channel)),
+            ("kind = ? AND subtype = ? AND is_default = 1", (kind, subtype)),
+        ]
+        if channel:
+            # channel 为空时这一级与上一级等价，不白查一次
+            chains.append(("kind = ? AND channel = ? AND is_default = 1", (kind, channel)))
+        for cond, params in chains:
+            async with self._lock:
+                cur = await self._db.execute(
+                    f"SELECT * FROM templates WHERE {cond} "
+                    "ORDER BY pinned DESC, updated_at DESC LIMIT 1",
+                    params,
+                )
+                row = await cur.fetchone()
+            if row:
+                return dict(row)
+        tid = content_types.template_id_for(kind, "", subtype)
+        if tid:
+            got = await self.get_template(tid)
+            if got:
+                return got
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT * FROM templates WHERE kind = ? "
+                "ORDER BY is_builtin DESC, pinned DESC, updated_at DESC LIMIT 1",
+                (kind,),
+            )
+            row = await cur.fetchone()
+        return dict(row) if row else None
 
     # ==================== 作品 ====================
 
@@ -327,6 +559,7 @@ class StudioStore:
         title: str,
         scale: str = "single",
         subtype: str = "",
+        channel: str = "",
         premise: str = "",
         template_id: Optional[str] = None,
         target_words: int = 0,
@@ -336,10 +569,10 @@ class StudioStore:
         now = _now()
         async with self._lock:
             await self._db.execute(
-                "INSERT INTO works(id, kind, scale, subtype, title, premise, status, template_id, "
+                "INSERT INTO works(id, kind, scale, subtype, channel, title, premise, status, template_id, "
                 "target_words, style_json, meta_json, created_at, updated_at) "
-                "VALUES(?,?,?,?,?,?,'active',?,?,'{}','{}',?,?)",
-                (wid, kind, scale, subtype, title, premise, template_id, target_words, now, now),
+                "VALUES(?,?,?,?,?,?,?,'active',?,?,'{}','{}',?,?)",
+                (wid, kind, scale, subtype, channel, title, premise, template_id, target_words, now, now),
             )
             await self._db.execute(
                 "INSERT INTO index_state(work_id, updated_at) VALUES(?,?)", (wid, now)
@@ -383,9 +616,16 @@ class StudioStore:
         return dict(row) if row else None
 
     async def update_work(self, work_id: str, **fields: Any) -> bool:
-        allowed = {"title", "premise", "digest", "status", "scale", "subtype", "template_id",
+        allowed = {"title", "premise", "digest", "status", "scale", "subtype", "channel", "template_id",
                    "target_words", "style_json", "meta_json"}
-        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        # template_id 是指向 templates 的外键：前端「不套模板」发的是空串，
+        # 库里只能落 NULL（空串不是任何模板的 id，直接写会撞外键）。
+        # 它是唯一允许 None 的列：其余列传 None 在路由层的 exclude_none
+        # 就已经滤掉了，能进到这里的 None 只可能是这次显式清空。
+        if "template_id" in fields and not str(fields["template_id"] or "").strip():
+            fields["template_id"] = None
+        updates = {k: v for k, v in fields.items()
+                   if k in allowed and (v is not None or k == "template_id")}
         if not updates:
             return False
         assert self._db is not None

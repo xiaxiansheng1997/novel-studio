@@ -286,6 +286,90 @@
         </div>
       </section>
 
+      <!-- 模板：写什么（骨架）× 发到哪（渠道）。文风在上一页，三者互不影响 -->
+      <section v-else-if="tab === 'template'" class="section">
+        <p class="hint">
+          模板管「写什么」（几节、每节管什么），渠道管「发到哪」（段落节奏、配图位、平台禁忌）。
+          换模板不改语气，换渠道不改骨架。
+        </p>
+
+        <div class="blk">
+          <div class="blk-head">
+            <span class="blk-title">当前模板</span>
+            <span class="hint inline">{{ currentTemplate ? currentTemplate.name : '没套模板' }}</span>
+          </div>
+          <label class="fl">
+            <span>换模板</span>
+            <select v-model="tplPick" class="field" @change="switchTemplate">
+              <option value="">不套模板（只按文体要求写）</option>
+              <option v-for="t in tplCandidates" :key="t.id" :value="t.id">
+                {{ t.name }} · {{ t.outline.length }} 节
+              </option>
+            </select>
+          </label>
+          <!-- 这句必须说：换模板后旧节不会重写，否则会以为点一下就全重生成了 -->
+          <p class="hint">只影响后面生成的节：已写节点的要点存在 meta_json.outline 里，不会被改。要重写哪一节就单独重生它。</p>
+
+          <label class="fl">
+            <span>渠道</span>
+            <select v-model="channelPick" class="field" @change="switchChannel">
+              <option value="">不指定</option>
+              <option v-for="c in store.channels" :key="c.id" :value="c.id">{{ c.label }}</option>
+            </select>
+          </label>
+          <p class="hint">下一节生成时生效：平台要求会单独一段进 S1，不会和文体要求混在一起。</p>
+        </div>
+
+        <div class="blk">
+          <div class="blk-head">
+            <span class="blk-title">骨架</span>
+            <button class="btn btn-sm" :disabled="!canEditOutline || tplBusy" @click="saveOutline">
+              {{ tplBusy ? '保存中…' : '保存骨架' }}
+            </button>
+          </div>
+          <p v-if="currentTemplate && currentTemplate.is_builtin" class="hint">
+            内置模板只读：下面只能看。要改就用「另存为我的模板」，改副本。
+          </p>
+          <div v-for="(s, i) in outlineDraft" :key="i" class="tpl-sec">
+            <div class="tpl-sec-head">
+              <span class="tpl-sec-no">{{ i + 1 }}</span>
+              <input v-model="s.heading" class="field" placeholder="节标题" :disabled="!canEditOutline" />
+              <input
+                v-model.number="s.target_words"
+                class="field tpl-words"
+                type="number" min="0" step="100"
+                :disabled="!canEditOutline"
+              />
+              <button v-if="canEditOutline" class="mini-btn" title="删掉这一节" @click="removeSection(i)">
+                <AppIcon name="trash" :size="12" />
+              </button>
+            </div>
+            <textarea v-model="s.prompt" class="field" rows="2" placeholder="这一节要写什么"
+                      :disabled="!canEditOutline"></textarea>
+          </div>
+          <p v-if="!outlineDraft.length" class="empty">
+            这套模板还没有节。没有骨架时 S0 不出内容，就成了无结构写作。
+          </p>
+          <button v-if="canEditOutline" class="btn btn-sm" @click="addSection">+ 加一节</button>
+        </div>
+
+        <div class="blk">
+          <div class="blk-head">
+            <span class="blk-title">沉淀与复用</span>
+          </div>
+          <div class="row-act">
+            <button class="btn btn-sm" :disabled="!currentTemplate || tplBusy" @click="saveAsMine">
+              另存为我的模板
+            </button>
+            <button class="btn btn-sm" :disabled="tplBusy" @click="sedimentFromWork">
+              {{ tplBusy ? '处理中…' : '从本篇沉淀模板' }}
+            </button>
+          </div>
+          <p v-if="tplNote" class="hint">{{ tplNote }}</p>
+          <p class="hint">沉淀是把本篇的节标题与节拍卡直接抽成骨架，不调模型，也不改原稿。</p>
+        </div>
+      </section>
+
       <!-- 上下文 -->
       <section v-else-if="tab === 'context'" class="section">
         <!-- 记忆状态：索引与摘要。没建索引时 S4/S5 是空的，先在这里看得到 -->
@@ -730,6 +814,137 @@ async function saveProfile() {
   await store.saveVoiceProfile(profileDraft.value)
 }
 
+// ---- 模板：写什么（骨架）× 发到哪（渠道），与上一页的文风互不影响 ----
+const tplPick = ref('')
+const channelPick = ref('')
+const currentTemplate = ref(null)
+const tplCandidates = ref([])
+const outlineDraft = ref([])
+const tplBusy = ref(false)
+const tplNote = ref('')
+
+// 只读判断落在 is_builtin 上：内置行每次启动都被 YAML 覆盖，改了下一次就是白干
+const canEditOutline = computed(
+  () => Boolean(currentTemplate.value) && !Number(currentTemplate.value.is_builtin || 0),
+)
+
+async function loadTemplatePanel() {
+  const w = store.work
+  tplPick.value = w?.template_id || ''
+  channelPick.value = w?.channel || ''
+  currentTemplate.value = null
+  outlineDraft.value = []
+  tplNote.value = ''
+  if (!w) return
+  // 候选只按文种筛，不按 subtype/channel 硬筛：同一套骨架换个平台照样能用，
+  // 筛掉只会让人以为没得选
+  tplCandidates.value = await store.loadTemplateLib({ kind: w.kind || 'article' })
+  // 当前这套单独取：它可能属于别的文种，混在筛过的列表里会显示成「没套模板」
+  currentTemplate.value = await store.loadTemplate(w.template_id)
+  outlineDraft.value = (currentTemplate.value?.outline || []).map((s) => ({ ...s }))
+}
+
+async function switchTemplate() {
+  // 空串 = 明确「不套模板」；发 null 会被服务端当成「这个字段没改」而丢掉
+  const ok = await store.updateWork({ template_id: tplPick.value || '' })
+  if (!ok) return
+  await loadTemplatePanel()
+  tplNote.value = currentTemplate.value
+    ? `已切到「${currentTemplate.value.name}」，下一节起按这套骨架写。`
+    : '已取消模板：下一节起只按文体要求写，不再有固定骨架。'
+}
+
+async function switchChannel() {
+  const ok = await store.updateWork({ channel: channelPick.value })
+  if (!ok) return
+  tplNote.value = channelPick.value
+    ? `下一节起按「${store.channelLabel(channelPick.value)}」的节奏写，平台要求单独一段进 S1。`
+    : '下一节起不再叠加平台要求。'
+}
+
+async function saveOutline() {
+  if (!currentTemplate.value || !canEditOutline.value) return
+  tplBusy.value = true
+  try {
+    const clean = outlineDraft.value
+      .map((s) => ({
+        heading: (s.heading || '').trim(),
+        prompt: (s.prompt || '').trim(),
+        target_words: Number(s.target_words) || 0,
+      }))
+      .filter((s) => s.heading)
+    if (!clean.length) {
+      tplNote.value = '至少要留一节：没有骨架时 S0 不出内容，就成了无结构写作。'
+      return
+    }
+    const got = await store.updateTemplate(currentTemplate.value.id, { outline: clean })
+    if (!got) return
+    currentTemplate.value = got
+    outlineDraft.value = (got.outline || []).map((s) => ({ ...s }))
+    tplNote.value = `骨架已保存（${clean.length} 节）。`
+  } finally {
+    tplBusy.value = false
+  }
+}
+
+function addSection() {
+  outlineDraft.value.push({ heading: '', prompt: '', target_words: 800 })
+}
+
+function removeSection(i) {
+  outlineDraft.value.splice(i, 1)
+}
+
+async function saveAsMine() {
+  const t = currentTemplate.value
+  if (!t) return
+  tplBusy.value = true
+  try {
+    // 用编辑框里这份而不是库里的：刚改完骨架还没点保存时，「另存」应当带上改过的内容
+    const got = await store.createTemplate({
+      kind: t.kind || store.work?.kind || 'article',
+      name: `${t.name}（我的副本）`.slice(0, 80),
+      subtype: t.subtype || '',
+      channel: t.channel || '',
+      outline: outlineDraft.value
+        .map((s) => ({
+          heading: (s.heading || '').trim(),
+          prompt: (s.prompt || '').trim(),
+          target_words: Number(s.target_words) || 0,
+        }))
+        .filter((s) => s.heading),
+      style_prompt: t.style_prompt || '',
+      checks: t.checks || [],
+      tags: t.tags || [],
+      note: t.note || '',
+    })
+    if (!got) return
+    // 复制完直接切过去：这一步本来就是「我要改这套内置模板」，切过去才好接着改
+    await store.updateWork({ template_id: got.id })
+    await loadTemplatePanel()
+    tplNote.value = `已另存为「${got.name}」并切到这份副本上，现在可以改骨架了。`
+  } finally {
+    tplBusy.value = false
+  }
+}
+
+async function sedimentFromWork() {
+  if (!store.work) return
+  tplBusy.value = true
+  try {
+    const got = await store.templateFromWork(store.work.id)
+    if (!got) return
+    const n = (got.outline || []).length
+    // 服务端超 30 节会截断，说清楚取了多少，否则会以为整本都进去了
+    tplNote.value = got.truncated
+      ? `已沉淀「${got.name}」：取前 ${n} 节，另有 ${got.truncated} 节因超过 30 节上限没进来。`
+      : `已沉淀「${got.name}」：${n} 节。可在控制台「配置 → 模板」里改名或设为默认。`
+    await loadTemplatePanel()
+  } finally {
+    tplBusy.value = false
+  }
+}
+
 // ---- 图谱 ----
 const KIND_LABEL = {
   character: '人物', location: '地点', item: '物品',
@@ -860,6 +1075,7 @@ const tabs = computed(() => {
     { id: 'facts', label: '事实', count: store.facts.length },
     { id: 'terms', label: '术语', count: store.terms.length },
     { id: 'style', label: '文风', count: 0 },
+    { id: 'template', label: '模板', count: 0 },
     { id: 'graph', label: '图谱', count: graphEntities.value.length, novelOnly: true },
     { id: 'context', label: '上下文', count: 0 },
     { id: 'versions', label: '历史', count: store.versions.length },
@@ -892,6 +1108,7 @@ async function loadAll() {
     store.loadVoice(),
   ])
   loadStyle()
+  loadTemplatePanel()
 }
 
 // 画像变了就刷新编辑框（重新统计、加/删样本都会走到这里）
@@ -1791,5 +2008,32 @@ defineExpose({ refreshContext })
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+/* 骨架逐节编辑：序号 + 标题 + 字数挤一行，要点折到下一行 */
+.tpl-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--line-soft);
+}
+.tpl-sec:last-of-type {
+  border-bottom: 0;
+}
+.tpl-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tpl-sec-no {
+  width: 18px;
+  flex: none;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.tpl-words {
+  width: 84px;
+  flex: none;
 }
 </style>

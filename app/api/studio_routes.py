@@ -91,8 +91,13 @@ class WorkCreate(BaseModel):
     kind: Literal["novel", "article"] = "article"
     scale: Literal["single", "series"] = "single"
     subtype: str = ""
+    # 渠道与 subtype 正交：历史专题既可以发公众号也可以发知乎。
+    # 留空就是「不发到任何平台」，只看文种约束。
+    channel: str = ""
     title: str = Field(min_length=1, max_length=120)
     premise: str = ""
+    # 三态：null = 没指定，按 kind+subtype+channel 自动挑一套；
+    # "" = 明确说「不套模板」；具体 id = 用户在下拉框里挑的
     template_id: Optional[str] = None
     target_words: int = 0
 
@@ -106,6 +111,8 @@ class WorkUpdate(BaseModel):
     status: Optional[Literal["active", "paused", "archived"]] = None
     scale: Optional[str] = None
     subtype: Optional[str] = None
+    # 换渠道只影响下一节：已写节点的要点存在 meta_json.outline 里，不动
+    channel: Optional[str] = None
     template_id: Optional[str] = None
     target_words: Optional[int] = None
     style_json: Optional[str] = None
@@ -202,9 +209,305 @@ class GenerateRequest(BaseModel):
 
 # ==================== 模板 ====================
 
+# 模板导出文件上的格式标记：导入时靠它认出「这是一份模板」，
+# 而不是靠有没有 name 字段——作品包里也有 name。
+TEMPLATE_FORMAT = "novel-studio.template/1"
+
+# 内置模板只读的统一说辞：前端会把 `detail` 原样显示在按钮旁边，
+# 只说「409」用户不知道该怎么做。
+_BUILTIN_READONLY = "内置模板只读，请先复制一份再改"
+
+
+class TemplateCreate(BaseModel):
+    kind: Literal["novel", "article"] = "article"
+    name: str = Field(min_length=1, max_length=80)
+    subtype: str = ""
+    channel: str = ""
+    outline: list[dict[str, Any]] = Field(default_factory=list)
+    style_prompt: str = ""
+    checks: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class TemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    subtype: Optional[str] = None
+    channel: Optional[str] = None
+    outline: Optional[list[dict[str, Any]]] = None
+    style_prompt: Optional[str] = None
+    checks: Optional[list[str]] = None
+    tags: Optional[list[str]] = None
+    note: Optional[str] = None
+
+
+class TemplateFromWork(BaseModel):
+    # 不填就用「源作品标题 · 骨架」
+    name: str = ""
+    note: str = ""
+    tags: list[str] = Field(default_factory=list)
+
+
+class TemplatePin(BaseModel):
+    # 不传即取反：前端那颗星只要一个点击，没必要先读一遍当前值
+    pinned: Optional[bool] = None
+
+
+def _json_list(raw: Any) -> list:
+    """库里存的是 JSON 文本，取出来给前端要还原成数组。"""
+    if isinstance(raw, list):
+        return raw
+    try:
+        got = json.loads(raw or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return got if isinstance(got, list) else []
+
+
+def _norm_outline(items: Any) -> list[dict[str, Any]]:
+    """模板骨架归一成 {heading, prompt, target_words}。
+
+    与 `_norm_sections` 分开：那个收的是模型输出（字段名要放宽），
+    这个收的是前端表单（字段已定），但都得挡住「heading 为空」与「字数不是数」——
+    空标题的节进了 S0，模型会照着写一段没有主题的话。
+    """
+    out: list[dict[str, Any]] = []
+    if not isinstance(items, list):
+        return out
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        heading = str(it.get("heading") or "").strip()
+        if not heading:
+            continue
+        try:
+            words = int(it.get("target_words") or 0)
+        except (TypeError, ValueError):
+            words = 0
+        out.append({
+            "heading": heading[:80],
+            "prompt": str(it.get("prompt") or "").strip()[:400],
+            "target_words": words,
+        })
+    return out
+
+
+def _template_payload(tpl: dict[str, Any]) -> dict[str, Any]:
+    """导出用的模板快照：去掉 id / 内置标记 / 使用次数这些绑本机库的字段。"""
+    return {
+        "kind": tpl.get("kind") or "article",
+        "name": tpl.get("name") or "",
+        "subtype": tpl.get("subtype") or "",
+        "channel": tpl.get("channel") or "",
+        "outline": _norm_outline(_json_list(tpl.get("outline_json"))),
+        "style_prompt": tpl.get("style_prompt") or "",
+        "checks": [str(c) for c in _json_list(tpl.get("checks_json"))],
+        "tags": [str(t) for t in _json_list(tpl.get("tags_json"))],
+        "note": tpl.get("note") or "",
+    }
+
+
 @router.get("/studio/templates", dependencies=[Depends(verify_key)])
-async def list_templates(request: Request, kind: str = "", subtype: str = ""):
-    return await _store(request).list_templates(kind=kind, subtype=subtype)
+async def list_templates(request: Request, kind: str = "", subtype: str = "",
+                         channel: str = "", q: str = ""):
+    """模板库。`q` 只看名字；其余是精确过滤（渠道与文种正交，可单独筛）。"""
+    return await _store(request).list_templates(
+        kind=kind, subtype=subtype, channel=channel, q=(q or "").strip())
+
+
+@router.post("/studio/templates", dependencies=[Depends(verify_key)])
+async def create_template(body: TemplateCreate, request: Request):
+    """新建模板。界面上一律 is_builtin=0；内置只从 YAML 种子来。"""
+    return await _store(request).create_template(
+        kind=body.kind,
+        name=body.name.strip(),
+        subtype=body.subtype,
+        channel=body.channel,
+        outline=_norm_outline(body.outline),
+        style_prompt=body.style_prompt,
+        checks=body.checks,
+        tags=body.tags,
+        note=body.note,
+    )
+
+
+@router.post("/studio/templates/import", dependencies=[Depends(verify_key)])
+async def import_template(payload: dict[str, Any], request: Request):
+    """导入一份导出的模板 JSON。
+
+    一律落成新模板（`is_builtin=0`），不按原 id 覆盖：导出文件是拿来换机或
+    发给别人的，覆盖掉本机同 id 的模板等于悄悄改别人的库。
+    """
+    tpl = payload.get("template") if isinstance(payload.get("template"), dict) else payload
+    name = str(tpl.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="模板缺 name，认不出这是什么")
+    kind = str(tpl.get("kind") or "article")
+    if kind not in ("article", "novel"):
+        raise HTTPException(status_code=400, detail=f"kind 只认 article / novel: {kind}")
+    outline = _norm_outline(tpl.get("outline"))
+    if not outline:
+        raise HTTPException(status_code=400, detail="模板骨架是空的：没有 outline 就没有可套的东西")
+    return await _store(request).create_template(
+        kind=kind,
+        name=name[:80],
+        subtype=str(tpl.get("subtype") or ""),
+        channel=str(tpl.get("channel") or ""),
+        outline=outline,
+        style_prompt=str(tpl.get("style_prompt") or ""),
+        checks=[str(c) for c in (tpl.get("checks") or [])],
+        tags=[str(t) for t in (tpl.get("tags") or [])],
+        note=str(tpl.get("note") or ""),
+    )
+
+
+@router.post("/studio/templates/from-work/{work_id}", dependencies=[Depends(verify_key)])
+async def template_from_work(work_id: str, body: TemplateFromWork, request: Request):
+    """把一本作品已写好的骨架沉淀成模板。
+
+    只用「已经写出来的东西」反推骨架，不调模型：节标题就是 heading，
+    节拍卡（或正文开头）就是 prompt，实际字数就是 target_words。
+    这样改一版骨架的成本是「正常写一篇」，而不是「先去学写模板」。
+    """
+    store = _store(request)
+    work = await _require_work(request, work_id)
+    tree = await store.list_tree(work_id)
+    readable = [n for n in tree if n.get("ordinal") is not None]
+    readable.sort(key=lambda n: n.get("ordinal") or 0)
+    if not readable:
+        raise HTTPException(
+            status_code=400,
+            detail="这本作品还没有可读的节点：先生成大纲或手写几节，再来沉淀骨架",
+        )
+
+    truncated = max(0, len(readable) - 30)
+    outline: list[dict[str, Any]] = []
+    for item in readable[:30]:
+        node = await store.get_node(item["id"]) or {}
+        heading = (item.get("title") or "").strip() or f"第 {item.get('ordinal')} 节"
+        # 节拍卡优先：它是人（或模型）写这一节时的真实意图
+        prompt = (node.get("summary") or "").strip()
+        if not prompt:
+            prompt = re.sub(r"\s+", " ", (node.get("content") or "")).strip()[:120]
+        outline.append({
+            "heading": heading[:80],
+            "prompt": prompt,
+            "target_words": int(item.get("word_count") or 0) or 800,
+        })
+
+    resolved = content_types.resolve(
+        work.get("kind") or "article", work.get("scale") or "",
+        work.get("subtype") or "", work.get("channel") or "")
+    from app.studio.assembler import _style_text  # 与装配时同一份口径，避免两处漂移
+    created = await store.create_template(
+        kind=work.get("kind") or "article",
+        name=(body.name or "").strip()[:80] or f"{work.get('title') or '未命名'} · 骨架",
+        subtype=work.get("subtype") or "",
+        channel=work.get("channel") or "",
+        outline=outline,
+        style_prompt=_style_text(work),
+        checks=list(resolved.get("checks") or []),
+        tags=body.tags,
+        note=body.note,
+        source_work_id=work_id,
+    )
+    return {**created, "truncated": truncated, "source_title": work.get("title") or ""}
+
+
+@router.get("/studio/templates/{template_id}", dependencies=[Depends(verify_key)])
+async def get_template(template_id: str, request: Request):
+    tpl = await _store(request).get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    return tpl
+
+
+@router.patch("/studio/templates/{template_id}", dependencies=[Depends(verify_key)])
+async def update_template(template_id: str, body: TemplateUpdate, request: Request):
+    store = _store(request)
+    tpl = await store.get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    if int(tpl.get("is_builtin") or 0):
+        raise HTTPException(status_code=409, detail=_BUILTIN_READONLY)
+    payload = body.model_dump(exclude_none=True)
+    if "outline" in payload:
+        payload["outline"] = _norm_outline(payload["outline"])
+        if not payload["outline"]:
+            raise HTTPException(status_code=400, detail="骨架不能为空：至少留一节")
+    if "name" in payload and not payload["name"].strip():
+        raise HTTPException(status_code=400, detail="模板名不能为空")
+    got = await store.update_template(template_id, **payload)
+    if got is None:
+        raise HTTPException(status_code=404, detail="模板不存在或无更新")
+    return got
+
+
+@router.delete("/studio/templates/{template_id}", dependencies=[Depends(verify_key)])
+async def delete_template(template_id: str, request: Request):
+    """删模板并解绑引用它的作品。返回解绑了几本，让前端能说清影响。"""
+    store = _store(request)
+    tpl = await store.get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    if int(tpl.get("is_builtin") or 0):
+        raise HTTPException(status_code=409, detail=_BUILTIN_READONLY)
+    return await store.delete_template(template_id)
+
+
+@router.post("/studio/templates/{template_id}/duplicate", dependencies=[Depends(verify_key)])
+async def duplicate_template(template_id: str, request: Request):
+    """复制一份可改的副本。
+
+    这是改内置模板的唯一入口：内置行每次启动都被 YAML 覆盖，
+    直接放开编辑，用户改完重启就没了，比不能改更让人恼火。
+    """
+    store = _store(request)
+    tpl = await store.get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    return await store.create_template(
+        kind=tpl.get("kind") or "article",
+        name=f"{tpl.get('name') or '未命名'}（副本）"[:80],
+        subtype=tpl.get("subtype") or "",
+        channel=tpl.get("channel") or "",
+        outline=_json_list(tpl.get("outline_json")),
+        style_prompt=tpl.get("style_prompt") or "",
+        checks=[str(c) for c in _json_list(tpl.get("checks_json"))],
+        tags=[str(t) for t in _json_list(tpl.get("tags_json"))],
+        note=tpl.get("note") or "",
+        source_work_id=tpl.get("source_work_id") or "",
+    )
+
+
+@router.post("/studio/templates/{template_id}/default", dependencies=[Depends(verify_key)])
+async def set_default_template(template_id: str, request: Request):
+    """设为同 kind+subtype+channel 的默认模板（同组其它行会被清零）。"""
+    store = _store(request)
+    tpl = await store.get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    await store.set_default_template(template_id)
+    return await store.get_template(template_id)
+
+
+@router.post("/studio/templates/{template_id}/pin", dependencies=[Depends(verify_key)])
+async def pin_template(template_id: str, request: Request, body: Optional[TemplatePin] = None):
+    """收藏 / 取消收藏。不传 body 就是取反。"""
+    got = await _store(request).toggle_template_pin(
+        template_id, None if body is None else body.pinned)
+    if got is None:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    return got
+
+
+@router.get("/studio/templates/{template_id}/export", dependencies=[Depends(verify_key)])
+async def export_template(template_id: str, request: Request):
+    """导出成一份可换机、可发人的 JSON。"""
+    tpl = await _store(request).get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    return {"format": TEMPLATE_FORMAT, "template": _template_payload(tpl)}
 
 
 # 备份失败时回给前端的那一句：固定文案。
@@ -278,17 +581,22 @@ async def search_all(request: Request, q: str = "", limit: int = 20):
 async def create_work(body: WorkCreate, request: Request):
     store = _store(request)
     template_id = body.template_id
-    # 没指定模板时按 subtype 找一个同类的，避免单篇生成时完全没有骨架
-    if not template_id and body.kind == "article":
-        candidates = await store.list_templates(kind="article", subtype=body.subtype or "general")
-        if not candidates:
-            candidates = await store.list_templates(kind="article")
-        if candidates:
-            template_id = candidates[0]["id"]
+    # 没指定模板时按「文种 + 渠道」找一套：优先级链在 store.pick_template 里，
+    # 第一条是 subtype+channel 的默认，最后兜底到该 kind 的任意一个。
+    # 注意区分「没填」与「空串」：前者是「你帮我挑」，后者是「不套模板」，
+    # 两者都当没填的话，界面上那个「不套模板」选项会静默失效。
+    # 空串要归成 NULL：这一列是指向 templates 的外键，空串不是任何模板的 id。
+    if template_id is None:
+        picked = await store.pick_template(body.kind, body.subtype, body.channel)
+        if picked:
+            template_id = picked["id"]
+    elif not template_id.strip():
+        template_id = None
     return await store.create_work(
         kind=body.kind,
         scale=body.scale,
         subtype=body.subtype,
+        channel=body.channel,
         title=body.title,
         premise=body.premise,
         template_id=template_id,
@@ -886,12 +1194,10 @@ async def preview_context(body: GenerateRequest, request: Request, work_id: str,
     if node_id and not node:
         raise HTTPException(status_code=404, detail="节点不存在")
 
-    template = None
-    if work.get("template_id"):
-        tpls = [t for t in await store.list_templates() if t["id"] == work["template_id"]]
-        template = tpls[0] if tpls else None
+    template = await _template_of(store, work)
     resolved = content_types.resolve(work.get("kind") or "article",
-                                    work.get("scale") or "", work.get("subtype") or "")
+                                    work.get("scale") or "", work.get("subtype") or "",
+                                    work.get("channel") or "")
 
     # 与「生成」共用一条指令口径，预览显示的就是真要发出去的那一份
     instruction = _instruction_for(body.task_type, node, work, body.instruction)
@@ -945,12 +1251,10 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
         )
     instruction = _instruction_for(body.task_type, node, work, body.instruction)
 
-    template = None
-    if work.get("template_id"):
-        tpls = [t for t in await store.list_templates() if t["id"] == work["template_id"]]
-        template = tpls[0] if tpls else None
+    template = await _template_of(store, work)
     resolved = content_types.resolve(work.get("kind") or "article",
-                                    work.get("scale") or "", work.get("subtype") or "")
+                                    work.get("scale") or "", work.get("subtype") or "",
+                                    work.get("channel") or "")
 
     # 单节生成前把本节最新正文入索引：用户刚手改过，不重建的话
     # S5 检索到的还是旧版本，续写就会接不上。
@@ -1051,7 +1355,8 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
                         if _work:
                             _resolved = content_types.resolve(
                                 _work.get("kind") or "article",
-                                _work.get("scale") or "", _work.get("subtype") or "")
+                                _work.get("scale") or "", _work.get("subtype") or "",
+                                _work.get("channel") or "")
                             await consistency.run_checks(store, _work, fresh, resolved=_resolved)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(f"[studio] 检查失败 node={node_id}: {exc}")
@@ -1075,9 +1380,11 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
 
 @router.get("/studio/content-types", dependencies=[Depends(verify_key)])
 async def get_content_types():
-    """前端下拉框的数据源。新增文种只改 content-types.yaml，页面不用动。"""
+    """前端下拉框的数据源。新增文种/渠道只改 content-types.yaml，页面不用动。"""
     return {
         "kinds": content_types.list_kinds(),
+        # 渠道是独立于文种的一层：前端要选「历史 + 公众号」，两个下拉各取一处
+        "channels": content_types.list_channels(),
         "error": content_types.get_types().get("_load_error", ""),
     }
 
@@ -1100,10 +1407,7 @@ async def reload_content_types(request: Request):
 async def _template_of(store, work: dict) -> Optional[dict]:
     if not work.get("template_id"):
         return None
-    for tpl in await store.list_templates():
-        if tpl["id"] == work["template_id"]:
-            return tpl
-    return None
+    return await store.get_template(work["template_id"])
 
 
 def _work_meta(work: dict) -> dict[str, Any]:
@@ -1188,6 +1492,9 @@ def _outline_prompt(work: dict, resolved: dict, template: Optional[dict],
     if work.get("premise"):
         lines.append(f"主旨：{work['premise']}")
     lines.append(f"类型：{resolved.get('label')} / {resolved.get('subtype_label')}")
+    if resolved.get("channel_label"):
+        # 渠道影响节数与每节字数：公众号 5 节太长，小红书 5 节太多
+        lines.append(f"渠道：{resolved['channel_label']}")
     if resolved.get("target_words"):
         lines.append(f"目标总字数：{resolved['target_words']}")
     if resolved.get("note"):
@@ -1220,7 +1527,8 @@ async def generate_outline(work_id: str, body: OutlineRequest, request: Request)
     store = _store(request)
     work = await _require_work(request, work_id)
     resolved = content_types.resolve(work.get("kind") or "article",
-                                    work.get("scale") or "", work.get("subtype") or "")
+                                    work.get("scale") or "", work.get("subtype") or "",
+                                    work.get("channel") or "")
     template = await _template_of(store, work)
 
     existing = await store.list_readable(work_id)
@@ -1344,7 +1652,8 @@ async def run_pipeline(work_id: str, body: PipelineRequest, request: Request):
     store = _store(request)
     work = await _require_work(request, work_id)
     resolved = content_types.resolve(work.get("kind") or "article",
-                                    work.get("scale") or "", work.get("subtype") or "")
+                                    work.get("scale") or "", work.get("subtype") or "",
+                                    work.get("channel") or "")
     template = await _template_of(store, work)
     work_meta = _work_meta(work)
 
@@ -1967,8 +2276,10 @@ async def transform(body: TransformRequest, request: Request):
         work = await store.get_work(body.work_id)
         if work:
             resolved = content_types.resolve(work.get("kind") or "article",
-                                            work.get("scale") or "", work.get("subtype") or "")
-            style = resolved.get("style_prompt") or ""
+                                            work.get("scale") or "", work.get("subtype") or "",
+                                            work.get("channel") or "")
+            # 一次性任务只拼一段给 system：与逐节装配不同，这里不需要分桶分层
+            style = content_types.requirements_text(resolved)
 
     gateway = _gateway(request)
     model = pick_model(request.app.state.registry, body.model or None)
@@ -1978,7 +2289,7 @@ async def transform(body: TransformRequest, request: Request):
     else:
         system = "你是中文编辑，只输出加工后的正文，不解释、不加前后缀。"
     if style:
-        system += "\n文体要求：" + style
+        system += "\n" + style
     user_parts = [f"<task>{brief}</task>"]
     if body.instruction:
         user_parts.append(f"<extra>{body.instruction}</extra>")
@@ -2384,7 +2695,8 @@ async def run_check(work_id: str, body: CheckRequest, request: Request):
     store = _store(request)
     work = await _require_work(request, work_id)
     resolved = content_types.resolve(
-        work.get("kind") or "article", work.get("scale") or "", work.get("subtype") or "")
+        work.get("kind") or "article", work.get("scale") or "", work.get("subtype") or "",
+        work.get("channel") or "")
     template = await _template_of(store, work)
 
     created: list[dict[str, Any]] = []

@@ -268,10 +268,7 @@ class JobQueue:
     async def _template_of(self, work: dict[str, Any]) -> Optional[dict[str, Any]]:
         if not work.get("template_id"):
             return None
-        for tpl in await self.store.list_templates():
-            if tpl["id"] == work["template_id"]:
-                return tpl
-        return None
+        return await self.store.get_template(work["template_id"])
 
     async def _execute(self, job: dict[str, Any]) -> dict[str, Any]:
         work = await self.store.get_work(job["work_id"])
@@ -283,7 +280,8 @@ class JobQueue:
 
         payload = tasks.payload_of(job)
         resolved = content_types.resolve(
-            work.get("kind") or "article", work.get("scale") or "", work.get("subtype") or "")
+            work.get("kind") or "article", work.get("scale") or "", work.get("subtype") or "",
+            work.get("channel") or "")
         ctx = tasks.TaskContext(
             store=self.store,
             gateway=self.gateway,
