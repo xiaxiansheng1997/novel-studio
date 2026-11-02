@@ -1,0 +1,29 @@
+app/api/studio_routes.py
+  s_85cd431edb9d78::t_6b11740e189b18 2051-2102
+frontend/src/components/GraphMap.vue
+  s_85cd431edb9d78::t_4431b1ff691352 222,227-228,230,232-312,765-770
+  s_85cd431edb9d78::t_56bd6fa00416b0 1108-1230
+  s_85cd431edb9d78::t_f18fef5a171982 8-14,18-32,39,53,154-206,229,231
+tests/test_studio_timeline.py
+  s_85cd431edb9d78::t_d7559a1097c18b 1-124
+frontend/src/views/StudioView.vue
+  s_85cd431edb9d78::t_b3d0f3c09ddb4b 410
+frontend/src/components/StudioPanel.vue
+  s_85cd431edb9d78::t_684d675bb2c2e3 585,587,616
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "606c5279994ce9746826005fee1386b4fa391fe1",
+  "prompts": {},
+  "sessions": {
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
