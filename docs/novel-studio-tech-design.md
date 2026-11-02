@@ -993,7 +993,7 @@ subgraph(work_id, text=标题+指令+主旨, hops=2, limit=40)
 
 前 4 条纯结构化，可每次保存都跑；两条软规则同样零 LLM，只是级别降到 info、不参与打分。
 
-检查结果写入 `issues` 表（两种形态共用），前端在编辑器右侧以告警条展示，并按 severity 分两组：硬告警（error/warn，参与扣分，按钮「忽略」）与「待确认（不扣分）」（info，按钮「就是这样」＝作者确认无误后销账）。规则名一律显示中文（`StudioPanel.vue:RULE_LABEL`），不把 `dead_character` 这种内部名丢给作者。告警带证据引文，点「定位」高亮正文对应片段并滚到可视区。**告警不阻塞保存**。原设计里「告警阻塞 `draft → final`（可强制忽略并记原因）」这一条**没实现**：`PATCH /studio/nodes/{id}` 不查 `issues`，作者改状态下拉框就能定稿。要补的话只拦 `error`（不拦 warn，更不拦 info），且必须给「仍然定稿」的逃生门 + 原因写入 `runs`，否则卡点会变成绕过理由。
+检查结果写入 `issues` 表（两种形态共用），前端在编辑器右侧以告警条展示，并按 severity 分两组：硬告警（error/warn，参与扣分，按钮「忽略」）与「待确认（不扣分）」（info，按钮「就是这样」＝作者确认无误后销账）。规则名一律显示中文（`StudioPanel.vue:RULE_LABEL`），不把 `dead_character` 这种内部名丢给作者。告警带证据引文，点「定位」高亮正文对应片段并滚到可视区。**告警不阻塞保存**。v2.10 起「定稿」这一档补上了闸门（原设计里「可强制忽略并记原因」只实现了一半）：`GET /studio/nodes/{id}/final-gate` 只读预检，`PATCH /studio/nodes/{id}` 带 `status=final` 时若本节还有未处理 `error` 就回 409，`detail` 就是同一份清单（条数 + 前 10 条规则与原文 + 截断数）；前端先把清单摆出来，点「仍然定稿」再带 `force=true` 重发，取消则把下拉框退回原值。口径刻意只拦「本节 + error + 未处理」：warn / info 是「可能有问题」，别的节与全书级告警（`node_id` 为空，比如伏笔超期）不该拦住单独一节，点过「已处理」的自然不挡；**定稿不顺手消告警**，它们要人在「告警」里逐条销账。代价是原设计里的「记原因」没有落库——`force` 只是一个布尔确认，要留痕得另加一列或一张表；宁可先不做，也不写一句假的「已记录」。
 
 ## 10. 批量流水线
 
@@ -1132,6 +1132,7 @@ GET    /studio/nodes/{id}
 PATCH  /studio/nodes/{id}                   # 正文保存、状态流转（snapshot=true 另存一版；
         # snapshot_source 只认 human|ai_draft|ai_polish，其余 400；不传按 human）
 POST   /studio/nodes/{id}/move              # {direction: up|down} 与同层紧邻兄弟互换，章号一起对调
+GET    /studio/nodes/{id}/final-gate          # 定稿前预检：本节未处理 error 条数 + 前 10 条原文（v2.10）
 GET    /studio/nodes/{id}/versions          # 列表只给 版本号/时间/来源/字数
 GET    /studio/nodes/{id}/versions/{vid}    # 读回那一版全文（v2.0 补）
 POST   /studio/nodes/{id}/versions/{vid}/restore  # 回滚：先把当下正文存一版再写回（v2.0 补）
@@ -1139,6 +1140,10 @@ DELETE /studio/nodes/{id}                   # 快照+落盘+删除同一次持�
 DELETE /studio/works/{id}                   # 删先在锁内取整库副本（VACUUM INTO 的一致快照）
 GET    /studio/backups                      # 备份清单（节点 JSON + 整库副本），dir 只给相对写法
 POST   /studio/backups/{name}/restore       # 找回那一节（连子树与历史版本），顺手把上游摘要判过期
+GET    /studio/works/{id}/bundle             # 单本作品包（树/版本/素材/事实/术语/卡/图谱），可下载（v2.10）
+GET    /studio/library/bundle                # 整库一层书目，每本一个包（v2.10）
+POST   /studio/works/import                  # 单本或整库包都认：只新增、id 全重发、引用重映射；
+        # 一本失败不拦别的 → {imported, failed, count}；整库上限 200 本、单本 2 万节点（v2.10）
 
 # 生成（已实现，SSE）
 POST   /studio/nodes/{id}/generate           # {task_type, instruction, save, variant}
@@ -1230,6 +1235,7 @@ GET    /studio/works/{id}/index/status
 GET/POST /studio/ideas                       # 一句话想法；POST {text: 1..500}
 PATCH/DELETE /studio/ideas/{id}              # status: open|used|dropped；used 时带 work_id
 GET    /studio/stats/daily?days=             # 手写净增字数 / 连续天数（write_days 实时累加）
+GET    /studio/stats/cost-quality?works=&nodes=  # runs 四层汇总：整体/按任务/按作品/按节 + 未处理硬告警（v2.10）
 
 # 任务队列（M4，已实现）
 POST   /studio/works/{id}/batch             # {task_type, node_ids, only_empty, limit, priority,
@@ -1315,6 +1321,11 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
    旧稿一次搬进来：粘贴或拖 `.txt / .md`，按「第X章 / 第X节 / ## 标题」或空行拆节，先看预览（几节、多少字、
    每节开头一句）再导；导完统一重建一次索引——逐节导会触发几十次「选中 + 重拉整棵树」。右栏的素材详情、
    事实卡、术语都改成行内可编辑：素材正文改了按 `content_hash` 重建这一条的索引，事实卡改文字不丢出处。
+15. **定稿闸门与换机迁移（v2.10）**：状态下拉切「定稿」时先调 `final-gate`，把本节未处理的硬告警摆出来再确认——
+   取消把下拉框退回原值（屏幕上写着「定稿」而库里还是草稿，是最坏的一种谎），确认才带 `force` 重发。
+   书架「在写 / 已归档」那行右端有「导入 / 导出整库」，作品卡悬停另有单本导出；导入成功一本就自动打开，
+   文件清空 `value` 才允许同一份再导一次（导两次是两本独立的书）。控制台「数据」页顶部另有一张
+   「生成成本与质量」：总量 → 任务 chips → 按作品表 → 最耗时的节表，随「刷新」与切 tab 重拉。
 
 ### 12.1 图谱力导向视图（`frontend/src/components/GraphMap.vue`）
 
@@ -1354,6 +1365,7 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | **插在 M5 之前 · 三件结构/资料维护**（已完成 2026-10-29） | 左树折叠（按作品记在 `localStorage`，选中被折叠的节自动展开祖先）、导入旧稿成节（`ImportDocDialog`：粘贴/拖 `.txt/.md`，按标题或空行拆，预览后逐节建，最后统一重建索引）、素材/事实/术语可编辑（三条 PATCH；素材正文改后重建这一条索引） | 全量 268 passed，**零真实模型调用**：改素材正文后旧词搜不到、新词当场命中，只改标题不丢索引；改事实卡保留 `source_id`；术语改名撞重回 400 而非 500；导入 3 节字数进树而 `/stats/daily` 今天仍是 0 | 已完成 |
 | **插在 M5 之前 · 第一批三件实用**（已完成 2026-11-02） | 整库每日自动快照（`maybe_daily_snapshot` + `main.py` 里 30 分钟一条的后台循环 + 控制台手动一份，`VACUUM INTO` 到 `backups/snapshots/` 留 7 份）、全作品查找替换（`POST /studio/works/{id}/replace`，默认 dry_run，真替换先存旧文再改正文，来源 `bulk_replace` 不刷日历，术语同名同步改名，`Ctrl+H` 弹层）、第 5 条软规则 `phrase_repeat`（跨节字面复用 + 开头雷同，5 字起、专名先掩掉，小说与系列文档都开） | 全量 342 passed，**零真实模型调用**：快照在「空库 / 没改动 / 今天已取」三种情况下都不产副本而手动那份一定写；替换的 dry_run 一个字都不写、真替换后旧文在版本表里而「今天字数」没变；软规则在真实语料上先报 3 条全误报、收紧后 0 条，注入同一句立刻报出（见第 16 章 #36） | 已完成 |
 | **插在 M5 之前 · 第二批结构与视野**（已完成 2026-11-02） | 书架从工作台视图里拆成 `ShelfView.vue`（纯搬运，行为不变）、专注模式（顶栏按钮 + `Ctrl+Shift+F`，`Esc` 退出，左树与右栏收起、生成条保留，状态不落盘）、跨卷拖拽（`store.reparent_node` 只搬有 `ordinal` 的叶子到同作品容器的末尾或顶层；`_renumber_locked` 按 `ORDER BY path` 重排 1..N，十列先整体取负再翻正；`POST /studio/nodes/{id}/reparent` 误拖 400 / 未知 404）、图谱时间轴（`GET /studio/works/{id}/graph/timeline` 只读、仅 novel；participants 换名字、坏 `state_json` 退化成 `{}`；弹层「关系 / 时间轴」两个 chip） | 全量 354 passed，**零真实模型调用**：跨卷拖拽 8 例 + 真机拖一次 12 项断言；时间轴 4 例 + 真机 11 项（含坏 JSON、空图与跳节）；书架抽出前后 `npm run build` 模块数只增不减（86 modules）、书架六件事冒烟一致；专注模式断言左树/右栏 `display:none`、`Esc` 恢复、切节仍专注（见第 16 章 #37–#40） | 已完成 |
+| **插在 M5 之前 · 第三批定稿与迁移三件**（已完成 2026-11-02） | 定稿闸门（`GET /studio/nodes/{id}/final-gate` 只读预检 + `PATCH status=final` 有未处理 error 回 409，`force=true` 放行，前端先看清单再确认）、作品包导出/导入（单本 `GET …/bundle` + 整库 `GET /studio/library/bundle` + `POST /studio/works/import`，只新增、id 全重发、引用重映射，失败清单不回滚、导入后重建索引）、控制台成本与质量面板（`GET /studio/stats/cost-quality` 四层汇总 + 按作品/按节两张表，均分只算打过分的跑批） | 全量 373 passed，**零真实模型调用**：闸门 7 例（拦/放、warn/info 与全书级不拦、已处理不拦、预检与 409 同源）；作品包 6 例（导出内容、id 重映射、导两次两本书、坏包 400、整库一本坏不拦好的）+ 真机导出→整库导出→导入正文一致；成本面板 6 例（整体/任务/作品/节四层口径、全书级不进节、warn 与已处理不计数、空库）+ 真机面板断言（见第 16 章 #41–#43） | 已完成 |
 | **M5 向量（可选）** | fastembed 接入、向量召回、RRF 融合、检索评测 | 语义查询召回优于纯关键词 | 3-4 天 |
 
 总计约 **4-5 周**（连续开发）；业余时间按 8-10 周估。M1 结束时系统就可用（能写单篇与单章），后续都是增强。
@@ -1369,8 +1381,8 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | 素材捕获（从 /live 抓页面） | M3 | 手工粘贴素材占比 > 50% |
 | 多平台格式化导出 | M4 | 单篇手工排版超过 10 分钟 |
 | 产能与排期 | M4 | 开始日更 |
-| 成本与质量面板 | M4 | 月调用超过 1,000 次 |
-| 全量导出/导入 | M4 | 首次换机或迁移 |
+
+（成本与质量面板、全量导出/导入已在 v2.10 落地，见第 13 章路线表与第 16 章 #41–#43。）
 
 ## 14. 风险登记
 
@@ -1481,6 +1493,9 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | 38 | 专注模式 | Playwright 真机断言（tmp 库起服务）：顶栏按钮 / `Ctrl+Shift+F` 进入、`Esc` 退出，弹层优先于 `Esc` | 长段写作时左树与右栏占着视线 | 已测：进入后左树与右栏 `display:none`、`ed-top` 只剩返回 / 作品名 / 保存状态 / 退出专注、`gen-bar` 仍在；`Esc` 恢复；切节后仍是专注；状态只在这一屏（不写 `localStorage`），`backToShelf()` 复位 |
 | 39 | 跨卷拖拽 | `tests/test_studio_reparent.py`（8 例，tmp 库）+ Playwright 真机把一章拖进另一卷 | 树上一直只能同层上下移，换卷只能新建再腾挪 | 已测：全量 354 passed；真机 12/12。关键回归：落点在目标卷末尾且树序对；全书章号重排 1..N 且与 `ORDER BY path` 一致；`summaries.ref_ordinal` / `chunks.ordinal` 按节点 id 跟号；十列构造「会撞 UNIQUE」的值验证先取负再翻正；已在本卷末尾就不动；目标是叶子 / 跨作品 / 自己 / 自家子树都被拒；容器不能当拖拽源、未知节点 404 |
 | 40 | 图谱时间轴 | `tests/test_studio_timeline.py`（4 例，tmp 库）+ Playwright 真机切时间轴 | 图谱只回答「现在还剩下什么」，看不到事情怎么发生 | 已测：全量 354 passed；真机 11/11。关键回归：空图三个空数组（单篇问时间轴 400）；事件按 `ordinal` 与 `sections` 一起排序；participants 由实体 id 映射成名字、未知 id 过滤；坏 `state_json` 与非对象都退化成 `{}` 且同一节其余行照常返回；点一行跳回那一节并关弹层；没数据时那句「还没有抽取过；先在右栏点『抽本节』」 |
+| 41 | 定稿闸门 | `tests/test_studio_final_gate.py`（7 例，tmp 库）；前端切「定稿」先预检再确认 | 定稿时还没人读过的硬告警，该不该拦一下 | 已测：本节有未处理 error → 409 且 `detail` 带清单；`force=true` 放行且告警一条不少；warn/info、别的节、全书级（`node_id` 空）与已处理的 error 都不拦；预检接口与 PATCH 同一份判断（前 10 条 + `truncated`），未知节点 404；前端取消时下拉框退回原值 |
+| 42 | 作品包导出/导入 | `tests/test_studio_bundle.py`（6 例，tmp 库）+ Playwright 真机（卡片导出 → 整库导出 → 导入单本自动打开） | 换机迁移会不会丢正文、引用会不会指错、导两次会不会撞 id | 已测：包里有树/版本/素材/事实/术语/卡/图谱而 `chunks`/`runs` 不在；导入后所有 id 重发，`facts.source_id` / `entities.card_id` / `events.participants` / `states.entity_id` 全指向新 id；导两次是两本互不相交的书；format/版本/空标题 → 400；整库导入 `count=1 failed=[{index:1}]` 而好那本照常落库；真机导完正文与导出前一致、书架多一本 |
+| 43 | 生成成本与质量 | `tests/test_studio_cost_quality.py`（6 例，tmp 库）+ Playwright 真机（控制台「数据」tab） | 一本书花了多少次调用、哪一节最费时、失败几次、评分如何 | 已测：全量 373 passed；真机断言接口口径（6 次 / 8.25 分）与两张表行数，切 tab 往返重拉无 pageerror。关键回归：`done = ok+failed+interrupted` 而 `running` 不进均耗时；均分只算 `COUNT(score)>0`（没评不按 0 分）；全书级跑批（`node_id` 空）进整体/任务/作品但不进「按节」；硬告警只数 `resolved=0 AND severity='error'`，warn 与已处理不算；`works` / `nodes` 参数只限行数不改口径；空库四层都为空 |
 
 ## 17. 与现有代码的接入点
 
@@ -1505,6 +1520,9 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 | `tests/test_edit_entities.py` | `store.update_source/update_fact/update_term`、`indexer.index_source`（按 `content_hash` 增量重建）、`PATCH /studio/sources|facts|terms/{id}` | 否（同为假 gateway + tmp 库；导入用例走的是已有的建节点接口） |
 | `tests/test_publish_plus.py` | `voice.analyze/build/profile_text/traits`、`wechat.styles/render_article(theme, footer, archive)`、`publish.check` 新增四条、`store.add_voice_sample/publication_summary/archive_links`、`GET /studio/voice*`、`PUT /studio/settings/{key}`、`POST /works/{id}/titles|share`、`publications` 五个接口 | 否（同为假 gateway + tmp 库；迁移用例会临时 `DROP TABLE` 三张新表再重开） |
 | `frontend/src/utils/diff.js` | 无（不引依赖，现有 deps 里没有 diff 库） | 新增文件；`StudioPanel.vue` 加「历史」页、`StudioTree.vue` 加上下移、`StudioView.vue` 接回滚与备份提示 |
+| `tests/test_studio_final_gate.py` | `studio_routes._final_gate`、`PATCH /studio/nodes/{id}`（`force`）、`GET /studio/nodes/{id}/final-gate`、`store.list_issues` | 否（tmp 库；预检只读，放行才写状态） |
+| `tests/test_studio_bundle.py` | `store.export_work / export_library / import_work`、`indexer.reindex_work`、`GET …/bundle`、`GET /studio/library/bundle`、`POST /studio/works/import` | 否（tmp 库；导入只新增，不按原 id 覆盖） |
+| `tests/test_studio_cost_quality.py` | `store.cost_quality`、`GET /studio/stats/cost-quality` | 否（tmp 库，纯聚合，不调模型） |
 | `storage/studio.sqlite` | — | 新增文件 |
 | `docs/reverse-proxy.md` | — | 新增文件：README 里的纯反代内容搬过去（`/v1` 用法、四模式与文案校准、风控排查细则、底座侧已知限制），README 只讲写作主线 |
 
@@ -1539,3 +1557,5 @@ GET    /studio/works/{id}/scores            # 最近生成得分（按节点取�
 *v2.8（2026-11-02）· 第一批三件实用*：这三件事不是「新功能」，而是**已经写下的稿子每天在赌的三件事**——库文件坏了没有今天的副本、改名换姓要在几十个正文框里逐处手点、写到后面开始自我复沓却没人提醒（13.1 的能力池里躺着「自我重复检测」，触发条件写的是「单书超过 200 章」）。①**整库每日快照**——`store.maybe_daily_snapshot()` 由 `main.py` 的后台循环每 30 分钟看一次（开机先看一次），当天第一次真改过正文就 `VACUUM INTO` 到 `storage/backups/snapshots/`、留 7 份；空库不占名额、上次快照后一个字没改不产重复副本、今天取过不再取。**手动那份单独一档**（`POST /studio/backups/snapshot`）：人按下去就是要一份，不问条件，但只记 `snapshot_last_change`、不记 `snapshot_last_day`——早上手动一份不该把当天那份自动的顶掉。写不成只写日志：快照是记账，它不拥有拦住任何一次保存的权力。②**全作品查找替换**——`POST /studio/works/{id}/replace` 默认 `dry_run`（一个字都不写），看过 `matches[]` 再动手；真替换对每一节**先存旧文再改**，判据与 `restore_version` 同一条（最新版本已等于当前正文就不重复补），否则「替换前的稿子」在任何版本表里都不存在，那不是替换是毁稿；来源新开 `bulk_replace` 一档，`update_node` 只给 `human` 记 `write_days`，所以换名不算今天写的字。术语同名同步改名，撞上已有术语只记一条 warning 继续、不毁整批；索引在循环外做一次增量重建，失败也不推翻已经改对的稿子。**真机冒烟抓到一个真缺陷**：右栏「N 份摘要待重算」读的 `indexStatus` 只在进工作台时拉一次，替换完不刷新就永远看不见——`replaceText` 里补了 `loadIndexStatus()`。③**第 5 条软规则 `phrase_repeat`**——两条子判据：5 字起的字面复用落在 ≥3 节（且至少 20% 的节）、首段前 12 个汉字在 ≥3 节完全相同，都只在整本检查跑（单节内是正当排比）。**先验证「不报」再接线**：第一版 4 字起，在《玄铁令》3 节 5,261 字上报出 3 条——地点「三号暗格」、副词「一字一字」、服饰「青布直裰」，全是名词性短语；收紧成 5 字起、并把「排除过滤」改成「把专名换成边界」（只过滤的话，被挡掉的长串会留下半截：术语「灰烬之城」一挡就冒出「烬之城的城门」）之后，同一份正文 0 命中，而往各节注入同一句「她把披风紧了紧」立刻报出来。`content-types.yaml` 里 novel 与 article 的 kind 层都直接写进 `checks`——`checks_append` 只在 scale / subtype 两层生效，写在 kinds 层等于没写。全量 342 passed（新增 33 例），仍**零真实模型调用**。*
 
 *v2.9（2026-11-02）· 第二批结构与视野*：这一批不是加功能，而是把**写长篇时天天要用、却一直只能绕着走的三处**补上，另加一次前置重构（路线表见第 13 章新增那行，回归见第 16 章 #37–#40）。①**书架先拆出去**——`StudioView.vue` 已经 2,638 行，书架与工作台挤在一个文件里，专注模式要改的正是这一屏的布局；先把 `v-if="!store.work"` 那一整块连同自己的脚本与 scoped 样式搬进 `ShelfView.vue`，组件自己 `useStudioStore()`、自己读 `content_types` 与 `daily_writes`，只留 `@open` / `@ask` 两个出口。**纯搬运、不改行为**：冒烟发现差异就以现有行为为准回退，否则后面三条的 diff 会被搬家噪声吃掉。②**专注模式**——顶栏一个按钮加 `Ctrl+Shift+F`，`.studio.is-focus` 把左树与右栏收起，`ed-top` 只剩返回 / 作品名 / 保存状态 / 退出专注，而**`gen-bar` 保留**：专注的是视线，不是把生成锁起来。`Esc` 退出但弹层优先（`onKeydown` 里弹层分支配在它前面）；**刻意不到排版参数里偷偷改字号行距**——那是排版弹层的职责，两处都能改就会互相抵消。状态只属于这一屏，不写 `localStorage`，`backToShelf()` 复位；切节仍保持专注（那是同一个组件实例，不是重进页面）。③**跨卷拖拽**——树上一直只有同层 ↑↓，想给一章换卷只能新建一节再腾挪。`store.reparent_node` 只搬**有 `ordinal` 的叶子**，目标必须是同作品的容器（`ordinal IS NULL`）或顶层；新 `path` 落在目标末尾，再按 `ORDER BY path` 把全书章号重排成 1..N。这里有两个刻意收窄的口径：**只搬叶子不搬卷**（搬整卷要连带重算卷内节号与卷序，是另一套交互）、**只落目标卷末尾**（插到某一节之前需要半自动排序，否则只能猜意图）。重排比同层对调更宽：不是两列互换而是全书映射，`nodes` / `summaries.ref_ordinal` / `chunks.ordinal` 按节点 id 精确改，`_ORDINAL_COLUMNS` 那十列仍走「先整体取负、再翻正」以避开 `entity_states UNIQUE(entity_id, ordinal)` 与 `relations UNIQUE(src_id, rel_type, dst_id, since_ordinal)` 的中间态；**映射外的章号原样留着**（比如伏笔计划在尚未写到的第 100 章回收），重排只对现存节点负责。已经在目标卷末尾且全书号连续时返回 `moved: False`，不白改一遍库；成功后前端重拉整棵树并重新选中当前节，编辑器里的字不被打断。④**图谱时间轴**——图谱回答「现在还剩下什么」，时间轴回答「事情是怎么发生的」。`GET /studio/works/{id}/graph/timeline` 只读、仅小说：`sections` 供分组与跳节，`events` 的 `participants` 在这一层由实体 id 换成名字（前端不认识 id），`states` 把 `state_json` 解析成对象；**坏 JSON 退化成 `{}` 而不是 500**——抽取模型偶尔塞半截 JSON，那是展示问题不是数据丢失，同节其余行照常显示。空图返回三个空数组：刚立完项就点开时间轴不是错误，前端给一句「还没有抽取过；先在右栏点『抽本节』」。时间轴由 `GraphMap` 自己按需拉取、不进 store（只在打开这一页时用得到），点一行 `emit('goto-node')` 跳回那一节并关弹层（`onSelectNode` 已有 `flushSave` 保护）。全量 **354 passed**，仍**零真实模型调用**；跨卷拖拽另做一轮真机鼠标拖拽（12 项断言）、时间轴一轮真机切视图（11 项，含坏 JSON 与跳节），书架与专注各一轮浏览器冒烟。*
+
+*v2.10（2026-11-02）· 第三批定稿与迁移三件*：前两批补的是「写的时候看得见什么」，这一批补的是**稿子从草稿变成成品、从这台机器搬到那台机器**这两步（路线表见第 13 章新增那行，回归见第 16 章 #41–#43）。①**定稿以前是个纯状态字段**——这一节还挂着「死者说话」「道具已毁」这类必然错的 error，下拉框改成 `final` 就直接过，定完也没人再回来看。现在 `PATCH` 带 `status=final` 时查一次本节未处理的 error，有就回 409（`detail` 带条数、前 10 条规则与原文、截断数），前端先把清单摆出来、点「仍然定稿」才带 `force=true` 重发，取消把下拉框退回原值。**口径只收在「本节 + error + 未处理」**：warn/info 是「可能有问题」，别的节与全书级告警（`node_id` 空，比如伏笔超期）不该拦住单独一节，点过「已处理」的也不再挡；定稿不顺手消告警，它们要人在「告警」里逐条销账。原设计里的「理由写入 runs」这次没做——`force` 只是一个布尔确认，宁可诚实地说「没留痕」，也不写一句假的「已记录」。②**换机只能拷整个 storage**——写作数据散在 nodes/versions/sources/facts/cards/entities 十几张表里，连对话库、日志、浏览器 profile 一起搬，既大又带不走登录态。作品包把「一本书」收成一个自足的 JSON：树、全部历史版本、素材、事实、术语、设定卡与图谱都在；`chunks`/`summaries`/`runs` 不在——它们是正文的派生物，导入后 `reindex_work` 重建索引，摘要按需重算。导入只做**新增**：所有 id 重发、引用跟着重映射（`facts.source_id`、`entities.card_id`、`events.participants`、`states.entity_id`、`relations.src/dst` 都换），同一份包导两次得到两本独立的书；整库导入一本坏的不拦好的，失败清单 `failed[{index,error}]` 随响应回来，全部失败才 400。上限是整库 200 本、单本 2 万节点——不是性能限制，是让「手滑点了整库导入」不会把书架翻倍到无法收拾。**真机冒烟抓到的是布局而不是逻辑**：两个文字按钮塞进 `.shelf-tools` 后「新建作品」被挤到第二行，最后把「导入 / 导出整库」挪到「在写 / 已归档」那行右端（`margin-left:auto`），header 才恢复单行。③**runs 记了每次调用，却没人把它合起来看**——`GET /studio/stats/cost-quality` 一次聚合四层：整体、按任务、按作品、按节；均分只算打过分的跑批（`COUNT(score)>0`，没评不按 0 分算），「硬告警」只数 `resolved=0 AND severity='error'`，`works`/`nodes` 两个参数只限返回行数、不改统计口径。写聚合 SQL 时踩到一个安静的坑：`nodes` 与 `works` 自己也有 `status` 列，第一次 `SUM(CASE WHEN status='ok'...)` 直接报 ambiguous——所有聚合列必须写 `r.` 前缀，`FROM` 也得写成 `runs r`。控制台「数据」tab 顶部多了一张「生成成本与质量」：一行总量（调用/失败/进行中/总耗时/每次/输出/均分）、任务 chips、按作品与「最耗时的节」两张表，作品行同时给耗时、均分与硬告警数——成本和质量放在同一行，才看得出哪里花得多又没写好。全量 **373 passed**（新增 19 例），`ruff check app tests desktop`、`npm run build` 与两轮真实浏览器冒烟（作品包、成本面板，含真机导出→导入与切 tab 往返）通过，仍**零真实模型调用**。*

@@ -128,6 +128,14 @@ exe 上跑它们时没通过还会弹一个框。
     右栏的素材、事实卡、术语都能就地改，素材正文改完会重建这一条的检索索引（不改的话生成还在按旧文字找资料）；
     左树上把一章**拖到另一卷**就行——只搬章与节（卷本身不拖），落点只有目标卷的末尾，松手后全书章号按树序重排成 1..N，
     摘要、分块与图谱里的章号一起跟过去
+14. **定稿不是一键过**：状态切「定稿」前先看这一节还有几条没处理的硬告警（`GET /studio/nodes/{id}/final-gate`），
+    「死者说话」「道具已毁」这类必然错的先摆出来，点「仍然定稿」才放行（`PATCH` 不带 `force` 回 409 与同一份清单）。
+    只拦本节 + `error` + 未处理：warn/info、别的节与全书级告警都不挡，定稿也不顺手帮你消告警
+15. **换机 / 借给人看**：书架「导出整库」打成一个 JSON（每本一个自足的包：树、全部历史版本、素材、事实、术语、设定卡与图谱），
+    新机器上「导入」即重建——id 全部重发、引用跟着改，同一份包导两次得到两本独立的书；作品卡悬停还能单本导出。
+    摘要、分块、运行记录不进包（从正文派生），导入后重建索引，摘要按需重算
+16. **钱花在哪儿、写得好不好**：控制台「数据」页有「生成成本与质量」——按任务、按作品、按最耗时的节看调用次数、失败数、
+    总耗时与每次耗时、输出字数与均分，旁边挂着未处理的硬告警数。均分只算打过分的跑批，没评不按 0 分算
 
 ## 两种形态
 
@@ -144,7 +152,7 @@ exe 上跑它们时没通过还会弹一个框。
 写作台页底只有一行队列进度（排队 / 完成 / 约 X 分钟 / 当前在跑的那一节）；暂停与恢复（`POST /studio/queue/resume`）、
 抽检判定、单条任务的重试与取消（`POST /studio/jobs/{id}/retry`，会把 attempts 清零）都在控制台「任务」（`/admin?tab=tasks`）里。
 每一节用了哪个 model / provider、输入输出各多少字符、耗时与打分，都记在 `runs` 表里，成本可以回看
-（用量是字符估算，不是真实 token）。
+（用量是字符估算，不是真实 token）；控制台「数据」页把这些按任务 / 作品 / 节汇总成一张「生成成本与质量」表。
 
 ## 检索与记忆
 
@@ -273,7 +281,7 @@ AI 草稿预览与流水线预览也吃当前字体档，字号给到 15px / 14p
 ```
 app/
   main.py runtime.py config.py
-  api/      studio_routes.py（93 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
+  api/      studio_routes.py（98 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
   studio/   schema.py store.py content_types.py assembler.py prompting.py tokenize.py chunker.py
             indexer.py retrieval.py summarizer.py graph.py consistency.py soft_rules.py
             scoring.py tasks.py jobs.py jsonutil.py
@@ -298,7 +306,7 @@ dev.py      frontend / backend / build / all
 scripts/    smoke_studio.py  smoke_m1_tail.py  smoke_m2.py  smoke_m3.py  smoke_m4.py  smoke_soft_rules.py
             measure_baseline.py  shot_studio.py  cleanup_works.py  restore_backup.py  login.py  recon.py  check.ps1
             setup_desktop.ps1（桌面版一键装机 + 快捷方式）
-tests/      pytest（全量 354 例，含桌面壳 40 例；写作侧用 tmp_path 建临时库，不碰 storage/）
+tests/      pytest（全量 373 例，含桌面壳 40 例；写作侧用 tmp_path 建临时库，不碰 storage/）
 storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
             backups/nodes（删节前的 JSON 备份）/ backups/works（删作品前的整库副本）
             backups/snapshots（每日整库快照，留 7 份），已 gitignore>
@@ -355,7 +363,8 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
 
 ## 已知限制
 
-- **告警不阻塞定稿**：`PATCH /studio/nodes/{id}` 不查 `issues`，下拉框改成 `final` 就直接过（设计文档 9.5 已如实注明“没实现”）。
+- **定稿闸门只看本节 + error**：warn / info、别的节与全书级告警（`node_id` 为空）都不挡；确认「仍然定稿」只是一次布尔放行
+  （`force=true`），**不记原因**——原设计里「忽略并记原因」没有落库，要留痕得另加一列。
 - **软规则只给 `info`**：不改正文也不扣分，到底算不算问题要人判；且只在作品 `checks` 里显式开着时才跑。
 - **向量检索未接入**：换个说法的语义查询仍只能靠 jieba + FTS5 的关键词召回。
 - 自动打分为 5 维，**不做多候选盲评**；`/transform` 的候选只并排列出来给人比。
@@ -366,6 +375,8 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
   每日快照（留 7 份），而快照是当天的一份、不是逐次改动的——今天早些时候的正文靠的是版本表（右栏「历史」），
   不是备份。整库副本没有界面化恢复入口：节点备份走 `scripts/restore_backup.py`，整库副本靠停服务把文件盖回
   `storage/studio.sqlite`；库文件彻底损坏时能用的是 `backups/snapshots/` 里那一份。
+- **迁移包只带「写下的东西」**：正文、版本、素材、事实、术语、设定卡与图谱在包里；摘要、分块、运行记录不在——导入后重建索引，
+  摘要要重算一次。导入只做「新增」：id 全部重发，同一份包导两次得到两本独立的书；整库一次最多 200 本、单本上限 2 万个节点。
 - **拖拽只搬叶子、只落末尾**：章与节可以拖进任意一卷的末尾（或顶层），卷本身不拖、也不能插到某一节之前
   （那要另配一套插入交互与半自动排序）；跨作品拖拽不做。
 - 生成吞吐受网页账号的限流与风控硬约束，串行跑一本长篇要按小时计；想要并发得自己解决账号问题。
@@ -373,7 +384,7 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
 
 ## 文档索引
 
-- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.9）
+- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.10）
 - `docs/m0-baseline.md` — M0 基线实测数据
 - `docs/content-types.md` — 文种与模板配置约定
 - `docs/reverse-proxy.md` — 底座：驱动三家网页端、`/v1` API 用法、风控排查细则
