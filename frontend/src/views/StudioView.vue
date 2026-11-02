@@ -407,6 +407,7 @@
           :initial-tab="initialPanel"
           :initial-conv="initialConv"
           @locate="locateEvidence"
+          @goto-node="onSelectNode"
           @restore="onRestoreVersion"
         />
       </template>

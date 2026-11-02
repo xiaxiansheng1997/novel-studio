@@ -2048,6 +2048,58 @@ async def get_graph(work_id: str, request: Request, refresh: bool = False):
     }
 
 
+@router.get("/studio/works/{work_id}/graph/timeline", dependencies=[Depends(verify_key)])
+async def get_graph_timeline(work_id: str, request: Request):
+    """图谱时间轴：按节把事件与人物状态排成一条线，供「时间轴」视图分组渲染。
+
+    `events` 的 participants 与 `states` 的 name 都换成实体名字：前端只负责摆位置，
+    不该为了一个 id 再拉一次图谱。空图返回三个空数组——刚立完项就点开时间轴
+    不是错误。`state_json` 坏掉也不炸，退化成空对象。
+    """
+    store = _store(request)
+    work = await _require_work(request, work_id)
+    if (work.get("kind") or "") != "novel":
+        raise HTTPException(status_code=400, detail="时间轴只用于小说；单篇文档看事实卡与术语表")
+
+    sections = [
+        {"id": n["id"], "ordinal": int(n["ordinal"]), "title": n["title"]}
+        for n in await store.list_readable(work_id)
+    ]
+    names = {e["id"]: e["name"] for e in await store.list_entities(work_id)}
+
+    events = []
+    for ev in await store.list_events(work_id):
+        try:
+            pids = json.loads(ev.get("participants") or "[]")
+        except json.JSONDecodeError:
+            pids = []
+        if not isinstance(pids, list):
+            pids = []
+        events.append({
+            "ordinal": int(ev["ordinal"]),
+            "summary": ev.get("summary") or "",
+            "participants": [names[str(p)] for p in pids if str(p) in names],
+            "story_time": ev.get("story_time") or "",
+            "importance": int(ev.get("importance") or 1),
+        })
+
+    states = []
+    for st in await store.list_states(work_id):
+        try:
+            state = json.loads(st.get("state_json") or "{}")
+        except json.JSONDecodeError:
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        states.append({
+            "entity_id": st["entity_id"],
+            "name": names.get(st["entity_id"], ""),
+            "ordinal": int(st["ordinal"]),
+            "state": state,
+        })
+    return {"sections": sections, "events": events, "states": states}
+
+
 @router.get("/studio/works/{work_id}/graph/subgraph", dependencies=[Depends(verify_key)])
 async def get_subgraph(work_id: str, request: Request, text: str = "", hops: int = 2):
     """看一眼本轮 S6 会装什么——调 prompt 时最常用的排查入口。"""

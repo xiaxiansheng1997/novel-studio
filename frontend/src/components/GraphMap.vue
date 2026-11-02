@@ -5,19 +5,38 @@
         <div class="head-txt">
           <h2>设定图谱</h2>
           <p class="dlg-sub">
-            {{ nodes.length }}/{{ entityList.length }} 实体 ·
-            {{ links.length }} 关系。拖动节点会固定它，滚轮缩放，空格处按住可平移。
+            <template v-if="viewMode === 'graph'">
+              {{ nodes.length }}/{{ entityList.length }} 实体 ·
+              {{ links.length }} 关系。拖动节点会固定它，滚轮缩放，空格处按住可平移。
+            </template>
+            <template v-else>
+              按节列出事件与人物状态；点一行跳到那一节。
+            </template>
           </p>
         </div>
         <div class="head-acts">
-          <button class="btn btn-sm" @click="relayout">重新布局</button>
+          <div class="view-seg" role="group" aria-label="图谱视图">
+            <button
+              type="button"
+              class="view-chip"
+              :class="{ 'is-on': viewMode === 'graph' }"
+              @click="viewMode = 'graph'"
+            >关系</button>
+            <button
+              type="button"
+              class="view-chip"
+              :class="{ 'is-on': viewMode === 'timeline' }"
+              @click="viewMode = 'timeline'"
+            >时间轴</button>
+          </div>
+          <button v-if="viewMode === 'graph'" class="btn btn-sm" @click="relayout">重新布局</button>
           <button class="icon-btn" title="关闭（Esc）" @click="close">
             <AppIcon name="x" :size="15" />
           </button>
         </div>
       </header>
 
-      <div v-if="kindsPresent.length > 1" class="chips">
+      <div v-if="viewMode === 'graph' && kindsPresent.length > 1" class="chips">
         <button
           v-for="k in kindsPresent"
           :key="k"
@@ -31,7 +50,7 @@
         </button>
       </div>
 
-      <div class="body">
+      <div v-if="viewMode === 'graph'" class="body">
         <svg
           ref="svgEl"
           class="stage"
@@ -132,6 +151,59 @@
           </template>
         </aside>
       </div>
+
+      <div v-else class="tl-body">
+        <p v-if="timelineBusy" class="tl-empty">读取中…</p>
+        <p v-else-if="timelineError" class="tl-empty">{{ timelineError }}</p>
+        <p v-else-if="!timelineHasData" class="tl-empty">
+          还没有抽取过；先在右栏点『抽本节』
+        </p>
+        <template v-else>
+          <section v-for="g in timelineGroups" :key="g.key" class="tl-sec">
+            <header class="tl-sec-head">
+              <span class="tl-sec-title">{{ g.title }}</span>
+              <span class="tl-sec-ord">第 {{ g.ordinal }} 节</span>
+            </header>
+            <button
+              v-for="(e, i) in g.events"
+              :key="'e' + i"
+              type="button"
+              class="tl-row"
+              :disabled="!g.nodeId"
+              :title="g.nodeId ? '跳到这一节' : ''"
+              @click="goto(g.nodeId)"
+            >
+              <span class="tl-main">{{ e.summary }}</span>
+              <span v-if="e.participants.length" class="tl-people">
+                {{ e.participants.join('、') }}
+              </span>
+              <span v-if="e.story_time" class="tl-time">{{ e.story_time }}</span>
+              <span class="tl-imp" :title="`重要度 ${e.importance}`">
+                <i
+                  v-for="d in 3"
+                  :key="d"
+                  class="imp-dot"
+                  :class="{ on: d <= e.importance }"
+                ></i>
+              </span>
+            </button>
+            <button
+              v-for="(s, i) in g.states"
+              :key="'s' + i"
+              type="button"
+              class="tl-row"
+              :disabled="!g.nodeId"
+              :title="g.nodeId ? '跳到这一节' : ''"
+              @click="goto(g.nodeId)"
+            >
+              <span class="tl-main">
+                <strong class="tl-name">{{ s.name || '（已删实体）' }}</strong>
+                · {{ stateText(s.state) }}
+              </span>
+            </button>
+          </section>
+        </template>
+      </div>
     </section>
   </div>
 </template>
@@ -147,12 +219,98 @@
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
+import { apiFetch } from '../utils/api'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
   graph: { type: Object, default: null },
+  // 时间轴自己去接口拿：只在打开这一页时才用得到，不必往 store 里常驻一份
+  workId: { type: String, default: '' },
 })
-const emit = defineEmits(['update:open', 'locate'])
+const emit = defineEmits(['update:open', 'locate', 'goto-node'])
+
+// ==================== 关系 / 时间轴 ====================
+//
+// 时间轴是另一条只读的线：按节把事件与人物状态排开，点一行跳回正文。
+// 图谱是「现在还剩下什么」，时间轴是「事情是怎么发生的」——两件事，切换看。
+const viewMode = ref('graph')
+const timeline = ref({ sections: [], events: [], states: [] })
+const timelineBusy = ref(false)
+const timelineError = ref('')
+
+const STATE_LABEL = { status: '状态', where: '地点', mood: '心境', goal: '目标', note: '备注' }
+
+async function loadTimeline() {
+  if (!props.workId) return
+  timelineBusy.value = true
+  timelineError.value = ''
+  try {
+    const r = await apiFetch(`/studio/works/${props.workId}/graph/timeline`)
+    if (!r.ok) {
+      timelineError.value = '时间轴没读上，稍后重试'
+      return
+    }
+    timeline.value = await r.json()
+  } catch (e) {
+    timelineError.value = `时间轴没读上：${String(e?.message || e)}`
+  } finally {
+    timelineBusy.value = false
+  }
+}
+
+const timelineHasData = computed(
+  () => (timeline.value.events?.length || 0) + (timeline.value.states?.length || 0) > 0
+)
+
+/**
+ * 按节分组：sections 定顺序，事件与状态各自凭 ordinal 找组。
+ * 找不到节的行（旧号、手工塞的 0）落进「未归节」——不丢数据，但也不能点着跳。
+ */
+const timelineGroups = computed(() => {
+  const t = timeline.value
+  const groups = new Map()
+  for (const s of t.sections || []) {
+    groups.set(s.ordinal, {
+      key: `n:${s.id}`, ordinal: s.ordinal, title: s.title, nodeId: s.id,
+      events: [], states: [],
+    })
+  }
+  const orphan = {
+    key: 'orphan', ordinal: 0, title: '未归节', nodeId: '', events: [], states: [],
+  }
+  const bucket = (ordinal) => groups.get(ordinal) || orphan
+  for (const e of t.events || []) bucket(e.ordinal).events.push(e)
+  for (const s of t.states || []) bucket(s.ordinal).states.push(s)
+  const out = [...groups.values()].filter((g) => g.events.length || g.states.length)
+  out.sort((a, b) => a.ordinal - b.ordinal)
+  if (orphan.events.length || orphan.states.length) out.push(orphan)
+  return out
+})
+
+/** 状态对象转人话：键名不认识的直接显示原键，宁可难看也不吞信息 */
+function stateText(state) {
+  const parts = []
+  for (const [key, val] of Object.entries(state || {})) {
+    if (val === null || val === undefined || val === '') continue
+    const text = typeof val === 'object' ? JSON.stringify(val) : String(val)
+    parts.push(`${STATE_LABEL[key] || key} ${text}`)
+  }
+  return parts.length ? parts.join(' · ') : '（空状态）'
+}
+
+/** 时间轴只读：点一行先收弹层，再让父层换节（落盘与确认归父层管） */
+function goto(nodeId) {
+  if (!nodeId) return
+  emit('goto-node', nodeId)
+  close()
+}
+
+watch([() => props.open, viewMode], ([open, mode]) => {
+  if (open && mode === 'timeline') loadTimeline()
+})
+watch(() => props.workId, () => {
+  timeline.value = { sections: [], events: [], states: [] }
+})
 
 const KIND_LABEL = {
   character: '人物', location: '地点', item: '物品',
@@ -604,7 +762,12 @@ watch(
   // post：刚打开时 svg 还没渲染出来，measure() 量不到尺寸，布局会围着一个假中心挤成一团
   { flush: 'post' }
 )
-watch(() => props.graph, () => { if (props.open) layout(false) })
+watch(() => props.graph, () => {
+  if (!props.open) return
+  // 抽完一节回来：关系图重排，时间轴也要重读（新的行不能等下次打开才出现）
+  if (viewMode.value === 'timeline') loadTimeline()
+  else layout(false)
+})
 onUnmounted(() => {
   stop()
   onUp()
@@ -941,5 +1104,128 @@ onUnmounted(() => {
   font-family: theme('fontFamily.mono');
   font-size: 10px;
   color: var(--text-faint);
+}
+
+/* ---- 关系 / 时间轴的分段选择与时间轴内容 ---- */
+.view-seg {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+}
+.view-chip {
+  height: 22px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background-color 0.18s var(--ease), color 0.18s var(--ease);
+}
+.view-chip:hover {
+  color: var(--text);
+}
+.view-chip.is-on {
+  background: rgba(var(--run-rgb), 0.14);
+  color: var(--text);
+}
+.tl-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 18px 18px;
+}
+.tl-empty {
+  margin: 32px 0;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--text-faint);
+}
+.tl-sec {
+  padding-top: 14px;
+}
+.tl-sec-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 2px 6px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.tl-sec-title {
+  font-family: theme('fontFamily.serif');
+  font-size: 14px;
+  color: var(--text);
+}
+.tl-sec-ord {
+  font-family: theme('fontFamily.mono');
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.tl-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s var(--ease), border-color 0.15s var(--ease), color 0.15s var(--ease);
+}
+.tl-row:hover {
+  background: rgba(var(--run-rgb), 0.08);
+  border-color: rgba(var(--run-rgb), 0.32);
+  color: var(--text);
+}
+.tl-row:disabled {
+  cursor: default;
+}
+.tl-row:disabled:hover {
+  background: var(--panel-2);
+  border-color: transparent;
+  color: var(--text-muted);
+}
+.tl-main {
+  flex: 1;
+  min-width: 0;
+}
+.tl-name {
+  color: var(--text);
+  font-weight: 600;
+}
+.tl-people,
+.tl-time {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.tl-time {
+  font-family: theme('fontFamily.mono');
+}
+.tl-imp {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.imp-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+.imp-dot.on {
+  background: var(--warn);
 }
 </style>

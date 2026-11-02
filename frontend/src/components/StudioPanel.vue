@@ -582,7 +582,9 @@
     <GraphMap
       v-model:open="graphOpen"
       :graph="store.graphData"
+      :work-id="store.work?.id || ''"
       @locate="(t) => emit('locate', t)"
+      @goto-node="(id) => emit('goto-node', id)"
     />
 
     <VersionDiff
@@ -611,7 +613,7 @@ const props = defineProps({
   // /chat/:id 老链接带过来的会话
   initialConv: { type: String, default: '' },
 })
-const emit = defineEmits(['locate', 'restore'])
+const emit = defineEmits(['locate', 'restore', 'goto-node'])
 
 const store = useStudioStore()
 const tab = ref('sources')
