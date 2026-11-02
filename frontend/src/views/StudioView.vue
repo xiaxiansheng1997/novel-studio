@@ -7,7 +7,7 @@
       {{ notice }}
     </div>
 
-    <div class="studio">
+    <div class="studio" :class="{ 'is-focus': focus }">
       <!-- 未选作品：书架（ShelfView 自己管筛选与滚动；打开/先聊聊/搜正文都交回这一层） -->
       <ShelfView
         v-if="!store.work"
@@ -90,6 +90,14 @@
               :title="saveState === 'error' ? '没存上，点一下重试（正文还在页面上）' : ''"
               @click="saveState === 'error' && flushSave()"
             >{{ saveLabel }}</span>
+            <button
+              class="btn btn-sm ed-focus"
+              :class="{ 'is-on': focus }"
+              :title="focus ? '退出专注（Esc）' : '专注写作：只留正文与生成条（Ctrl+Shift+F）'"
+              @click="toggleFocus"
+            >
+              <AppIcon name="panel" :size="13" /> {{ focus ? '退出专注' : '专注' }}
+            </button>
             <div class="ed-right">
               <button class="btn btn-sm" :disabled="store.outlineBusy || store.pipeline.running"
                       title="按模板和主旨生成目录，落成节点" @click="doOutline">
@@ -770,10 +778,31 @@ watch(() => store.node?.id, () => {
   saveState.value = 'saved'
 })
 
+// 专注模式：左树与右栏收起，只留正文与生成条。状态只属于这一屏，不写 localStorage
+const focus = ref(false)
+function toggleFocus() {
+  focus.value = !focus.value
+}
+// Esc 优先给弹层：排版、替换、公众号、加工、搜索、导入、先聊聊、作品信息都算弹层
+const dialogOpen = computed(() => (
+  typeOpen.value || replaceOpen.value || wechatOpen.value || transformOpen.value
+  || searchOpen.value || importOpen.value || askOpen.value || workEditOpen.value
+))
+
 // 键盘可达：Ctrl+S 立即存，Ctrl+Enter 生成（见 design-system MASTER.md）
 function onKeydown(e) {
   if (e.key === 'Escape' && typeOpen.value) {
     typeOpen.value = false
+    return
+  }
+  // Esc 退专注：弹层优先，没弹层才轮到这一屏
+  if (e.key === 'Escape' && focus.value && !dialogOpen.value) {
+    focus.value = false
+    return
+  }
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
+    e.preventDefault()
+    toggleFocus()
     return
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
@@ -889,6 +918,7 @@ async function backToShelf() {
   // 回书架等于离开这一节：没存上的改动先重试，别一声不响地丢
   const ok = await flushSave()
   if (!ok && !window.confirm('这一节还没存上，回书架会丢掉这段改动。仍要离开吗？')) return
+  focus.value = false
   // 刚写完的字要立刻反映到书架上的「今天字数 / 连续天」
   store.loadDailyWrites().catch(() => {})
   router.replace('/studio')
@@ -1348,6 +1378,21 @@ async function applyTitle(text, target) {
 .fl.small .field {
   width: 110px;
 }
+/* ---------- 专注模式 ---------- */
+/* 左树与右栏收起，ed-top 只留返回 / 作品名 / 保存状态 / 退出专注；生成条不动 */
+.is-focus .tree,
+.is-focus .panel {
+  display: none;
+}
+.is-focus .ed-top .pill,
+.is-focus .ed-right {
+  display: none;
+}
+.ed-focus.is-on {
+  border-color: rgba(var(--run-rgb), 0.45);
+  color: var(--run-fg);
+}
+
 /* ---------- 编辑器 ---------- */
 .editor {
   /* 排版可调：字体栈在这里给全（本体在 tailwind.config.js 的 theme 里），
