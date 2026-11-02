@@ -1,0 +1,22 @@
+README.md
+  s_85cd431edb9d78::t_39bcf2421efd21 98-100,128-130,171-172,203-204,276,301,369-370,376
+docs/novel-studio-tech-design.md
+  s_85cd431edb9d78::t_a7d13787db55ab 1356
+  s_85cd431edb9d78::t_209c8a39b35248 1480-1483,1540-1541
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "842d432612cb962f8d60da371b17a16625ad0d09",
+  "prompts": {},
+  "sessions": {
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
