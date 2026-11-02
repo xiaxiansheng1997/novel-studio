@@ -1,5 +1,5 @@
-<#
-一键检查：ruff（app + tests）→ pytest → 前端构建。
+﻿<#
+一键检查：ruff（app + tests + desktop）→ pytest → 前端构建。
 用法（在项目根目录）：
     powershell -ExecutionPolicy Bypass -File scripts/check.ps1
 任一环节失败即以非 0 退出码中断。
@@ -14,8 +14,8 @@ if (-not (Test-Path $py)) { $py = "python" }
 $ruff = Join-Path $root ".venv\Scripts\ruff.exe"
 if (-not (Test-Path $ruff)) { $ruff = "ruff" }
 
-Write-Host "== ruff check app tests ==" -ForegroundColor Cyan
-& $ruff check app tests
+Write-Host "== ruff check app tests desktop ==" -ForegroundColor Cyan
+& $ruff check app tests desktop
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "== pytest ==" -ForegroundColor Cyan

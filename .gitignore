@@ -29,6 +29,10 @@ backups/
 frontend/node_modules/
 frontend/dist/
 
+# 桌面壳打包产物（desktop\build.ps1 随时可重打，几十 MB 不入库）
+desktop/dist/
+desktop/build/
+
 # 本地临时产物（截图 / 补丁脚本 / 评审导出的 diff），一律不入库
 .tmp_*
 

@@ -33,10 +33,65 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 开发时可以直接 `python dev.py all`（后端 :8000 + Vite :5273，热更新）；`build` / `backend` / `frontend` 三个子命令单独起。
 改完代码一键自检：`powershell -ExecutionPolicy Bypass -File scripts\check.ps1`（ruff → pytest → 前端构建）。
+**不想每次敲命令** → 直接跳到下面「桌面版（双击启动）」，一条脚本装完给你桌面上一个图标。
 
 **开写之前先把账号登录上**：打开控制台 <http://127.0.0.1:8000/admin?tab=live>（旧 `/live` 会重定向过去）→ 选站点 → **连接** → 在实时画面里直接登录
 （扫码/密码/滑块）→ **检测登录**。登录态落在持久化 profile 里长期复用，失效时管理面板会提示。
 然后去 <http://127.0.0.1:8000/studio>（站点首页也跳这里）建作品。
+
+## 桌面版（双击启动）
+
+不想每次敲命令，就装桌面壳：桌面上多一个 **Novel Studio** 图标，双击起、关窗停。
+
+```powershell
+# 一次装好：venv + 两份依赖 + chromium 内核 + 前端构建 + .env + exe + 桌面快捷方式（幂等，可反复跑）
+powershell -ExecutionPolicy Bypass -File scripts\setup_desktop.ps1
+```
+
+可选开关：`-SkipPlaywright`（内网拉不动浏览器内核时先跳过，推流/登录暂不可用）、`-NoExe`（不打 exe，快捷方式指向 `pythonw.exe desktop\launcher.py`，效果一样）、
+`-NoShortcut`（只装环境不动桌面）、`-Rebuild`（已有 `frontend/dist` 与 exe 也重打一遍）。默认跳过这两步是有原因的：
+`npm ci` 会先删空 `node_modules`，只要还有一个 node 进程开着 `rolldown` 的 `.node` 就报 EPERM，装机脚本得敢重跑就不能每次去动已经好的东西。
+
+之后的日常只有两个动作：**双击图标** → 原生窗口（WebView2）打开 `/studio`；**关掉窗口** → 后端跟着停。
+托盘图标右键还有：写作台 / 控制台 / 重启服务 / 打开日志目录 / 退出。重复双击不会开出第二个服务，
+只会把已有窗口拽到前台（单实例互斥）。
+
+几个容易踩的点，说清楚：
+
+- **别为了省事双击 `desktop\launcher.py`**。Windows 会用**系统的** Python 接走它（.py 的文件关联），
+  而壳依赖只装在 `.venv` 里，于是 `ModuleNotFoundError: No module named 'webview'`、窗口弹不出来。
+  壳在起服务之前就会拦下这一种，并给出正确的解释器路径；真要用任意 Python 看界面，加 `--browser`。
+- **关窗是真的收摊，不是拔电**。壳在 `127.0.0.1` 上开一个随机端口的控制口，向后端发 `STOP <一次性 token>`，
+  uvicorn 走正常 lifespan：先停队列（**正在写的那一节退回 `queued`**，下次接着写），再关浏览器和库。
+  收不干净（超时）才 `taskkill /T /F` 兜底。不用 `SIGINT` 是有原因的——Windows 上 `os.kill(pid, SIGINT)` 等价于硬杀，
+  会留下 Chromium 孤儿进程和带 `SingletonLock` 的 profile。
+- **端口上已经有健康后端就直接借用**。比如你自己跑过 `python dev.py backend`，壳不会再起一份，关窗口也绝不杀它；
+  这种情况下托盘的「重启服务」会直接告诉你去那边重启（在这个壳里重启 = 同一端口撞死一个进程，却报「重启成功」）。
+  `--stop` 也一样保守：状态文件里的 pid 若已经不再是本项目的 `.venv\Scripts\python.exe`（壳崩了、pid 被系统回收），
+  它只报 `refused` 并给出那个 pid 现在跑的是什么，绝不对着无关进程 `taskkill /T /F`。
+- **主题和 API Key 不会每次重填**。WebView2 的用户数据固定在 `storage/desktop/webview2/`（`localStorage` 落在那儿）。
+- **exe 里不含后端**。打包只进壳（pywebview + pystray，onedir 约 36MB），运行时它去拉起 `.venv` 里的 Python。
+  所以把 `desktop\dist\NovelStudio\` 拷去同事机器还得先在那台机器跑一次 `setup_desktop.ps1` 建环境。
+  要重打：`powershell -ExecutionPolicy Bypass -File desktop\build.ps1`（改了 `desktop/` 下的代码记得加 `-Rebuild` 重跑装机脚本）。
+- **改过 `*.ps1` 别把 UTF-8 BOM 弄丢**。PowerShell 5.1 把无 BOM 的文件当 ANSI（本机代码页 936）读，
+  中文注释会被读坏，严重时整个脚本语法都解不过去（实测：字符串缺终止符 + 意外的标记「}」，脚本一行都不跑）。
+  `.editorconfig` 已约束 `*.ps1` 用 `utf-8-bom`，测试 `test_powershell_scripts_with_chinese_have_utf8_bom` 会拦。
+
+排查与命令行入口（打包后同样可用，`python` 换成 `.venv\Scripts\python.exe`）：
+
+```powershell
+python desktop\launcher.py --check     # 体检：项目目录 / venv / 后端依赖（问 .venv）/ 壳依赖 / 前端 / WebView2，逐项 ok-FAIL
+python desktop\launcher.py --stop      # 停掉本机由壳起的后端（窗口没了但后端卡住时用）；认不准身份会 refused
+python desktop\launcher.py --browser   # 原生窗口起不来（缺 WebView2 Runtime）就退回 Edge 应用模式
+python desktop\launcher.py --root D:\x\novel-studio --path /admin --no-tray --debug
+```
+
+日志在 `storage/logs/` 下分两份：`desktop.log` 是后端（uvicorn + 应用）的输出，`desktop-shell.log` 是壳自己的事件
+（起停、托盘、异常）。分开是必须的：后端子进程拿着一个追加模式的文件句柄，壳往同一个文件里插行会被它的后续输出盖掉。
+exe 是无控制台程序，不把这些落盘就变成「双击没反应，什么都看不见」——`--check` 与 `--stop` 的输出也写进这份，
+exe 上跑它们时没通过还会弹一个框。
+地址与口令仍读 `.env`（`W2A_PORT` 默认 8000）；改完要重启壳才生效。桌面版只在 Windows 上实测过（Win10 LTSC），
+非 Windows 会退化成「脚本模式 + 无托盘」，别指望 exe。
 
 ## 一条完整主线
 
@@ -177,6 +232,9 @@ python -m scripts.cleanup_works --sweep-orphans    # 默认试运行，加 --yes
 - 人机验证：`W2A_AUTO_SLIDE=1` 自动处理（滑块直接拖）；`W2A_HUMAN_WAIT_SEC=60` 遇到只能人工做的图片点选验证码时，在有头浏览器里等人做完的最长秒数（`0` 不等）；`W2A_RISK_COOLDOWN=60` 验证失败后的风控冷却秒数。
 - `content-types.yaml`（项目根）：文种与模板配置，见上面「文种全部配置化」。
 - 写作业务库：`<W2A_STORAGE_DIR>/studio.sqlite`（默认 `storage/studio.sqlite`）。
+- 桌面壳依赖：`requirements-desktop.txt`（pywebview / pystray / pillow / pyinstaller），与后端依赖分开；
+  `scripts\setup_desktop.ps1` 会两份一起装。壳往后端传 `W2A_CONTROL_PORT` / `W2A_CONTROL_TOKEN`（随机、一次性，停机协议用），
+  这两个不需要人写进 `.env`。
 - 底座自身的开关（真流式、SSE 心跳、跨域来源、热加载、页面绑定覆盖层、千问 HTTP 快路径）见 `docs/reverse-proxy.md`。
 
 ## 目录结构
@@ -197,6 +255,9 @@ app/
   providers/ _replay.py _browser_base.py  qwen.py doubao.py deepseek.py   ← 底座：驱动三家网页端
 frontend/   Vue 3 + Vite（写作台 `/studio`（含右栏「问一问」）/ 控制台 `/admin?tab=状态|浏览器|日志|任务|数据|配置`，
             旧 `/chat`、`/live` 链接会重定向过去；首页重定向到 /studio；构建产物 dist 由后端托管）
+desktop/    桌面壳（不含后端）：launcher.py 窗口+托盘 / serve.py 后端入口带控制口 / backend.py 起停与三级兜底
+            control.py 停机协议 / config.py 读 .env 与找项目根 / win32.py 互斥·消息框·杀进程树
+            make_icon.py + assets/novel-studio.ico / NovelStudio.spec + build.ps1（打 exe，产物 desktop/dist 已 gitignore）
 content-types.yaml   文种配置（kinds → scales → subtypes + 模板；article 有 wechat 子类）
 risk-words.yaml      公众号风险词（发布前检查用，改完不用重启）
 docs/       novel-studio-tech-design.md（设计与各里程碑实测）  m0-baseline.md  content-types.md  reverse-proxy.md
@@ -205,7 +266,8 @@ web/        旧版静态页 chat.html admin.html live.html（前端未构建时�
 dev.py      frontend / backend / build / all
 scripts/    smoke_studio.py  smoke_m1_tail.py  smoke_m2.py  smoke_m3.py  smoke_m4.py  smoke_soft_rules.py
             measure_baseline.py  shot_studio.py  cleanup_works.py  restore_backup.py  login.py  recon.py  check.ps1
-tests/      pytest（全量 268 例；写作侧用 tmp_path 建临时库，不碰 storage/）
+            setup_desktop.ps1（桌面版一键装机 + 快捷方式）
+tests/      pytest（全量 309 例，含桌面壳 40 例；写作侧用 tmp_path 建临时库，不碰 storage/）
 storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
             backups/nodes（删节前的 JSON 备份）/ backups/works（删作品前的整库副本），已 gitignore>
 ```

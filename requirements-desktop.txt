@@ -1,0 +1,13 @@
+# 桌面壳专用依赖（后端本体看 requirements.txt）
+#
+# 装法：.venv\Scripts\python.exe -m pip install -r requirements-desktop.txt
+# 或者直接跑 scripts\setup_desktop.ps1，它会两份一起装。
+#
+# - pywebview：原生窗口（Windows 上走 WebView2 + pythonnet/WinForms）
+# - pystray  ：托盘图标
+# - pillow   ：pystray 画图标依赖，也是 desktop/make_icon.py 生成 .ico 的依赖
+# - pyinstaller：把壳打成 NovelStudio.exe（只在打包机上需要）
+pywebview==6.2.1
+pystray==0.19.5
+pillow==13.0.0
+pyinstaller==6.22.3

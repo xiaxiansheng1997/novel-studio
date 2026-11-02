@@ -1,0 +1,8 @@
+# 只为一件事：PowerShell 5.1 把无 BOM 的 .ps1 当 ANSI（本机是代码页 936）读，
+# 中文注释会被读坏，严重时整个脚本语法都解不过去（实测：字符串缺终止符 + 意外的标记"}"）。
+# 含中文的装机脚本必须带 UTF-8 BOM，而 BOM 很容易被编辑器在保存时悄悄剥掉——
+# tests/test_desktop_shell.py 会拦住，这条是把「别再被剥掉」写进编辑器配置。
+root = true
+
+[*.ps1]
+charset = utf-8-bom
