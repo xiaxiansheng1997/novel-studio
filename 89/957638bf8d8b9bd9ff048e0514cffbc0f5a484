@@ -1,0 +1,41 @@
+tests/test_studio_snapshot.py
+  s_85cd431edb9d78::t_2ecc52117700ee 1-146,149-159,161-173,175-288,290-295
+  s_85cd431edb9d78::t_db76b15bd2d0fd 147-148
+  s_85cd431edb9d78::t_a6c3c4e39d9e60 160,174,289
+frontend/src/views/ConsoleView.vue
+  s_85cd431edb9d78::t_3cc172f4653a71 1089-1112
+  s_85cd431edb9d78::t_7027d555a54f3d 511-536,695-700,1080-1082
+app/studio/store.py
+  s_85cd431edb9d78::t_74f94e2f8277e0 73-75,78-84,788-792,799,805-808,818,820-821,824,833-841,976-977,979,987-992
+  s_85cd431edb9d78::t_ac858a0b05783a 103-114
+  s_85cd431edb9d78::t_7f512ce83ff7cb 879-880,882,885
+  s_85cd431edb9d78::t_d0b0c0a5cd5b2d 883-884,902,904-906
+  s_85cd431edb9d78::t_ad76891f10f927 842-850,857-858,877-878,881,886-892,894-901,907-918,920-921
+  s_85cd431edb9d78::t_f4dc442883f45c 851-856,859-876,893,903,919
+app/main.py
+  s_85cd431edb9d78::t_6bcc37f0fe6daa 48-55,57-74,112-114,118-120
+  s_85cd431edb9d78::t_a004875811b13f 56
+app/api/studio_routes.py
+  s_85cd431edb9d78::t_6d64abab7a7797 185
+  s_85cd431edb9d78::t_d0e0c11b4d1e35 487-488
+  s_85cd431edb9d78::t_7b09ca1de1e424 44,186,472,476,481-483,492-508
+scripts/restore_backup.py
+  s_85cd431edb9d78::t_d015eb330c0e85 16,61-70,119-120
+  s_85cd431edb9d78::t_5ef0503c0a3339 17-18,121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "89957638bf8d8b9bd9ff048e0514cffbc0f5a484",
+  "prompts": {},
+  "sessions": {
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
