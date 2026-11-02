@@ -64,6 +64,27 @@ async def _require_work(request: Request, work_id: str) -> dict[str, Any]:
     return work
 
 
+async def _final_gate(store, node: dict[str, Any]) -> dict[str, Any]:
+    """定稿前要过的那道门：这一节还没处理的硬告警。
+
+    只认 `error`：warn/info 是「八成有问题」，不该拦定稿；只看本节，
+    全书级告警（`node_id` 为空，比如伏笔超期）不挡单独一节的定稿——
+    那些在发布体检里看。列表只带前 10 条，够人判断就行。
+    """
+    rows = await store.list_issues(
+        node["work_id"], node_id=node["id"], only_open=True, limit=200
+    )
+    errors = [r for r in rows if (r.get("severity") or "") == "error"]
+    return {
+        "open_errors": len(errors),
+        "issues": [
+            {"id": r["id"], "rule": r["rule"], "message": r["message"]}
+            for r in errors[:10]
+        ],
+        "truncated": max(0, len(errors) - 10),
+    }
+
+
 # ==================== 请求模型 ====================
 
 class WorkCreate(BaseModel):
@@ -107,6 +128,8 @@ class NodeUpdate(BaseModel):
     snapshot: bool = False
     # 只有「采用 AI 结果」那一条会显式传；手改不传，由路由落成 human
     snapshot_source: Optional[str] = None
+    # 定稿闸门：这一节有未处理的硬告警时，要人看过并明确「就这样定」才放行
+    force: bool = False
 
 
 class NodeMove(BaseModel):
@@ -413,17 +436,41 @@ async def update_node(node_id: str, body: NodeUpdate, request: Request):
     payload = body.model_dump(exclude_none=True)
     snapshot = bool(payload.pop("snapshot", False))
     source = payload.pop("snapshot_source", None)
+    force = bool(payload.pop("force", False))
     if source and source not in _VERSION_SOURCES:
         raise HTTPException(
             status_code=400,
             detail=f"版本来源不认: {source}（只能是 {'/'.join(sorted(_VERSION_SOURCES))}）",
         )
+    # 定稿闸门：只拦「硬告警」（severity=error），提醒与提示不挡路。
+    # 这里不写库、不改状态——前端拿到 409 里那几条，弹一句确认再带 force 重试；
+    # 告警本身不会随定稿自动消掉，人在「告警」里点「已处理」才消。
+    if payload.get("status") == "final" and not force:
+        node = await _store(request).get_node(node_id)
+        if not node:
+            raise HTTPException(status_code=404, detail="节点不存在")
+        gate = await _final_gate(_store(request), node)
+        if gate["open_errors"]:
+            raise HTTPException(status_code=409, detail=gate)
     ok = await _store(request).update_node(
         node_id, snapshot=snapshot, snapshot_source=source or "human", **payload
     )
     if not ok:
         raise HTTPException(status_code=404, detail="节点不存在或无更新")
     return await _store(request).get_node(node_id)
+
+
+@router.get("/studio/nodes/{node_id}/final-gate", dependencies=[Depends(verify_key)])
+async def final_gate(node_id: str, request: Request):
+    """定稿前看一眼：这一节还有几条硬告警。
+
+    与 PATCH 里的那一层是同一份判断，单独开一个只读接口是为了让前端在
+    `confirm` 里把规则与原文摆出来——409 只能带一段话，说不清是哪几条。
+    """
+    node = await _store(request).get_node(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    return await _final_gate(_store(request), node)
 
 
 @router.post("/studio/nodes/{node_id}/move", dependencies=[Depends(verify_key)])

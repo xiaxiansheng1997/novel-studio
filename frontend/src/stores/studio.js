@@ -5,11 +5,13 @@ import { apiFetch } from '../utils/api'
 /** 写作台的模型选择单独存一份 key：和聊天页的 w2a_model 互不干扰 */
 const STUDIO_MODEL_KEY = 'w2a_studio_model'
 
-/** 后端错误体是 FastAPI 的 `{detail: "..."}`，删除被备份拦住那句就在里面 */
+/** 后端错误体是 FastAPI 的 `{detail: "..."}`；定稿闸门那种给的是一个对象，取里面的 message */
 async function errDetail(r, fallback) {
   try {
     const j = await r.json()
-    return typeof j.detail === 'string' ? j.detail : fallback
+    if (typeof j.detail === 'string') return j.detail
+    if (j.detail && typeof j.detail.message === 'string') return j.detail.message
+    return fallback
   } catch {
     return fallback
   }
@@ -321,13 +323,15 @@ export const useStudioStore = defineStore('studio', () => {
    * 写回一节。返回是否真的落库——自动保存靠这个返回值决定显示「已保存」还是
    * 「保存失败」。以前失败就地吞掉，界面照样写「已保存」，关掉页面那段字就没了。
    */
-  async function saveNode(patch, { snapshot = false, source = '' } = {}) {
+  async function saveNode(patch, { snapshot = false, source = '', force = false } = {}) {
     if (!node.value) return false
     saving.value = true
     // 只有「采用 AI 结果」才带来源：历史页要分得清哪一版是模型写的，
     // 手改那一侧不传，由后端落成 human
     const body = { ...patch, snapshot }
     if (snapshot && source) body.snapshot_source = source
+    // 定稿闸门：看过告警仍要定稿时传 force，后端才会放行
+    if (force) body.force = true
     try {
       const r = await apiFetch(`/studio/nodes/${node.value.id}`, {
         method: 'PATCH',
@@ -358,6 +362,19 @@ export const useStudioStore = defineStore('studio', () => {
     } finally {
       saving.value = false
     }
+  }
+
+  /**
+   * 定稿前预检：这一节还有几条没处理的硬告警。只读接口，不写库。
+   * 与 saveNode 带 force 那一下是同一份判断，这里只是为了把规则摆进 confirm。
+   */
+  async function finalGate(nodeId) {
+    const r = await apiFetch(`/studio/nodes/${nodeId}/final-gate`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '读定稿检查失败')
+      return null
+    }
+    return await r.json()
   }
 
   async function createNode(payload) {
@@ -1461,7 +1478,7 @@ export const useStudioStore = defineStore('studio', () => {
     loadTemplates, fetchWorks, createWork, updateWork, setWorkStatus, globalSearch,
     ideas, dailyWrites, loadIdeas, addIdea, useIdea, deleteIdea, loadDailyWrites,
     selectWork, selectNode, deleteWork,
-    saveNode, createNode, importNodes, deleteNode, moveNode, reparentNode, replaceText,
+    saveNode, finalGate, createNode, importNodes, deleteNode, moveNode, reparentNode, replaceText,
     loadSources, addSource, loadSource, searchSources, extractFacts, deleteSource, updateSource,
     loadFacts, addFact, deleteFact, updateFact,
     loadTerms, addTerm, deleteTerm, updateTerm,

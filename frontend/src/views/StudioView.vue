@@ -1066,8 +1066,32 @@ async function saveTitle() {
   }
 }
 
+/**
+ * 切状态。定稿前先过一道闸：这一节有未处理的硬告警时，把人话摆出来再确认；
+ * 确认过才带 force 重发。取消就把下拉框退回原值——否则屏幕上写着「定稿」，库里还是草稿。
+ */
 async function changeStatus(e) {
-  if (!(await store.saveNode({ status: e.target.value }, { snapshot: true }))) {
+  const el = e.target
+  const next = el.value
+  const opts = { snapshot: true }
+  if (next === 'final') {
+    const gate = await store.finalGate(store.node.id)
+    if (gate?.open_errors) {
+      const lines = gate.issues.map((it) => `· ${it.message}`)
+      if (gate.truncated) lines.push(`· 还有 ${gate.truncated} 条`)
+      const ok = window.confirm(
+        `这一节还有 ${gate.open_errors} 条硬告警：\n${lines.join('\n')}\n\n`
+        + '定稿不会消掉这些告警（要去「告警」里逐条处理）；仍要定稿吗？',
+      )
+      if (!ok) {
+        el.value = store.node.status
+        return
+      }
+      opts.force = true
+    }
+  }
+  if (!(await store.saveNode({ status: next }, opts))) {
+    el.value = store.node?.status || 'draft'
     showNotice(store.error || '状态没存上，再试一次', true)
   }
 }
