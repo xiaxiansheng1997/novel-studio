@@ -1,0 +1,25 @@
+frontend/src/views/StudioView.vue
+  s_85cd431edb9d78::t_bfaf68ced13e49 749,751-754
+  s_85cd431edb9d78::t_9ceb697c0913e6 11-19
+  s_85cd431edb9d78::t_40e1441771d7e9 763-764,861-872,884
+  s_85cd431edb9d78::t_1aea122a11518e 454,487-488,530
+  s_85cd431edb9d78::t_149e63d5397ea4 758,762,853-855,857-860,873-883,885
+frontend/src/components/ShelfView.vue
+  s_85cd431edb9d78::t_cc247aad55dd90 1-693
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "412fc7f76cdf73cad94f55737c83c96b5a7abe04",
+  "prompts": {},
+  "sessions": {
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
