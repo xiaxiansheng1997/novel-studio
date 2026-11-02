@@ -114,6 +114,11 @@ class NodeMove(BaseModel):
     direction: Literal["up", "down"]
 
 
+class NodeReparent(BaseModel):
+    # 拖到哪个容器末尾；null 表示搬到顶层
+    parent_id: Optional[str] = None
+
+
 class SourceCreate(BaseModel):
     title: str = ""
     url: str = ""
@@ -429,6 +434,22 @@ async def move_node(node_id: str, body: NodeMove, request: Request):
     前端按 `moved` 判断，把 `reason` 当提示语显示就行。
     """
     return await _store(request).move_node(node_id, body.direction)
+
+
+@router.post("/studio/nodes/{node_id}/reparent", dependencies=[Depends(verify_key)])
+async def reparent_node(node_id: str, body: NodeReparent, request: Request):
+    """把一节拖进另一卷末尾（`parent_id` 为 null 则拖回顶层）。
+
+    与 move 不同，这里的不合法多数是误拖（拖到叶子上、拖进自己、跨作品）：
+    404 表示节点或目标不存在，400 带一句人看得懂的原因，前端直接显示。
+    """
+    try:
+        result = await _store(request).reparent_node(node_id, body.parent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="节点或目标不存在")
+    return result
 
 
 @router.delete("/studio/nodes/{node_id}", dependencies=[Depends(verify_key)])

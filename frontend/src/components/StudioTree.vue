@@ -22,9 +22,19 @@
         v-for="n in visibleRows"
         :key="n.id"
         class="tree-row"
-        :class="{ 'is-active': n.id === activeId }"
+        :class="{
+          'is-active': n.id === activeId,
+          'is-dragging': dragNode && dragNode.id === n.id,
+          'is-drop': dropId === n.id,
+        }"
         :style="{ paddingLeft: 6 + Math.min(n.depth, 3) * 14 + 'px' }"
+        :draggable="n.ordinal != null"
         @click="$emit('select', n.id)"
+        @dragstart="onDragStart($event, n)"
+        @dragend="onDragEnd"
+        @dragover="onDragOver($event, n)"
+        @dragleave="onDragLeave($event, n)"
+        @drop="onDrop($event, n)"
       >
         <!-- 卷下面几十章时，把写完的卷收起来比拖滚动条好用 -->
         <button
@@ -101,7 +111,48 @@ const props = defineProps({
   // 折叠状态按作品分开存：同一本书下次打开还是上次收起来的样子
   workId: { type: String, default: '' },
 })
-defineEmits(['select', 'create', 'remove', 'move', 'import'])
+const emit = defineEmits(['select', 'create', 'remove', 'move', 'import', 'reparent'])
+
+// 拖动的是哪一行（只允许有 ordinal 的叶子），以及当前悬停的容器行
+const dragNode = ref(null)
+const dropId = ref('')
+
+function onDragStart(e, n) {
+  if (n.ordinal == null) return
+  dragNode.value = n
+  e.dataTransfer.effectAllowed = 'move'
+  // 有的浏览器不写 data 就不派发 drop，写一个无害的
+  e.dataTransfer.setData('text/plain', n.id)
+}
+
+function onDragEnd() {
+  dragNode.value = null
+  dropId.value = ''
+}
+
+/** 只有容器行接得下：叶子行不 preventDefault，光标会自己显示「放不进去」 */
+function onDragOver(e, n) {
+  if (!dragNode.value || n.ordinal != null) return
+  if (n.id === dragNode.value.id) return
+  e.preventDefault()
+  e.dataTransfer.dropEffect = 'move'
+  dropId.value = n.id
+}
+
+function onDragLeave(e, n) {
+  // 移到行内子元素上也会触发 dragleave：还在这一行里就不清高亮
+  if (e.currentTarget.contains(e.relatedTarget)) return
+  if (dropId.value === n.id) dropId.value = ''
+}
+
+function onDrop(e, n) {
+  if (!dragNode.value || n.ordinal != null) return
+  e.preventDefault()
+  const node = dragNode.value
+  dragNode.value = null
+  dropId.value = ''
+  emit('reparent', node, n)
+}
 
 // 树是扁平数组（按 path 排序），折叠只影响这一屏的渲染，不动数据结构
 const collapsed = ref(new Set())
@@ -318,6 +369,14 @@ function fmt(n) {
   width: 2px;
   border-radius: 2px;
   background: var(--run);
+}
+/* 拖起来的那行淡下去；接得住的容器行描一圈，人不至于对着光标猜落点 */
+.tree-row.is-dragging {
+  opacity: 0.42;
+}
+.tree-row.is-drop {
+  background: rgba(var(--run-rgb), 0.12);
+  box-shadow: inset 0 0 0 1px rgba(var(--run-rgb), 0.45);
 }
 .tree-twist {
   flex-shrink: 0;

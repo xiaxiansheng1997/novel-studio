@@ -464,6 +464,33 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   /**
+   * 跨卷拖拽：把一节挂到另一卷末尾（`parentId` 为 null 表示顶层）。
+   *
+   * 搬完按树序把全书章号重排，树必须整棵重拉；当前节即便不是被搬的那一节，
+   * 它的 ordinal 也可能变了，所以只要还选着节点就重新 select 一次把章号带回。
+   * 同一 id 重新 select 不会触发视图重灌草稿（watch 盯的是 id），编辑器里的字还在。
+   * 失败把接口那句人话带到 error 上，由调用方当提示显示。
+   */
+  async function reparentNode(id, parentId) {
+    const r = await apiFetch(`/studio/nodes/${id}/reparent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parent_id: parentId || null }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '移动失败')
+      return { moved: false, reason: error.value }
+    }
+    const res = await r.json()
+    if (res.moved && work.value) {
+      tree.value = await (await apiFetch(`/studio/works/${work.value.id}/tree`)).json()
+      const current = node.value?.id
+      if (current) await selectNode(current)
+    }
+    return res
+  }
+
+  /**
    * 全作品（或某一节）查找替换。`dry_run: true` 那一次一个字都不写，界面拿它做预览。
    *
    * 真替换完要把树、字数、术语一起拉齐：树上的字数、术语表里同名的那一条、右栏
@@ -1434,7 +1461,7 @@ export const useStudioStore = defineStore('studio', () => {
     loadTemplates, fetchWorks, createWork, updateWork, setWorkStatus, globalSearch,
     ideas, dailyWrites, loadIdeas, addIdea, useIdea, deleteIdea, loadDailyWrites,
     selectWork, selectNode, deleteWork,
-    saveNode, createNode, importNodes, deleteNode, moveNode, replaceText,
+    saveNode, createNode, importNodes, deleteNode, moveNode, reparentNode, replaceText,
     loadSources, addSource, loadSource, searchSources, extractFacts, deleteSource, updateSource,
     loadFacts, addFact, deleteFact, updateFact,
     loadTerms, addTerm, deleteTerm, updateTerm,

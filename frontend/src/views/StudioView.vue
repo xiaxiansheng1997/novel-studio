@@ -32,6 +32,7 @@
           @create="quickCreate"
           @remove="removeNode"
           @move="moveNode"
+          @reparent="onReparent"
           @import="importOpen = true"
         />
 
@@ -977,6 +978,26 @@ async function moveNode(node, direction) {
     return
   }
   showNotice(`已与「${r.swapped_with_title}」交换位置`)
+  await store.runCheck()
+  await panelRef.value?.refreshContext()
+}
+
+/**
+ * 跨卷拖拽：把一节挂到另一卷（或顶层）末尾。
+ *
+ * 与上下移一样先 flushSave：搬完按树序重排全书章号，摘要、分块与图谱上的
+ * 章号引用一起改；编辑器里还没落盘的正文不先存上，重拉回来的节点就会盖掉它。
+ * 落点后重跑一次一致性检查（规则按章号判定），再刷右栏上下文。
+ */
+async function onReparent(node, target) {
+  await flushSave()
+  const r = await store.reparentNode(node.id, target ? target.id : null)
+  if (!r.moved) {
+    showNotice(r.reason || '移动失败', true)
+    return
+  }
+  const where = r.parent_title || '顶层'
+  showNotice(`已把「${node.title}」移到「${where}」末尾，全书章号已重排`)
   await store.runCheck()
   await panelRef.value?.refreshContext()
 }

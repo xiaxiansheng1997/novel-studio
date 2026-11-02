@@ -745,6 +745,148 @@ class StudioStore:
             "swapped_with_title": other["title"], "reason": "",
         }
 
+    async def _renumber_locked(self, work_id: str) -> bool:
+        """按 path 把全书章号重排成 1..N，返回是否真的改过。**调用方必须已持有 self._lock**。
+
+        搬一节之后树上的位置变了，但章号还是旧的：`list_readable` 按 ordinal 排出生成
+        顺序，一致性检查又按章号判伏笔超期与「死后出场」——号不跟着树走，结论就会错位。
+
+        章号在库里不止 nodes 一处（`_ORDINAL_COLUMNS` 那十列），按值映射时不能逐列直接写：
+        中间态会撞 `entity_states UNIQUE(entity_id, ordinal)` 与
+        `relations UNIQUE(src_id, rel_type, dst_id, since_ordinal)`。所以先整体取负
+        （负值不与任何真实章号冲突），再翻成新号；不在本次映射里的值（比如伏笔计划在
+        尚未写到的第 100 章回收）原样留着——重排只对现存节点负责。
+        """
+        assert self._db is not None
+        cur = await self._db.execute(
+            "SELECT id, ordinal FROM nodes WHERE work_id = ? AND ordinal IS NOT NULL ORDER BY path",
+            (work_id,),
+        )
+        rows = await cur.fetchall()
+        pairs = [(r["id"], int(r["ordinal"]), i) for i, r in enumerate(rows, 1)]
+        if all(old == new for _, old, new in pairs):
+            return False
+
+        # nodes.ordinal 没有唯一约束，直接写；摘要与分块按节点 id 精确改
+        for nid, _old, new in pairs:
+            await self._db.execute("UPDATE nodes SET ordinal = ? WHERE id = ?", (new, nid))
+            await self._db.execute(
+                "UPDATE summaries SET ref_ordinal = ? WHERE scope = 'node' AND ref_id = ?",
+                (new, nid),
+            )
+            await self._db.execute("UPDATE chunks SET ordinal = ? WHERE node_id = ?", (new, nid))
+
+        mapping = {old: new for _, old, new in pairs}
+        old_ords = sorted(mapping)
+        marks = ",".join("?" * len(old_ords))
+        for table, col in _ORDINAL_COLUMNS:
+            await self._db.execute(
+                f"UPDATE {table} SET {col} = -{col} WHERE work_id = ? AND {col} IN ({marks})",
+                [work_id, *old_ords],
+            )
+        for table, col in _ORDINAL_COLUMNS:
+            for old, new in mapping.items():
+                await self._db.execute(
+                    f"UPDATE {table} SET {col} = ? WHERE work_id = ? AND {col} = ?",
+                    (new, work_id, -old),
+                )
+        return True
+
+    async def reparent_node(self, node_id: str, parent_id: Optional[str]) -> Optional[dict[str, Any]]:
+        """把一节挂到另一卷末尾（`parent_id` 为 None 表示顶层）。
+
+        只搬有 ordinal 的叶子（章/节），目标必须是同作品的容器（卷/篇）或顶层：
+        卷自己不动（搬整卷要连带重排卷内节号，是另一套交互），落点也只有「目标末尾」
+        （插到某一节之前需要半自动排序，这一轮不做）。
+
+        搬完按 path 重排全书章号（`_renumber_locked`），并标脏索引台账、刷新作品时间。
+        返回 `{moved, ordinal, parent_title, renumbered}`；已经在目标卷末尾且全书序号
+        已连续时什么都不改，返回 `moved: False`。
+        """
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT id, work_id, parent_id, path, depth, ordinal, title FROM nodes WHERE id = ?",
+                (node_id,),
+            )
+            me = await cur.fetchone()
+            if not me:
+                return None
+            if me["ordinal"] is None:
+                raise ValueError("容器节点不能拖动：这里只搬章与节")
+            work_id = me["work_id"]
+
+            target = None
+            if parent_id:
+                if parent_id == node_id:
+                    raise ValueError("不能把节点拖进它自己")
+                cur = await self._db.execute(
+                    "SELECT id, work_id, path, depth, ordinal, title FROM nodes WHERE id = ?",
+                    (parent_id,),
+                )
+                target = await cur.fetchone()
+                if not target:
+                    return None
+                if target["work_id"] != work_id:
+                    raise ValueError("不能跨作品拖动")
+                if target["ordinal"] is not None:
+                    raise ValueError("目标不是容器：只能落到卷/篇或顶层")
+                # 防御：叶子本来没有子树，真有人手工塞出环时别把 path 撞进自家分支
+                if str(target["path"]).startswith(f"{me['path']}."):
+                    raise ValueError("不能把节点拖进它自己的子树")
+
+            link = "parent_id = ?" if parent_id else "parent_id IS NULL"
+            args: list[Any] = [work_id, parent_id] if parent_id else [work_id]
+            cur = await self._db.execute(
+                f"SELECT path FROM nodes WHERE work_id = ? AND {link} ORDER BY path DESC LIMIT 1",
+                args,
+            )
+            last = await cur.fetchone()
+            same_parent = (me["parent_id"] or None) == (parent_id or None)
+            at_end = bool(same_parent and last and last["path"] == me["path"])
+
+            cur = await self._db.execute(
+                "SELECT ordinal FROM nodes WHERE work_id = ? AND ordinal IS NOT NULL ORDER BY path",
+                (work_id,),
+            )
+            ords = [int(r["ordinal"]) for r in await cur.fetchall()]
+            if at_end and ords == list(range(1, len(ords) + 1)):
+                return {"moved": False, "reason": "已经在这一卷末尾"}
+
+            now = _now()
+            if not at_end:
+                seq = await self._next_seq(work_id, parent_id)
+                new_path = f"{target['path'] + '.' if target else ''}{seq:04d}"
+                new_depth = int(target["depth"]) + 1 if target else 0
+                # 先把 path 换掉，depth 按差值整棵子树平移（叶子没有子树，
+                # 但接口不该因为「现在没有」就在将来悄悄错位）
+                await self._repath_locked(work_id, me["path"], new_path)
+                await self._db.execute(
+                    "UPDATE nodes SET depth = depth + ? "
+                    "WHERE work_id = ? AND (path = ? OR path LIKE ?)",
+                    (new_depth - int(me["depth"]), work_id, new_path, f"{new_path}.%"),
+                )
+                await self._db.execute(
+                    "UPDATE nodes SET parent_id = ?, updated_at = ? WHERE id = ?",
+                    (parent_id, now, node_id),
+                )
+
+            renumbered = await self._renumber_locked(work_id)
+            await self._db.execute(
+                "UPDATE works SET updated_at = ? WHERE id = ?", (now, work_id)
+            )
+            await self._mark_index_dirty_locked(work_id)
+            await self._db.commit()
+
+            cur = await self._db.execute("SELECT ordinal FROM nodes WHERE id = ?", (node_id,))
+            ordinal = int((await cur.fetchone())["ordinal"])
+        return {
+            "moved": True,
+            "ordinal": ordinal,
+            "parent_title": target["title"] if target else "",
+            "renumbered": renumbered,
+        }
+
     async def _drop_unit_rows(self, ref_kind: str, ref_ids: list[str]) -> None:
         """清掉一个节点/素材被删后不受外键保护的那些行。**调用方必须已持有 self._lock**。
 
