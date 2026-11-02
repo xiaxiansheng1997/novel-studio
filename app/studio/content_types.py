@@ -41,7 +41,7 @@ _FALLBACK: dict[str, Any] = {
             "budget_chars": 18000,
             "buckets": ["S0", "S1", "S2", "S_src", "S7", "S8"],
             "style_prompt": "用书面中文写作，句子求短，具体名词优先。",
-            "checks": ["structure_incomplete"],
+            "checks": ["structure_incomplete", "phrase_repeat"],
             "layers": [{"kind": "section", "label": "节", "readable": True}],
             "scales": {"single": {"label": "单篇"}},
             "subtypes": {"general": {"label": "通用", "template": "tpl_general"}},
@@ -51,7 +51,7 @@ _FALLBACK: dict[str, Any] = {
             "budget_chars": 28000,
             "buckets": ["S1", "S2", "S7", "S8"],
             "style_prompt": "第三人称叙事，多写动作与细节。",
-            "checks": ["time_regression", "address_drift", "setting_conflict"],
+            "checks": ["time_regression", "address_drift", "setting_conflict", "phrase_repeat"],
             "layers": [
                 {"kind": "volume", "label": "卷", "readable": False},
                 {"kind": "chapter", "label": "章", "readable": True},

@@ -82,7 +82,7 @@ async def run_one(store, work: dict, force_rules: set[str]) -> int:
 def soft_rules_all() -> set[str]:
     from app.studio import soft_rules
 
-    return set(soft_rules.NOVEL_SOFT + soft_rules.DOC_SOFT)
+    return set(soft_rules.NOVEL_SOFT + soft_rules.DOC_SOFT + soft_rules.BOOK_SOFT)
 
 
 async def main() -> int:

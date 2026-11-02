@@ -817,6 +817,7 @@ const RULE_LABEL = {
   structure_incomplete: '结构不完整',
   address_drift: '称呼待确认', setting_conflict: '设定待确认',
   absolute_claim: '绝对化表述', number_unsourced: '数字无出处',
+  phrase_repeat: '自我重复',
 }
 const hardIssues = computed(() => store.issues.filter((i) => i.severity !== 'info'))
 const softIssues = computed(() => store.issues.filter((i) => i.severity === 'info'))

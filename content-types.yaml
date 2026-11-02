@@ -20,7 +20,10 @@ kinds:
     style_prompt: >-
       用书面中文写作。句子求短，具体名词优先，少用形容词堆砌。
       禁止「随着……的发展」「众所周知」「不难发现」这类空转句。
-    checks: [structure_incomplete]
+    # phrase_repeat（自我重复）对文档同样成立，挂在 kind 层让所有子类都开着：
+    # `checks_append` 只在 scale / subtype 两层生效（`_merge` 只搬覆盖层的 *_append），
+    # 写在 kind 层等于没写，所以这一条直接进 checks。单篇只有一个可读节，检测器自己会返回空。
+    checks: [structure_incomplete, phrase_repeat]
     # 节点层级：readable=true 的是可读单元（占 ordinal、参与拼装）
     layers:
       - { kind: section, label: 节, readable: true }
@@ -100,10 +103,10 @@ kinds:
       第三人称叙事，多写动作、对话与可感知的细节，少写心理独白。
       不解释人物动机，让行为自己说话；每章结尾留一个钩子。
     # 前 5 条硬规则全部基于图谱结构化比对，零 LLM 成本（见 app/studio/consistency.py）；
-    # 后 2 条是软规则（app/studio/soft_rules.py）：只出 info、不参与打分，
-    # 报出来的是「请确认」而不是「你写错了」
+    # 后 3 条是软规则（app/studio/soft_rules.py）：只出 info、不参与打分，
+    # 报出来的是「请确认」而不是「你写错了」。phrase_repeat 只有整本检查跑得出来
     checks: [dead_character, item_conflict, time_regression, location_destroyed, foreshadow_overdue,
-             address_drift, setting_conflict]
+             address_drift, setting_conflict, phrase_repeat]
     layers:
       - { kind: volume, label: 卷, readable: false }
       - { kind: chapter, label: 章, readable: true }
