@@ -1,0 +1,33 @@
+app/studio/store.py
+  s_85cd431edb9d78::t_3cefcfafceca2f 160-201
+  s_85cd431edb9d78::t_6f0ede4c2cc859 2902-3302
+app/api/studio_routes.py
+  s_85cd431edb9d78::t_3232be5466dd22 21,45,325-326,330-339,341-409
+  s_85cd431edb9d78::t_379b01ad3b48ec 327-329,340
+frontend/src/stores/studio.js
+  s_85cd431edb9d78::t_73514dfd82af30 20-31,1108-1134,1138-1164,1554-1555
+frontend/src/components/AppIcon.vue
+  s_85cd431edb9d78::t_2cf7cbbfc5dec0 38
+tests/test_studio_bundle.py
+  s_85cd431edb9d78::t_f6d4973cc979b7 1-199,203-211
+  s_85cd431edb9d78::t_b63d6d09ade2fc 200-202
+frontend/src/components/ShelfView.vue
+  s_85cd431edb9d78::t_ec9539cba47cfd 35-53,153-159,215-216,308-330,332-353,484,732-756
+  s_85cd431edb9d78::t_045f5c22de4524 33-34,331,475,479-483
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "83c558d99fdfe235d313eca72f65bbbd08b821da",
+  "prompts": {},
+  "sessions": {
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
