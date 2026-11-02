@@ -262,7 +262,7 @@
                 <button
                   class="btn btn-sm ed-type-btn"
                   :class="{ 'is-on': typeOpen }"
-                  :title="`正文排版：${writer.fontSize}px · 行距 ${writer.lineHeight} · ${measureName}`"
+                  :title="`正文排版：${writer.fontSize}px · 行距 ${writer.lineHeight} · ${measureName} · ${fontName}`"
                   :aria-expanded="typeOpen"
                   @click="typeOpen = !typeOpen"
                 >
@@ -313,19 +313,14 @@
                     <span class="type-label">字体</span>
                     <div class="type-seg" role="group" aria-label="正文字体">
                       <button
+                        v-for="p in FONT_PRESETS"
+                        :key="p.id"
                         type="button"
                         class="type-chip"
-                        :class="{ 'is-on': writer.serif }"
-                        title="宋体一类，笔画有粗细，长读不累"
-                        @click="setSerif(true)"
-                      >衬线</button>
-                      <button
-                        type="button"
-                        class="type-chip"
-                        :class="{ 'is-on': !writer.serif }"
-                        title="黑体一类，屏幕上看更清爽"
-                        @click="setSerif(false)"
-                      >无衬线</button>
+                        :class="{ 'is-on': writer.font === p.id }"
+                        :title="p.hint"
+                        @click="setFont(p.id)"
+                      >{{ p.name }}</button>
                     </div>
                   </div>
                   <div class="type-row">
@@ -604,6 +599,7 @@ import ImportDocDialog from '../components/ImportDocDialog.vue'
 import { useStudioStore } from '../stores/studio'
 import { apiFetch } from '../utils/api'
 import {
+  FONT_PRESETS,
   FONT_SIZES,
   LINE_HEIGHTS,
   MEASURES,
@@ -613,8 +609,9 @@ import {
   setFontSize,
   setLineHeight,
   setMeasure,
-  setSerif,
+  setFont,
   setTint,
+  fontName,
   writer,
   writerVars,
 } from '../utils/writer'
@@ -1879,12 +1876,17 @@ async function applyTitle(text, target) {
 
 /* ---------- 编辑器 ---------- */
 .editor {
-  /* 排版可调：两套字体栈在这里给全，utils/writer.js 只按名字挑，不在 JS 里再抄一份 */
+  /* 排版可调：字体栈在这里给全（本体在 tailwind.config.js 的 theme 里），
+     utils/writer.js 只按 id 挑一个 var(--w-xxx)，不在 JS 里重复一份。
+     四个都得定出来：--w-font 指的是其中某一个，没定义的那个会让整条声明失效。 */
   --w-serif: theme('fontFamily.serif');
+  --w-kai: theme('fontFamily.kai');
   --w-sans: theme('fontFamily.sans');
+  --w-mono: theme('fontFamily.mono');
   /* 默认档：实际值由 utils/writer.js 用 :style 覆盖在同一个节点上（内联样式优先）。
-     留这一份是为了 :style 没挂上时正文仍是 17px / 1.9 / 646px，而不是退回浏览器默认字体。 */
-  --w-size: 17px;
+     留这一份是为了 :style 没挂上时正文仍是 18px / 1.9 / 646px，而不是退回浏览器默认字体。
+     18 不是随便选的：宋体在 ≤17px 走内嵌点阵（无抗锯齿），看着碎。 */
+  --w-size: 18px;
   --w-height: 1.9;
   --w-measure: 646px;
   --w-font: var(--w-serif);
@@ -2239,9 +2241,9 @@ async function applyTitle(text, target) {
   border: none;
   background: transparent;
   color: var(--text);
-  /* 排版可调：四个值都来自 .editor 上的 --w-*，默认档位与改动前逐像素一致 */
+  /* 排版可调：这几个值都来自 .editor 上的 --w-*，弹层里改一处就跟着变 */
   font-family: var(--w-font, var(--w-serif));
-  font-size: var(--w-size, 17px);
+  font-size: var(--w-size, 18px);
   line-height: var(--w-height, 1.9);
   letter-spacing: 0.01em;
   padding: 8px 0 30px;
@@ -2322,7 +2324,9 @@ async function applyTitle(text, target) {
   margin: 8px 0 0;
   overflow-y: auto;
   font-family: var(--w-font, var(--w-serif));
-  font-size: 13.5px;
+  /* 15px 不是凑数：正文靠 18px 跳出宋体点阵档，这里不能跟着跳（顶栏与面板高度会乱），
+     但再往下压就又回到点阵里。楷体与无衬线那些档不受这个限制。 */
+  font-size: 15px;
   line-height: 1.8;
   color: var(--text);
   white-space: pre-wrap;
@@ -2432,8 +2436,9 @@ async function applyTitle(text, target) {
   margin: 0;
   max-height: 14vh;
   overflow-y: auto;
-  font-family: theme('fontFamily.serif');
-  font-size: 12.5px;
+  /* 与草稿预览一样吃当前字体档，不再写死衬线 */
+  font-family: var(--w-font, var(--w-serif));
+  font-size: 14px;
   line-height: 1.75;
   color: var(--text-muted);
   white-space: pre-wrap;
