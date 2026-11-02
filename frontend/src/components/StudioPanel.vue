@@ -781,7 +781,10 @@ const thumbLinks = computed(() =>
 
 // ---- 历史（版本） ----
 // 来源标签必须与库里的 source 枚举对齐：都是 ai_draft，作者得分清哪条是模型抽风
-const SOURCE_LABEL = { ai_draft: 'AI 草稿', ai_polish: 'AI 润色', human: '手改' }
+// bulk_replace 单独一档：整本书换名那一趟不是人一个字一个字敲的，也不该算进今天的字数
+const SOURCE_LABEL = {
+  ai_draft: 'AI 草稿', ai_polish: 'AI 润色', human: '手改', bulk_replace: '批量替换',
+}
 const diffOpen = ref(false)
 const diffVersion = ref(null)
 const newestNo = computed(() => store.versions[0]?.version_no ?? -1)

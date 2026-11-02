@@ -31,6 +31,7 @@ from app.studio import (
     indexer,
     prompting,
     publish,
+    replace,
     retrieval,
     summarizer,
     tokenize,
@@ -187,7 +188,8 @@ _SNAPSHOT_FAILED = "快照没写成，详见服务端日志"
 
 # node_versions.source 的取值集合，与前端 SOURCE_LABEL 一一对应。
 # 放开成任意字符串的话，历史页会出现「未知」这种没人看得懂的行，回滚前不敢点。
-_VERSION_SOURCES = {"human", "ai_draft", "ai_polish"}
+# `bulk_replace` 是「全作品替换」单独开的那一档：替换不是今天新写的字，不该刷高日历。
+_VERSION_SOURCES = {"human", "ai_draft", "ai_polish", "bulk_replace"}
 
 
 # ==================== 作品 ====================
@@ -1903,6 +1905,48 @@ async def search_work(work_id: str, body: SearchRequest, request: Request):
         budget_chars=20000,
     )
     return {"query": body.q, "kinds": list(kinds), "hits": hits, "count": len(hits)}
+
+
+class ReplaceRequest(BaseModel):
+    # 不用 `min_length=1`：空串与「全是空白」是两种情况，都得回一句人看得懂的话，
+    # 而不是 422 那种字段校验报错（下面路由里一起拦）
+    find: str = Field(default="", max_length=replace.MAX_FIND_CHARS)
+    replace: str = Field(default="", max_length=replace.MAX_FIND_CHARS)
+    # 范围：整本书，还是只那一节。`node` 这种范围走的是同一个接口，不另开一条路径
+    scope: Literal["work", "node"] = "work"
+    node_id: Optional[str] = None
+    case_sensitive: bool = True
+    # 默认只看：一次替换摊到整本书是几十上百节，不该由一次回车发起
+    dry_run: bool = True
+    # 术语表里同名的那一条跟着改（角色改名时顺手把术语也改对）
+    update_terms: bool = True
+
+
+@router.post("/studio/works/{work_id}/replace", dependencies=[Depends(verify_key)])
+async def replace_in_work_api(work_id: str, body: ReplaceRequest, request: Request):
+    """全作品查找替换。默认 `dry_run=true`：只看命中什么，不动库。
+
+    不做正则：中文稿里用不上，而一条坏正则在一百万字的库上能跑出不归的耗时。
+    真替换之前会把旧文先存进版本表，所以改完发现不对还能在「历史」里逐节回滚。
+    """
+    store = _store(request)
+    await _require_work(request, work_id)
+    find = body.find
+    if not find.strip():
+        raise HTTPException(status_code=400, detail="查找内容不能只有一堆空白")
+    if body.scope == "node" and not body.node_id:
+        raise HTTPException(status_code=400, detail="scope=node 要传 node_id")
+    return await replace.replace_in_work(
+        store,
+        work_id=work_id,
+        find=find,
+        replace=body.replace,
+        scope=body.scope,
+        node_id=body.node_id or "",
+        case_sensitive=body.case_sensitive,
+        dry_run=body.dry_run,
+        update_terms=body.update_terms,
+    )
 
 
 class SummarizeRequest(BaseModel):

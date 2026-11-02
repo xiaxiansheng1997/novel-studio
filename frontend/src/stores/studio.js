@@ -463,6 +463,39 @@ export const useStudioStore = defineStore('studio', () => {
     return res
   }
 
+  /**
+   * 全作品（或某一节）查找替换。`dry_run: true` 那一次一个字都不写，界面拿它做预览。
+   *
+   * 真替换完要把树、字数、术语一起拉齐：树上的字数、术语表里同名的那一条、右栏
+   * 摘要的「待重算」都是跟着正文变的，漏掉哪一样，界面就会显示一个和库里不一致的旧值。
+   * 当前那一节的正文交给调用方重拉（StudioView 收到 done 之后比对草稿），
+   * store 不碰编辑器里那份——那一份是人的手上一动，刷回去就是丢字。
+   */
+  async function replaceText(payload) {
+    if (!work.value) return null
+    const r = await apiFetch(`/studio/works/${work.value.id}/replace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '替换失败')
+      return null
+    }
+    const res = await r.json()
+    error.value = ''
+    if (res.dry_run || !res.replaced_nodes) return res
+    const tr = await apiFetch(`/studio/works/${work.value.id}/tree`)
+    if (tr.ok) tree.value = await tr.json()
+    const st = await apiFetch(`/studio/works/${work.value.id}/stats`)
+    if (st.ok) stats.value = await st.json()
+    await loadTerms()
+    // 记忆状态也得重拉：右栏那句「N 份已过期」是索引与摘要台账算出来的，
+    // 而它只在进工作台时读一次——不刷新的话替换完屏幕上永远看不到待重算
+    await loadIndexStatus()
+    return res
+  }
+
   async function loadSources() {
     if (!work.value) return
     const r = await apiFetch(`/studio/works/${work.value.id}/sources`)
@@ -1401,7 +1434,7 @@ export const useStudioStore = defineStore('studio', () => {
     loadTemplates, fetchWorks, createWork, updateWork, setWorkStatus, globalSearch,
     ideas, dailyWrites, loadIdeas, addIdea, useIdea, deleteIdea, loadDailyWrites,
     selectWork, selectNode, deleteWork,
-    saveNode, createNode, importNodes, deleteNode, moveNode,
+    saveNode, createNode, importNodes, deleteNode, moveNode, replaceText,
     loadSources, addSource, loadSource, searchSources, extractFacts, deleteSource, updateSource,
     loadFacts, addFact, deleteFact, updateFact,
     loadTerms, addTerm, deleteTerm, updateTerm,

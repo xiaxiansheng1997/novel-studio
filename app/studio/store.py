@@ -603,6 +603,23 @@ class StudioStore:
             await self._db.commit()
         return {"version_no": vno, "source": source, "chars": len(content), "created_at": now}
 
+    async def preserve_current_version(
+        self, node_id: str, content: str, *, source: str = "human",
+    ) -> bool:
+        """把「还没进版本表的那一版」存下来；存过了就什么都不做，返回有没有存。
+
+        判据与 `restore_version` 用的是同一条（最新版本已等于当前正文就不重复补）：
+        两处各写一套的话，会出现一边补了重复行、另一边没补。版本表只存不重复的状态，
+        不然「历史」页里连着好几条一模一样的行，反而看不出改了什么。
+
+        动用户的稿子之前都得先过这一刀（批量替换就是）：自动保存不写版本，
+        不补这一步，改之前的那一版在这个世界上就不存在了。
+        """
+        if not content or content == await self._newest_version_content(node_id):
+            return False
+        await self.append_version(node_id, content, source=source)
+        return True
+
     async def _swap_ordinals_locked(
         self, work_id: str, table: str, col: str, a: int, b: int,
     ) -> None:
@@ -1194,8 +1211,8 @@ class StudioStore:
         current = node.get("content") or ""
         if current == (target.get("content") or ""):
             return node
-        if current and current != await self._newest_version_content(node_id):
-            await self.append_version(node_id, current, source="human")
+        # 判据抽到 `preserve_current_version`：批量替换走的是同一句，两处不会写出两套规则
+        await self.preserve_current_version(node_id, current)
         # 回滚不是「写」：换回旧稿不该把当天的字数刷高
         await self.update_node(node_id, content=target["content"] or "",
                                snapshot_source="restore")

@@ -258,6 +258,9 @@
               <button class="btn btn-sm" title="公众号排版预览、发布前检查与一键复制" @click="wechatOpen = true">
                 <AppIcon name="send" :size="13" /> 公众号
               </button>
+              <button class="btn btn-sm" title="人名、说法、错字一次改完整本书（先预览）" @click="openReplace">
+                <AppIcon name="swap" :size="13" /> 替换
+              </button>
               <div class="ed-type-wrap">
                 <button
                   class="btn btn-sm ed-type-btn"
@@ -566,6 +569,13 @@
       @done="onImported"
     />
 
+    <ReplaceDialog
+      v-model:open="replaceOpen"
+      :node-id="store.node?.id || ''"
+      :node-title="store.node?.title || ''"
+      @done="onReplaced"
+    />
+
     <!-- 先聊聊：立项前把题名/前提聊出来，一键回填上面的新建表单 -->
     <Teleport to="body">
       <div v-if="askOpen" class="ask-mask" @mousedown.self="askOpen = false">
@@ -596,6 +606,7 @@ import TransformDialog from '../components/TransformDialog.vue'
 import WechatDialog from '../components/WechatDialog.vue'
 import GlobalSearch from '../components/GlobalSearch.vue'
 import ImportDocDialog from '../components/ImportDocDialog.vue'
+import ReplaceDialog from '../components/ReplaceDialog.vue'
 import { useStudioStore } from '../stores/studio'
 import { apiFetch } from '../utils/api'
 import {
@@ -650,6 +661,8 @@ const subtypes = computed(() => currentKind.value?.subtypes || [])
 
 const transformOpen = ref(false)
 const selectedText = ref('')
+// 查找替换：开着的状态属于这一屏，不进 store（切作品要收起，见下面的 watch）
+const replaceOpen = ref(false)
 // 排版弹层：开着的状态属于这一屏，不进 store（切作品要收起，见下面的 watch）
 const typeOpen = ref(false)
 // 不展开弹层也能从悬停提示里看到当前档位
@@ -1000,6 +1013,7 @@ function onUseFromAsk(payload) {
 watch(() => store.work?.id, () => {
   workEditOpen.value = false
   typeOpen.value = false
+  replaceOpen.value = false
 })
 
 watch(() => store.node?.id, () => {
@@ -1017,6 +1031,12 @@ function onKeydown(e) {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault()
     openSearch()
+    return
+  }
+  // Ctrl+H 查找替换。与已有的 Ctrl+K / S / Enter / = / - / Esc 都不撞
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
+    e.preventDefault()
+    openReplace()
     return
   }
   if (!(e.ctrlKey || e.metaKey)) return
@@ -1211,6 +1231,38 @@ async function flushSave() {
   }
   saveState.value = 'saved'
   return true
+}
+
+/**
+ * 打开替换前先把正文落盘。
+ * 服务端读的是库里那一份，屏幕上还没存上的改动不先进去，替换完回灌草稿时
+ * 就会拿库里的旧字覆盖掉人刚敲的那一段——与换节/回书架/点生成/回滚四个入口同一处理。
+ */
+async function openReplace() {
+  if (!store.work) return
+  if (store.node && !(await flushSave())) {
+    showNotice('正文没存上，先重试保存再替换', true)
+    return
+  }
+  replaceOpen.value = true
+}
+
+/**
+ * 替换落库之后只管屏幕上这一份：树、字数、术语已由 store.replaceText 拉齐。
+ * 当前节也被改到时必须把新正文回灌进草稿并置成 saved，否则屏幕上还是旧字，
+ * 几秒后那一次自动保存会把刚替换好的那段盖回去。
+ */
+async function onReplaced(res) {
+  if (store.node) {
+    await store.selectNode(store.node.id)
+    if (store.node && store.node.content !== contentDraft.value) {
+      contentDraft.value = store.node.content || ''
+      saveState.value = 'saved'
+    }
+  }
+  // 正文换了：右栏的上下文预览与「N 节摘要待重算」要跟着重装配（纯本地，不调模型）
+  await panelRef.value?.refreshContext()
+  showNotice(`已替换 ${res.replaced_nodes} 节里的 ${res.replaced_hits} 处：旧稿在本节「历史」里`)
 }
 
 async function saveTitle() {
