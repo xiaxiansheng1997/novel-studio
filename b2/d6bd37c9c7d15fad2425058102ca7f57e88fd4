@@ -1,0 +1,55 @@
+app/api/studio_routes.py
+  s_85cd431edb9d78::t_4213514b3bb73f 1915
+  s_85cd431edb9d78::t_12c6b941d2a38b 34,192,1950-1951
+  s_85cd431edb9d78::t_07d8fafdfdd7c1 1910,1914,1916-1924
+  s_85cd431edb9d78::t_3efb705669a6c9 191,1925-1949
+  s_85cd431edb9d78::t_ea93fe77c2b11f 1911
+  s_85cd431edb9d78::t_df15aaa09a8ed1 1912-1913
+frontend/src/stores/studio.js
+  s_85cd431edb9d78::t_596821657a4ad2 493-495
+  s_85cd431edb9d78::t_751e6e4e62cc70 466-492,496-498,1437
+app/studio/store.py
+  s_85cd431edb9d78::t_2feb1f2df95d1f 606-622
+  s_85cd431edb9d78::t_68c54923e044e7 1214-1215
+frontend/src/components/StudioPanel.vue
+  s_85cd431edb9d78::t_a172e0b1c4602d 784-787
+tests/test_studio_replace.py
+  s_85cd431edb9d78::t_c61ce60de80d26 266
+  s_85cd431edb9d78::t_623780246806e9 292,303,306-307,313-320,322
+  s_85cd431edb9d78::t_0a449d1ce2a961 198-200,203-204,228,230-232,237
+  s_85cd431edb9d78::t_c21c82484b20d9 22,61-69,82-83,85-89,126-129,137-139,177,180,182,205-211,221-223
+  s_85cd431edb9d78::t_2d0ccc72ad61fd 293,309-312,327
+  s_85cd431edb9d78::t_114d85838c25e7 1-21,23-60,70-81,84,90-125,130-136,140-176,178-179,181,183-197,201-202,212-220,224-227,229,233-236,238-265,267-291,294-302,304-305,308,321,323-326,328-356
+app/studio/replace.py
+  s_85cd431edb9d78::t_f65924ccb95553 178,186,205
+  s_85cd431edb9d78::t_18c8aec9183c21 99,103
+  s_85cd431edb9d78::t_e77964e4fbed15 98,147,162,179-185,187-190,204,206-207
+  s_85cd431edb9d78::t_e73cefd994520c 22-23
+  s_85cd431edb9d78::t_e01b45a48997dc 1-21,24-97,100-102,104-146,148-161,163-177,191-203,208-242
+frontend/src/views/StudioView.vue
+  s_85cd431edb9d78::t_c688ab11ab4849 261-263,572-578,609,665,1016,1036-1041
+  s_85cd431edb9d78::t_325db516938222 1236-1262,1264-1267
+  s_85cd431edb9d78::t_dc9992716e5bbb 664,1263
+frontend/src/components/ReplaceDialog.vue
+  s_85cd431edb9d78::t_9c2a6d747c0383 1-49,51-57,59-66,68-73,75-86,88-92,94-180,182-200,207-268,277-506,508-544
+  s_85cd431edb9d78::t_3491cc2b3f7bf7 50,58,67,74,87,93,181,201-206,507
+  s_85cd431edb9d78::t_64960c8e88988e 269-276
+frontend/src/components/AppIcon.vue
+  s_85cd431edb9d78::t_5e52b892a4455f 34-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b2d6bd37c9c7d15fad2425058102ca7f57e88fd4",
+  "prompts": {},
+  "sessions": {
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
