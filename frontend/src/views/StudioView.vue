@@ -8,164 +8,16 @@
     </div>
 
     <div class="studio">
-      <!-- 未选作品：书架 -->
-      <main v-if="!store.work" ref="shelfEl" class="shelf">
-        <header class="shelf-head">
-          <div>
-            <h1>写作台</h1>
-            <p class="shelf-sub">长篇连载与单篇文档共用一套工作台，结构由作品类型决定。</p>
-          </div>
-          <div class="shelf-tools">
-            <label class="shelf-search">
-              <AppIcon name="search" :size="14" />
-              <input v-model="shelfQ" class="field" placeholder="搜标题 / 主旨" aria-label="筛选作品" />
-            </label>
-            <button class="btn btn-sm" title="跨作品搜正文与素材（Ctrl+K）" @click="openSearch()">
-              <AppIcon name="search" :size="13" /> 搜正文
-            </button>
-            <button class="btn btn-sm" title="立项前先把题名与前提聊出来" @click="askOpen = true">
-              <AppIcon name="chat" :size="13" /> 先聊聊
-            </button>
-            <button class="btn btn-primary" @click="showCreate = !showCreate">
-              <AppIcon name="plus" :size="15" /> 新建作品
-            </button>
-          </div>
-        </header>
+      <!-- 未选作品：书架（ShelfView 自己管筛选与滚动；打开/先聊聊/搜正文都交回这一层） -->
+      <ShelfView
+        v-if="!store.work"
+        :seed="shelfSeed"
+        @open="openWork"
+        @ask="askOpen = true"
+        @search="openSearch"
+        @notice="showNotice"
+      />
 
-        <!-- 归档只是从书架收起，不删任何东西：所以在写/已归档是两个视图，不是筛选器 -->
-        <div class="shelf-views">
-          <button class="view-chip" :class="{ 'is-on': !showArchived }" @click="showArchived = false">
-            在写 {{ activeWorks.length }}
-          </button>
-          <button class="view-chip" :class="{ 'is-on': showArchived }" @click="showArchived = true">
-            已归档 {{ archivedWorks.length }}
-          </button>
-        </div>
-
-        <!-- 写作日历：数据从版本表现算，不在别处另记一份 -->
-        <section class="write-log" aria-label="写作统计">
-          <span class="wl-item"><strong>{{ fmt(store.dailyWrites.today) }}</strong> 今天字数</span>
-          <span class="wl-item"><strong>{{ store.dailyWrites.streak }}</strong> 连续天</span>
-          <span class="wl-days" :title="last14.map((d) => `${d.day} ${d.chars} 字`).join(' / ')">
-            <span
-              v-for="d in last14"
-              :key="d.day"
-              class="wl-bar"
-              :class="{ 'is-on': d.chars > 0 }"
-              :style="{ height: barHeight(d.chars) }"
-            ></span>
-          </span>
-        </section>
-
-        <form v-if="showCreate" class="create card" @submit.prevent="create">
-          <div class="create-row">
-            <label class="fl">
-              <span>类型</span>
-              <select v-model="form.kind" class="field" @change="onKindChange">
-                <option v-for="k in kinds" :key="k.id" :value="k.id">{{ k.label }}</option>
-              </select>
-            </label>
-            <label v-if="scales.length > 1" class="fl">
-              <span>规模</span>
-              <select v-model="form.scale" class="field" @change="applyScaleDefaults">
-                <option v-for="s in scales" :key="s.id" :value="s.id">{{ s.label }}</option>
-              </select>
-            </label>
-            <label v-if="form.kind === 'novel'" class="fl">
-              <span>题材</span>
-              <input v-model="form.subtype" class="field" placeholder="玄幻 / 都市 / 科幻…" />
-            </label>
-            <label v-else-if="subtypes.length" class="fl">
-              <span>文体</span>
-              <select v-model="form.subtype" class="field">
-                <option v-for="s in subtypes" :key="s.id" :value="s.id">{{ s.label }}</option>
-              </select>
-            </label>
-            <label class="fl grow">
-              <span>标题</span>
-              <input v-model="form.title" class="field" required placeholder="作品标题" />
-            </label>
-          </div>
-          <label class="fl grow">
-            <span>一句话主旨</span>
-            <textarea v-model="form.premise" class="field" rows="2"
-                      placeholder="这篇/这本书要讲什么，给谁看，最重要的一句话是什么" />
-          </label>
-          <div class="create-foot">
-            <label class="fl small">
-              <span>目标字数</span>
-              <input v-model.number="form.target_words" class="field" type="number" min="0" step="1000" />
-            </label>
-            <p v-if="store.error" class="err">{{ store.error }}</p>
-            <button class="btn btn-primary" type="submit" :disabled="creating">
-              {{ creating ? '创建中…' : '创建并进入' }}
-            </button>
-          </div>
-        </form>
-
-        <!-- 灵感箱：一句话想法先落这儿，不占作品 -->
-        <section class="ideas">
-          <div class="ideas-head">
-            <h2>灵感箱</h2>
-            <span class="ideas-sub">还没成形的一句话，先记着；「用它开写」会填进上面的新建表单</span>
-          </div>
-          <form class="ideas-add" @submit.prevent="saveIdea">
-            <input v-model="ideaDraft" class="field" placeholder="一句话：想写什么，给谁看" />
-            <button class="btn btn-sm" type="submit" :disabled="ideaBusy || !ideaDraft.trim()">记下</button>
-          </form>
-          <ul v-if="store.ideas.length" class="idea-list">
-            <li v-for="i in store.ideas" :key="i.id" class="idea-row">
-              <span class="idea-text" :title="i.text">{{ i.text }}</span>
-              <button class="link-btn" @click="startFromIdea(i)">用它开写</button>
-              <button class="idea-del" title="删掉这条想法" @click="store.deleteIdea(i.id)">删</button>
-            </li>
-          </ul>
-        </section>
-
-        <div v-if="visibleWorks.length" class="grid">
-          <div
-            v-for="w in visibleWorks"
-            :key="w.id"
-            class="work-card"
-            role="button"
-            tabindex="0"
-            @click="openWork(w.id)"
-            @keydown.enter="openWork(w.id)"
-          >
-            <button
-              class="work-arch"
-              :title="showArchived ? '移回「在写」' : '归档：从书架收起，正文与版本都不删'"
-              @click.stop="showArchived ? unarchiveWork(w) : archiveWork(w)"
-            >
-              <AppIcon :name="showArchived ? 'refresh' : 'archive'" :size="12" />
-            </button>
-            <button
-              class="work-del"
-              title="删除作品（连同节点树与全部历史版本；删前留一份整库副本）"
-              @click.stop="removeWork(w)"
-            >
-              <AppIcon name="trash" :size="12" />
-            </button>
-            <span class="work-kind">{{ kindLabel(w) }}</span>
-            <span class="work-title">{{ w.title }}</span>
-            <span class="work-meta">{{ w.node_count }} 节 · {{ fmt(w.words) }} 字</span>
-            <span class="work-premise">{{ w.premise || '还没有主旨' }}</span>
-          </div>
-        </div>
-        <p v-else-if="!showCreate" class="shelf-empty">
-          <template v-if="shelfQ">
-            没有匹配「{{ shelfQ }}」的作品。
-            <button class="link-btn" @click="openSearch(shelfQ)">去正文里搜</button>
-          </template>
-          <template v-else-if="showArchived">还没有归档的作品。归档只是从书架收起，不删正文。</template>
-          <template v-else-if="archivedWorks.length">
-            在写的都归档了（{{ archivedWorks.length }} 篇），切到「已归档」可以翻出来。
-          </template>
-          <template v-else>
-            还没有作品。先点右上角「新建作品」，进去之后左栏有「导入旧稿」，能把已有章节一次贴进来。
-          </template>
-        </p>
-      </main>
 
       <!-- 已选作品：三栏工作台 -->
       <template v-else>
@@ -599,6 +451,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppNav from '../components/AppNav.vue'
 import AppIcon from '../components/AppIcon.vue'
+import ShelfView from '../components/ShelfView.vue'
 import StudioTree from '../components/StudioTree.vue'
 import StudioPanel from '../components/StudioPanel.vue'
 import AskPanel from '../components/AskPanel.vue'
@@ -631,9 +484,8 @@ const store = useStudioStore()
 const route = useRoute()
 const router = useRouter()
 
-const showCreate = ref(false)
-const creating = ref(false)
-const form = ref({ kind: 'article', scale: 'single', subtype: 'tech', title: '', premise: '', target_words: 5000 })
+// 书架「先聊聊」的回填：每回填一次换一个新对象，ShelfView 靠身份变化触发表单
+const shelfSeed = ref(null)
 
 // 问一问：书架上用弹层（立项前），工作台里是右栏第 9 个 tab
 const askOpen = ref(false)
@@ -655,10 +507,6 @@ const kinds = computed(() =>
     ? store.contentTypes
     : [{ id: 'article', label: '文档', scales: [{ id: 'single', label: '单篇' }], subtypes: [] }],
 )
-const currentKind = computed(() => kinds.value.find((k) => k.id === form.value.kind) || null)
-const scales = computed(() => currentKind.value?.scales || [])
-const subtypes = computed(() => currentKind.value?.subtypes || [])
-
 const transformOpen = ref(false)
 const selectedText = ref('')
 // 查找替换：开着的状态属于这一屏，不进 store（切作品要收起，见下面的 watch）
@@ -679,9 +527,7 @@ const savingWork = ref(false)
 const digestBusy = ref(false)
 const wechatOpen = ref(false)
 
-// 书架：搜索框只筛卡片，跨作品搜正文走 Ctrl+K 那个弹层——两种搜索混在一个框里会互相误会
-const shelfQ = ref('')
-const showArchived = ref(false)
+// 全库搜索弹层：书架与工作台共用（Ctrl+K，或书架上的「搜正文」）
 const searchOpen = ref(false)
 const searchSeed = ref('')
 
@@ -689,58 +535,6 @@ const searchSeed = ref('')
 function openSearch(seed = '') {
   searchSeed.value = seed
   searchOpen.value = true
-}
-
-const ideaDraft = ref('')
-const ideaBusy = ref(false)
-const pendingIdea = ref('')
-const shelfEl = ref(null)
-
-// 关掉新建表单就别再记着那条灵感：否则下一次手动新建会被误标成「用它开写」
-watch(showCreate, (on) => {
-  if (!on) pendingIdea.value = ''
-})
-
-async function saveIdea() {
-  const text = ideaDraft.value.trim()
-  if (!text || ideaBusy.value) return
-  ideaBusy.value = true
-  const idea = await store.addIdea(text)
-  ideaBusy.value = false
-  if (!idea) {
-    showNotice(store.error || '记下失败', true)
-    return
-  }
-  ideaDraft.value = ''
-}
-
-/** 用它开写：只填新建表单，kind/scale 仍由人挑——猜错类型比不填更麻烦 */
-async function startFromIdea(idea) {
-  pendingIdea.value = idea.id
-  form.value.title = idea.text.slice(0, 40)
-  form.value.premise = idea.text
-  showCreate.value = true
-  await nextTick()
-  shelfEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
-}
-
-const activeWorks = computed(() => store.works.filter((w) => (w.status || 'active') !== 'archived'))
-const archivedWorks = computed(() => store.works.filter((w) => w.status === 'archived'))
-const visibleWorks = computed(() => {
-  const base = showArchived.value ? archivedWorks.value : activeWorks.value
-  const q = shelfQ.value.trim().toLowerCase()
-  if (!q) return base
-  return base.filter((w) =>
-    (w.title || '').toLowerCase().includes(q) || (w.premise || '').toLowerCase().includes(q),
-  )
-})
-
-async function archiveWork(w) {
-  if (!(await store.setWorkStatus(w.id, 'archived'))) showNotice(store.error || '归档失败', true)
-}
-
-async function unarchiveWork(w) {
-  if (!(await store.setWorkStatus(w.id, 'active'))) showNotice(store.error || '恢复失败', true)
 }
 
 /** 全库搜索的结果点进来：同一篇里就直接换节，不然带着 node 跳过去 */
@@ -822,17 +616,6 @@ const pipePercent = computed(() => {
   return Math.min(100, Math.round((p.done / p.total) * 100)) + '%'
 })
 
-function onKindChange() {
-  applyScaleDefaults()
-  form.value.subtype = subtypes.value[0]?.id || ''
-}
-
-function applyScaleDefaults() {
-  form.value.scale = scales.value[0]?.id || 'single'
-  const s = scales.value.find((x) => x.id === form.value.scale)
-  if (s?.target_words) form.value.target_words = s.target_words
-}
-
 let saveTimer = 0
 
 const saveLabel = computed(() => {
@@ -888,32 +671,6 @@ watch(() => store.genText, (text) => {
   if (!text) genPicked.value = []
 })
 
-// ---- 写作日历（近 14 天，今天在最右）----
-function ymd(dt) {
-  const m = String(dt.getMonth() + 1).padStart(2, '0')
-  const d = String(dt.getDate()).padStart(2, '0')
-  return `${dt.getFullYear()}-${m}-${d}`
-}
-
-const last14 = computed(() => {
-  const got = new Map((store.dailyWrites.days || []).map((d) => [d.day, d.chars]))
-  const out = []
-  const base = new Date()
-  for (let i = 13; i >= 0; i--) {
-    const dt = new Date(base.getFullYear(), base.getMonth(), base.getDate() - i)
-    const day = ymd(dt)
-    out.push({ day, chars: got.get(day) || 0 })
-  }
-  return out
-})
-
-const dailyMax = computed(() => Math.max(1, ...last14.value.map((d) => d.chars)))
-
-function barHeight(chars) {
-  if (!chars) return '3px'
-  return Math.max(6, Math.round((chars / dailyMax.value) * 24)) + 'px'
-}
-
 const genStatus = computed(() => {
   if (store.generating) return store.genText ? '生成中' : '装配上下文…'
   if (store.genStopped) return '已停止'
@@ -941,11 +698,6 @@ function knownModel(id) {
   return store.allGenModels.some((m) => m.id === id)
 }
 
-function fmt(n) {
-  if (!n) return '0'
-  return n >= 10000 ? (n / 10000).toFixed(1) + '万' : String(n)
-}
-
 /** 把告警定位到正文：按证据原文找，找不到就退到前 24 / 前 12 字。 */
 function locateEvidence(text) {
   const el = editorEl.value
@@ -965,11 +717,6 @@ function locateEvidence(text) {
   return false
 }
 
-function kindLabel(w) {
-  if (w.kind === 'novel') return '长篇'
-  return w.scale === 'series' ? '系列' : (w.subtype || '单篇')
-}
-
 onMounted(async () => {
   // 模型目录拉不到只影响下拉框选项，不能把整个写作台卡住，所以单独吞掉错误
   await Promise.all([
@@ -980,8 +727,6 @@ onMounted(async () => {
     store.loadIdeas().catch(() => {}),
     store.loadDailyWrites().catch(() => {}),
   ])
-  if (!kinds.value.some((k) => k.id === form.value.kind)) form.value.kind = kinds.value[0]?.id || 'article'
-  applyScaleDefaults()
   const id = route.params.id
   if (id) await openWork(id)
 })
@@ -1001,19 +746,22 @@ watch(
   { immediate: true, deep: true },
 )
 
-/** 「先聊聊」的回答回填新建表单：只是草稿，建不建、怎么改都还由人定 */
+/** 「先聊聊」的回答交给书架回填：只是草稿，建不建、怎么改都还由人定 */
 function onUseFromAsk(payload) {
-  form.value.title = String(payload?.title || '').slice(0, 60)
-  form.value.premise = String(payload?.premise || '').slice(0, 400)
+  shelfSeed.value = {
+    title: String(payload?.title || '').slice(0, 60),
+    premise: String(payload?.premise || '').slice(0, 400),
+  }
   askOpen.value = false
-  showCreate.value = true
-  nextTick(() => shelfEl.value?.scrollTo({ top: 0, behavior: 'smooth' }))
 }
 
-watch(() => store.work?.id, () => {
+watch(() => store.work?.id, (id) => {
   workEditOpen.value = false
   typeOpen.value = false
   replaceOpen.value = false
+  // 书架「新建作品」时 createWork 内部已经 selectWork，书架随即卸载，
+  // @open 未必赶得上；以「work 已落、路由还没跟上」为准补一段收尾（不重复拉树）。
+  if (id && route.params.id !== id) enterWork(id)
 })
 
 watch(() => store.node?.id, () => {
@@ -1102,18 +850,39 @@ async function onSelectNode(id) {
   await store.selectNode(id)
 }
 
+// 同一篇只进一次：新建作品时 store.work 先落、书架随即卸载，@open 与上面的
+// 兜底 watcher 可能同时来叫，重入会白拉一遍树。
+let openingId = ''
 async function openWork(id) {
-  await store.selectWork(id)
-  await store.loadTemplates(store.work?.kind || 'article')
-  if (route.params.id !== id) router.replace(`/studio/${id}`)
-  // 队列可能在关页面期间一直在跑，回来先把状态拉齐（一行进度要能显示出来）
-  await store.loadQueue()
-  if (store.queueActive) startQueuePoll()
-  // 默认选中第一个有正文的节点，省一次点击；从全库搜索跳进来时先认 ?node=
-  const wanted = typeof route.query.node === 'string' ? route.query.node : ''
-  const first = (wanted && store.tree.find((n) => n.id === wanted))
-    || store.tree.find((n) => n.ordinal != null)
-  if (first) await store.selectNode(first.id)
+  if (!id || openingId === id) return
+  openingId = id
+  try {
+    await store.selectWork(id)
+    await enterWork(id)
+  } finally {
+    if (openingId === id) openingId = ''
+  }
+}
+
+/** 作品已经选中之后的收尾：模板、路由、队列、首节。 */
+let enteringId = ''
+async function enterWork(id) {
+  if (enteringId === id) return
+  enteringId = id
+  try {
+    await store.loadTemplates(store.work?.kind || 'article')
+    if (route.params.id !== id) router.replace(`/studio/${id}`)
+    // 队列可能在关页面期间一直在跑，回来先把状态拉齐（一行进度要能显示出来）
+    await store.loadQueue()
+    if (store.queueActive) startQueuePoll()
+    // 默认选中第一个有正文的节点，省一次点击；从全库搜索跳进来时先认 ?node=
+    const wanted = typeof route.query.node === 'string' ? route.query.node : ''
+    const first = (wanted && store.tree.find((n) => n.id === wanted))
+      || store.tree.find((n) => n.ordinal != null)
+    if (first) await store.selectNode(first.id)
+  } finally {
+    if (enteringId === id) enteringId = ''
+  }
 }
 
 async function backToShelf() {
@@ -1138,33 +907,6 @@ function showNotice(text, bad = false) {
   noticeBad.value = bad
   clearTimeout(noticeTimer)
   noticeTimer = setTimeout(() => (notice.value = ''), bad ? 5200 : 2600)
-}
-
-async function removeWork(w) {
-  if (!window.confirm(
-    `删除《${w.title}》？会连同它的节点树、正文与全部历史版本一并删掉。\n\n`
-    + '删之前会先拷一份整库副本到 storage/backups/works/，要找回只能停服务把那个文件盖回去。')) return
-  if (!(await store.deleteWork(w.id))) showNotice(store.error || '删除失败', true)
-}
-
-async function create() {
-  creating.value = true
-  store.error = ''
-  try {
-    const w = await store.createWork({ ...form.value })
-    // 从灵感箱开的稿：记下指向，之后在库里能回看这句想法变成了哪篇
-    if (pendingIdea.value) {
-      await store.useIdea(pendingIdea.value, w.id)
-      pendingIdea.value = ''
-    }
-    showCreate.value = false
-    form.value = { kind: 'article', scale: 'single', subtype: 'tech', title: '', premise: '', target_words: 5000 }
-    router.replace(`/studio/${w.id}`)
-  } catch (e) {
-    store.error = String(e?.message || e).slice(0, 200)
-  } finally {
-    creating.value = false
-  }
 }
 
 async function quickCreate(parent) {
@@ -1568,196 +1310,6 @@ async function applyTitle(text, target) {
   background: var(--bg);
 }
 
-/* ---------- 书架 ---------- */
-.shelf {
-  flex: 1;
-  overflow-y: auto;
-  padding: 34px 40px 60px;
-  max-width: 1080px;
-  margin: 0 auto;
-  width: 100%;
-}
-.shelf-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 22px;
-}
-.shelf-head h1 {
-  margin: 0 0 5px;
-  font-family: theme('fontFamily.serif');
-  font-size: 26px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  color: var(--text);
-}
-.shelf-sub {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--text-faint);
-}
-.shelf-tools {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.shelf-search {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 30px;
-  padding: 0 9px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--panel);
-  color: var(--text-faint);
-}
-.shelf-search:focus-within {
-  border-color: rgba(var(--run-rgb), 0.45);
-}
-.shelf-search .field {
-  width: 168px;
-  height: 26px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  font-size: 12px;
-}
-.shelf-search .field:focus {
-  outline: none;
-}
-.shelf-views {
-  display: flex;
-  gap: 6px;
-  margin: -6px 0 18px;
-}
-.view-chip {
-  height: 26px;
-  padding: 0 11px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 12px;
-  font-family: theme('fontFamily.mono');
-  cursor: pointer;
-  transition: color 0.18s var(--ease), background-color 0.18s var(--ease);
-}
-.view-chip:hover {
-  color: var(--text);
-  background: rgba(var(--over), 0.04);
-}
-.view-chip.is-on {
-  /* 主色当小字用必须走 --run-fg：--run 是填充/描边档，在带色的底上不够 */
-  color: var(--run-fg);
-  background: rgba(var(--run-rgb), 0.1);
-}
-.write-log {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin: -6px 0 14px;
-  padding: 8px 12px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-control);
-  background: var(--panel);
-  font-size: 11.5px;
-  color: var(--text-faint);
-}
-.wl-item strong {
-  margin-right: 4px;
-  font-family: theme('fontFamily.mono');
-  font-size: 14px;
-  color: var(--text);
-}
-.wl-days {
-  margin-left: auto;
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 26px;
-}
-.wl-bar {
-  width: 4px;
-  min-height: 3px;
-  border-radius: 1px;
-  background: rgba(var(--over), 0.09);
-}
-.wl-bar.is-on {
-  background: rgba(var(--run-rgb), 0.65);
-}
-.ideas {
-  margin-bottom: 18px;
-  padding: 12px 14px;
-  border: 1px dashed var(--line);
-  border-radius: var(--radius-panel);
-}
-.ideas-head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.ideas-head h2 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-}
-.ideas-sub {
-  font-size: 11px;
-  color: var(--text-faint);
-}
-.ideas-add {
-  display: flex;
-  gap: 8px;
-}
-.ideas-add .field {
-  flex: 1;
-  min-width: 0;
-}
-.idea-list {
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 150px;
-  overflow-y: auto;
-}
-.idea-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 6px;
-  border-radius: 5px;
-}
-.idea-row:hover {
-  background: rgba(var(--over), 0.035);
-}
-.idea-text {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.idea-del {
-  border: none;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 11px;
-  cursor: pointer;
-}
-.idea-del:hover {
-  color: var(--danger);
-}
 .link-btn {
   margin-left: 4px;
   padding: 0;
@@ -1772,18 +1324,6 @@ async function applyTitle(text, target) {
 }
 .link-btn:hover {
   color: var(--text);
-}
-.create {
-  padding: 16px 18px;
-  margin-bottom: 22px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.create-row {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 .fl {
   display: flex;
@@ -1808,124 +1348,6 @@ async function applyTitle(text, target) {
 .fl.small .field {
   width: 110px;
 }
-.create-foot {
-  display: flex;
-  align-items: flex-end;
-  gap: 12px;
-}
-.create-foot .btn {
-  margin-left: auto;
-}
-.err {
-  margin: 0;
-  font-size: 12px;
-  color: var(--danger);
-}
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 12px;
-}
-.work-card {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 15px 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-panel);
-  background: var(--panel);
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 0.18s var(--ease), background-color 0.18s var(--ease);
-}
-.work-del {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s var(--ease), color 0.15s var(--ease);
-}
-.work-arch {
-  position: absolute;
-  top: 8px;
-  right: 34px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s var(--ease), color 0.15s var(--ease);
-}
-.work-card:hover .work-arch,
-.work-card:focus-within .work-arch {
-  opacity: 1;
-}
-.work-arch:hover {
-  color: var(--run);
-  background: rgba(var(--run-rgb), 0.12);
-}
-.work-card:hover .work-del,
-.work-card:focus-within .work-del {
-  opacity: 1;
-}
-.work-del:hover {
-  color: var(--danger);
-  background: rgba(var(--danger-rgb), 0.1);
-}
-.work-card:hover {
-  border-color: rgba(var(--run-rgb), 0.45);
-  background: var(--panel-2);
-}
-.work-kind {
-  font-family: theme('fontFamily.mono');
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--run-fg);
-}
-.work-title {
-  font-family: theme('fontFamily.serif');
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--text);
-}
-.work-meta {
-  font-size: 11px;
-  color: var(--text-faint);
-  font-family: theme('fontFamily.mono');
-}
-.work-premise {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-muted);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.shelf-empty {
-  margin-top: 30px;
-  font-size: 13px;
-  color: var(--text-faint);
-}
-
 /* ---------- 编辑器 ---------- */
 .editor {
   /* 排版可调：字体栈在这里给全（本体在 tailwind.config.js 的 theme 里），
