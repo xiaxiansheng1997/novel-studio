@@ -1,0 +1,45 @@
+content-types.yaml
+  s_85cd431edb9d78::t_d9c55f7f1ac2b3 23-26,106-107,109
+app/studio/soft_rules.py
+  s_85cd431edb9d78::t_ce329a86c9bd2a 557-558,563-564,566-568,570-573,590-591,612,664,671-672
+  s_06b70c27cd331d::t_cb42112746a7c4 1,17,28,35,523-524,526,530-538,540-542,544,576-577,579-580,582-589,592-594,596-611,613-622,625-626,628-632,634-636,639-640,642-647,654-657,662-663,665-667,670,673-674,676-681,684-697,699-705,707-711
+  s_85cd431edb9d78::t_be0c20c4f50ef3 716,739
+  s_85cd431edb9d78::t_a69edbde1fec0f 551-552
+  s_85cd431edb9d78::t_385d9af32e4c12 29-30,525,527-529,539,547-550,553-556,559-562,659-661
+  s_85cd431edb9d78::t_f46d250670a4aa 652
+  s_85cd431edb9d78::t_115c2d5438f5a4 543,545-546,565,569,574-575,578,581,595,623-624,627,633,637-638,641,648-651,653,658,668-669,675,682-683,698,706
+  s_85cd431edb9d78::t_563eac9dc78eae 717,740-750
+scripts/smoke_soft_rules.py
+  s_85cd431edb9d78::t_1a699bed8ffd3c 85
+frontend/src/components/StudioPanel.vue
+  s_85cd431edb9d78::t_bf0ff9c988c6bc 820
+tests/test_soft_rules.py
+  s_85cd431edb9d78::t_899217a249e55f 316-319,321-324,334-336,338-340,344-374
+  s_85cd431edb9d78::t_ed8997b4a0facf 280-315,320,325-333,337,341-343,375-479
+app/studio/content_types.py
+  s_85cd431edb9d78::t_5c1cb86c3ac2ac 44,54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "878de202bba27a6d19f8ef38d67e3e8e4a5e579a",
+  "prompts": {},
+  "sessions": {
+    "s_06b70c27cd331d": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793607158684859900",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
