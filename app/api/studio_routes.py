@@ -18,7 +18,7 @@ from typing import Any, Literal, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -42,7 +42,7 @@ from app.studio.assembler import assemble, record_used_sources
 from app.studio.jsonutil import as_list as _as_list
 from app.studio.jsonutil import parse_json_loose as _parse_json_loose
 from app.studio.prompting import node_instruction as _node_instruction
-from app.studio.store import BACKUP_SNAPSHOT_KEEP, BackupError
+from app.studio.store import BACKUP_SNAPSHOT_KEEP, BackupError, BUNDLE_FORMAT, LIBRARY_FORMAT
 
 router = APIRouter()
 
@@ -320,6 +320,91 @@ async def delete_work(work_id: str, request: Request):
         logger.error(f"[studio] 删作品被备份拦住 {work_id}: {exc}")
         raise HTTPException(status_code=500, detail=_BACKUP_DENIED) from exc
     return {"ok": True}
+
+
+# ==================== 整本搬迁（作品包） ====================
+
+def _bundle_filename(title: str) -> str:
+    """包文件名的主干只用安全字符：中文靠 filename* 走 URL 编码。"""
+    return re.sub(r'[\\/:*?"<>|]+', "_", title)[:60] or "work"
+
+
+@router.get("/studio/works/{work_id}/bundle", dependencies=[Depends(verify_key)])
+async def export_bundle(work_id: str, request: Request):
+    """把一本书导出成 JSON 包（树 + 版本 + 素材 + 图谱），用于换机或存档。"""
+    bundle = await _store(request).export_work(work_id)
+    if bundle is None:
+        raise HTTPException(status_code=404, detail=f"作品不存在: {work_id}")
+    title = (bundle["work"] or {}).get("title") or "work"
+    body = json.dumps(bundle, ensure_ascii=False)
+    encoded = quote(_bundle_filename(title) + ".bundle.json")
+    return Response(
+        content=body,
+        media_type="application/json; charset=utf-8",
+        headers={
+            "Content-Disposition":
+                f"attachment; filename=work.bundle.json; filename*=UTF-8''{encoded}",
+            "X-Nodes": str(len(bundle["nodes"])),
+        },
+    )
+
+
+@router.get("/studio/library/bundle", dependencies=[Depends(verify_key)])
+async def export_library(request: Request):
+    """整库导出：每本书一个包，外面套一层书目。"""
+    data = await _store(request).export_library()
+    body = json.dumps(data, ensure_ascii=False)
+    encoded = quote("novel-studio-library.bundle.json")
+    return Response(
+        content=body,
+        media_type="application/json; charset=utf-8",
+        headers={
+            "Content-Disposition":
+                f"attachment; filename=library.bundle.json; filename*=UTF-8''{encoded}",
+            "X-Works": str(len(data["works"])),
+        },
+    )
+
+
+@router.post("/studio/works/import", dependencies=[Depends(verify_key)])
+async def import_bundle(payload: dict[str, Any], request: Request):
+    """导入单个作品包或整库包：每本都落成一本新书，不按原 id 覆盖。
+
+    一本失败不拦别的：把失败清单一起回给前端，已导进来的照常保留——
+    整库导入时因为第三本书缺字段就全都不要，比丢一本更难收拾。
+    """
+    store = _store(request)
+    if payload.get("format") == LIBRARY_FORMAT:
+        items = payload.get("works") or []
+    elif payload.get("format") == BUNDLE_FORMAT:
+        items = [payload]
+    else:
+        raise HTTPException(status_code=400, detail="不是作品包：format 对不上")
+    if not items:
+        raise HTTPException(status_code=400, detail="包里没有作品")
+    if len(items) > 200:
+        raise HTTPException(status_code=400, detail="一次最多导入 200 本")
+
+    imported: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for idx, item in enumerate(items, 1):
+        try:
+            got = await store.import_work(item)
+        except ValueError as exc:
+            failed.append({"index": idx, "error": str(exc)})
+            continue
+        # 索引是派生的：导完重建一次，刚导进来的书立刻能搜、能检索
+        try:
+            got["chunks"] = (await indexer.reindex_work(store, got["id"]))["chunks_total"]
+        except Exception as exc:  # noqa: BLE001 - 建索引失败不该让导入回滚
+            logger.warning(f"[studio] 导入后建索引失败 work={got['id']}: {exc}")
+            got["chunks"] = 0
+        imported.append(got)
+
+    if not imported:
+        detail = failed[0]["error"] if failed else "没有可导入的作品"
+        raise HTTPException(status_code=400, detail=detail)
+    return {"imported": imported, "failed": failed, "count": len(imported)}
 
 
 @router.get("/studio/works/{work_id}/tree", dependencies=[Depends(verify_key)])

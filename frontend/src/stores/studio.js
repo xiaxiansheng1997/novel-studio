@@ -17,6 +17,18 @@ async function errDetail(r, fallback) {
   }
 }
 
+/** 带口令的下载：fetch 取 blob 再点一个临时 <a>，不能直接 href */
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 /**
  * 写作台状态：作品 → 节点树 → 当前节点 → 生成。
  *
@@ -1093,15 +1105,61 @@ export const useStudioStore = defineStore('studio', () => {
       return null
     }
     const blob = await r.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${work.value.title || 'draft'}.md`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
+    saveBlob(blob, `${work.value.title || 'draft'}.md`)
     return true
+  }
+
+  /**
+   * 作品包导出：树、版本、素材与图谱都在一个 JSON 里。
+   * 只取不写，导出之后书架上的东西一点不变。
+   */
+  async function exportBundle(w) {
+    if (!w?.id) return false
+    const r = await apiFetch(`/studio/works/${w.id}/bundle`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '导出作品包失败')
+      return false
+    }
+    saveBlob(await r.blob(), `${w.title || 'work'}.bundle.json`)
+    return true
+  }
+
+  /** 整库导出：每本书一个包，外面套一层书目；换机时导这一个就够 */
+  async function exportLibrary() {
+    const r = await apiFetch('/studio/library/bundle')
+    if (!r.ok) {
+      error.value = await errDetail(r, '导出整库失败')
+      return false
+    }
+    saveBlob(await r.blob(), 'novel-studio-library.bundle.json')
+    return true
+  }
+
+  /**
+   * 导入作品包：整库包与单本包都认。
+   * 每本都落成新书（id 重发），导完把书架重拉；返回接口结果供调用方报数。
+   */
+  async function importBundle(text) {
+    let data
+    try {
+      data = JSON.parse(text)
+    } catch {
+      error.value = '这不是 JSON 文件：选错了或文件坏了'
+      return null
+    }
+    const r = await apiFetch('/studio/works/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '导入失败')
+      return null
+    }
+    const res = await r.json()
+    await fetchWorks()
+    error.value = ''
+    return res
   }
 
   /**
@@ -1493,7 +1551,8 @@ export const useStudioStore = defineStore('studio', () => {
     contentTypes, contentTypeError, loadContentTypes,
     outlineBusy, generateOutline,
     pipeline, runPipeline,
-    assembling, assembleDoc, downloadExport, exportHtml, publishCheck, writeDigest,
+    assembling, assembleDoc, downloadExport, exportBundle, exportLibrary, importBundle,
+    exportHtml, publishCheck, writeDigest,
     // 公众号第二轮：文风 / 设置 / 标题 / 转发语
     voice, settings,
     loadVoice, addVoiceSample, deleteVoiceSample, analyzeVoice, saveVoiceProfile,

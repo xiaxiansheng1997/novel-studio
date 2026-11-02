@@ -157,6 +157,48 @@ def _count_words(text: str) -> int:
     return cjk + rest
 
 
+# ==================== 作品包（整本导出 / 导入） ====================
+# 包是给人拷走、几周后再导回来的，所以格式与版本都写进文件；
+# 版本对不上就拒绝，不做「尽力而为」的兼容——半懂不懂地导入比拒绝更危险。
+BUNDLE_FORMAT = "novel-studio/work"
+LIBRARY_FORMAT = "novel-studio/library"
+BUNDLE_VERSION = 1
+# 版本来源白名单与路由侧 `_VERSION_SOURCES` 同一份口径
+BUNDLE_SOURCES = {"human", "ai_draft", "ai_polish", "bulk_replace"}
+# 一份手改坏的包不该把库撑爆：单本两万节已经远超实际长篇
+_MAX_BUNDLE_NODES = 20000
+_MAX_LIBRARY_WORKS = 200
+
+
+def _bundle_text(value: Any) -> str:
+    return value if isinstance(value, str) else ("" if value is None else str(value))
+
+
+def _bundle_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _bundle_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _map_participants(raw: Any, entity_map: dict[str, str]) -> str:
+    """事件的参与人是实体 id 列表（JSON 字符串）；换 id 时不在名单里的直接丢。"""
+    try:
+        got = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        got = []
+    if not isinstance(got, list):
+        got = []
+    return json.dumps([entity_map[x] for x in got if x in entity_map], ensure_ascii=False)
+
+
 class StudioStore:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -2856,6 +2898,407 @@ class StudioStore:
             )
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    # ==================== 整本搬迁（作品包导出 / 导入） ====================
+
+    async def export_work(self, work_id: str) -> Optional[dict[str, Any]]:
+        """把一本书连同树、历史版本与图谱打成一份自足的 JSON 包。
+
+        不搬 chunks / summaries / runs：那些都是从正文派生的，导回去重建一次
+        比原样搬更省、也更准——旧库里那份索引可能本来就过期了。
+        """
+        assert self._db is not None
+
+        async def rows(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+            cur = await self._db.execute(sql, params)
+            return [dict(r) for r in await cur.fetchall()]
+
+        async with self._lock:
+            cur = await self._db.execute("SELECT * FROM works WHERE id = ?", (work_id,))
+            work = await cur.fetchone()
+            if not work:
+                return None
+            nodes = await rows(
+                "SELECT id, parent_id, path, depth, ordinal, kind, title, content, status, "
+                "word_count, content_hash, summary, created_at, updated_at "
+                "FROM nodes WHERE work_id = ? ORDER BY path", (work_id,),
+            )
+            versions = await rows(
+                "SELECT v.node_id, v.version_no, v.content, v.source, v.created_at "
+                "FROM node_versions v JOIN nodes n ON n.id = v.node_id "
+                "WHERE n.work_id = ? ORDER BY v.node_id, v.version_no", (work_id,),
+            )
+            sources = await rows(
+                "SELECT id, kind, title, url, content, published_at, fetched_at, used, created_at "
+                "FROM sources WHERE work_id = ? ORDER BY created_at", (work_id,),
+            )
+            facts = await rows(
+                "SELECT id, statement, source_id, confidence, valid_until, cited_node_id, created_at "
+                "FROM facts WHERE work_id = ? ORDER BY created_at", (work_id,),
+            )
+            terms = await rows(
+                "SELECT id, term, definition, preferred, forbidden, created_at "
+                "FROM terms WHERE work_id = ?", (work_id,),
+            )
+            cards = await rows(
+                "SELECT id, kind, name, aliases, summary, data_json, pinned, updated_at "
+                "FROM cards WHERE work_id = ?", (work_id,),
+            )
+            entities = await rows(
+                "SELECT id, kind, name, canonical, aliases, card_id, first_ordinal, status, "
+                "status_ordinal FROM entities WHERE work_id = ?", (work_id,),
+            )
+            relations = await rows(
+                "SELECT id, src_id, dst_id, rel_type, since_ordinal, until_ordinal, confidence, "
+                "evidence_ordinal FROM relations WHERE work_id = ?", (work_id,),
+            )
+            events = await rows(
+                "SELECT id, ordinal, seq_in_unit, summary, participants, location_id, story_time, "
+                "importance FROM events WHERE work_id = ? ORDER BY ordinal, seq_in_unit",
+                (work_id,),
+            )
+            states = await rows(
+                "SELECT id, entity_id, ordinal, state_json FROM entity_states WHERE work_id = ? "
+                "ORDER BY ordinal", (work_id,),
+            )
+            foreshadows = await rows(
+                "SELECT id, planted_ordinal, planned_payoff_ordinal, resolved_ordinal, content, "
+                "status, importance FROM foreshadows WHERE work_id = ?", (work_id,),
+            )
+
+        return {
+            "format": BUNDLE_FORMAT,
+            "version": BUNDLE_VERSION,
+            "exported_at": _now(),
+            "work": dict(work),
+            "nodes": nodes,
+            "versions": versions,
+            "sources": sources,
+            "facts": facts,
+            "terms": terms,
+            "cards": cards,
+            "entities": entities,
+            "relations": relations,
+            "events": events,
+            "states": states,
+            "foreshadows": foreshadows,
+        }
+
+    async def export_library(self) -> dict[str, Any]:
+        """整库导出：每本书一个包，外面套一层书目。换机时导这一个就够。"""
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute("SELECT id FROM works ORDER BY updated_at DESC")
+            ids = [r["id"] for r in await cur.fetchall()]
+        works: list[dict[str, Any]] = []
+        for wid in ids[:_MAX_LIBRARY_WORKS]:
+            bundle = await self.export_work(wid)
+            if bundle:
+                works.append(bundle)
+        return {
+            "format": LIBRARY_FORMAT,
+            "version": BUNDLE_VERSION,
+            "exported_at": _now(),
+            "works": works,
+        }
+
+    async def import_work(self, bundle: dict[str, Any]) -> dict[str, Any]:
+        """把一份作品包落成一本新书：id 全部重发，引用跟着改。
+
+        只做「新增」，不做「按原 id 覆盖」：迁移与复制是同一件事，覆盖是另一件
+        （半覆盖比不覆盖更难收拾）。chunks 不从包里搬，由路由重建索引。
+        """
+        assert self._db is not None
+        if not isinstance(bundle, dict):
+            raise ValueError("包不是 JSON 对象")
+        if bundle.get("format") != BUNDLE_FORMAT:
+            raise ValueError("不是作品包：format 对不上")
+        if _bundle_int(bundle.get("version")) != BUNDLE_VERSION:
+            raise ValueError("包版本不认识，请用同版本导出")
+        work = bundle.get("work")
+        if not isinstance(work, dict):
+            raise ValueError("包里没有 work")
+        title = _bundle_text(work.get("title")).strip()
+        if not title:
+            raise ValueError("作品没有标题")
+
+        raw_nodes = [n for n in (bundle.get("nodes") or []) if isinstance(n, dict)]
+        if len(raw_nodes) > _MAX_BUNDLE_NODES:
+            raise ValueError(f"节点太多（{len(raw_nodes)}），上限 {_MAX_BUNDLE_NODES}")
+        kept_nodes: list[dict[str, Any]] = []
+        node_map: dict[str, str] = {}
+        node_paths: dict[str, str] = {}
+        paths: set[str] = set()
+        for n in raw_nodes:
+            old = _bundle_text(n.get("id"))
+            if not old or old in node_map or not _bundle_text(n.get("title")).strip():
+                continue
+            path = _bundle_text(n.get("path")).strip() or f"{len(node_map) + 1:04d}"
+            if path in paths:
+                raise ValueError(f"节点 path 重复：{path}")
+            paths.add(path)
+            node_map[old] = _new_id("n_")
+            node_paths[old] = path
+            kept_nodes.append(n)
+
+        wid = _new_id("w_")
+        now = _now()
+        kind = _bundle_text(work.get("kind"))
+        if kind not in ("novel", "article"):
+            kind = "article"
+        w_status = _bundle_text(work.get("status")) or "active"
+        if w_status not in ("active", "paused", "archived"):
+            w_status = "active"
+        template_id = _bundle_text(work.get("template_id")) or None
+
+        source_map: dict[str, str] = {}
+        card_map: dict[str, str] = {}
+        entity_map: dict[str, str] = {}
+        counts = {"nodes": 0, "versions": 0, "sources": 0, "entities": 0, "events": 0}
+
+        async with self._lock:
+            try:
+                if template_id:
+                    cur = await self._db.execute(
+                        "SELECT 1 FROM templates WHERE id = ?", (template_id,)
+                    )
+                    if not await cur.fetchone():
+                        template_id = None
+                await self._db.execute(
+                    "INSERT INTO works(id, kind, scale, subtype, title, premise, status, template_id, "
+                    "target_words, style_json, meta_json, digest, created_at, updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (wid, kind, _bundle_text(work.get("scale")) or "single",
+                     _bundle_text(work.get("subtype")), title[:120],
+                     _bundle_text(work.get("premise")), w_status, template_id,
+                     _bundle_int(work.get("target_words")),
+                     _bundle_text(work.get("style_json")) or "{}",
+                     _bundle_text(work.get("meta_json")) or "{}",
+                     _bundle_text(work.get("digest")), now, now),
+                )
+                await self._db.execute(
+                    "INSERT INTO index_state(work_id, updated_at) VALUES(?,?)", (wid, now)
+                )
+
+                # ---- 节点树：path 原样保留，parent_id 换成本库新 id ----
+                for n in kept_nodes:
+                    old = _bundle_text(n["id"])
+                    content = _bundle_text(n.get("content"))
+                    kind_n = _bundle_text(n.get("kind"))
+                    if kind_n not in ("volume", "chapter", "section"):
+                        kind_n = "section"
+                    ordinal = n.get("ordinal")
+                    created = _bundle_float(n.get("created_at"), now) or now
+                    updated = _bundle_float(n.get("updated_at"), created) or created
+                    await self._db.execute(
+                        "INSERT INTO nodes(id, work_id, parent_id, path, depth, ordinal, kind, title, "
+                        "content, status, word_count, content_hash, summary, created_at, updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (node_map[old], wid, node_map.get(_bundle_text(n.get("parent_id"))),
+                         node_paths[old], _bundle_int(n.get("depth")),
+                         None if ordinal is None else _bundle_int(ordinal), kind_n,
+                         _bundle_text(n.get("title"))[:120], content,
+                         _bundle_text(n.get("status")) or "draft",
+                         _count_words(content), _hash(content) if content else "",
+                         _bundle_text(n.get("summary")), created, updated),
+                    )
+                    counts["nodes"] += 1
+
+                # ---- 历史版本：内容照搬，run_id 不搬（runs 不在包里）----
+                seen_versions: set[tuple[str, int]] = set()
+                for v in (bundle.get("versions") or []):
+                    if not isinstance(v, dict):
+                        continue
+                    nid = node_map.get(_bundle_text(v.get("node_id")))
+                    no = _bundle_int(v.get("version_no"))
+                    if not nid or no <= 0 or (nid, no) in seen_versions:
+                        continue
+                    seen_versions.add((nid, no))
+                    src = _bundle_text(v.get("source"))
+                    if src not in BUNDLE_SOURCES:
+                        src = "human"
+                    await self._db.execute(
+                        "INSERT INTO node_versions(id, node_id, version_no, content, source, run_id, "
+                        "created_at) VALUES(?,?,?,?,?,NULL,?)",
+                        (_new_id("v_"), nid, no, _bundle_text(v.get("content")), src,
+                         _bundle_float(v.get("created_at"), now) or now),
+                    )
+                    counts["versions"] += 1
+
+                # ---- 素材 / 事实 / 术语 ----
+                for s in (bundle.get("sources") or []):
+                    if not isinstance(s, dict):
+                        continue
+                    old = _bundle_text(s.get("id"))
+                    if not old or old in source_map:
+                        continue
+                    source_map[old] = _new_id("s_")
+                    await self._db.execute(
+                        "INSERT INTO sources(id, work_id, kind, title, url, content, published_at, "
+                        "fetched_at, used, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (source_map[old], wid, _bundle_text(s.get("kind")) or "note",
+                         _bundle_text(s.get("title")), _bundle_text(s.get("url")),
+                         _bundle_text(s.get("content")), _bundle_text(s.get("published_at")),
+                         _bundle_float(s.get("fetched_at"), 0) or None,
+                         _bundle_int(s.get("used")), _bundle_float(s.get("created_at"), now) or now),
+                    )
+                    counts["sources"] += 1
+
+                for item in (bundle.get("facts") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    statement = _bundle_text(item.get("statement")).strip()
+                    if not statement:
+                        continue
+                    await self._db.execute(
+                        "INSERT INTO facts(id, work_id, statement, source_id, confidence, valid_until, "
+                        "cited_node_id, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (_new_id("f_"), wid, statement,
+                         source_map.get(_bundle_text(item.get("source_id"))),
+                         _bundle_float(item.get("confidence"), 1.0),
+                         _bundle_text(item.get("valid_until")),
+                         node_map.get(_bundle_text(item.get("cited_node_id"))),
+                         _bundle_float(item.get("created_at"), now) or now),
+                    )
+
+                seen_terms: set[str] = set()
+                for t in (bundle.get("terms") or []):
+                    if not isinstance(t, dict):
+                        continue
+                    term = _bundle_text(t.get("term")).strip()
+                    if not term or term in seen_terms:
+                        continue
+                    seen_terms.add(term)
+                    await self._db.execute(
+                        "INSERT INTO terms(id, work_id, term, definition, preferred, forbidden, "
+                        "created_at) VALUES(?,?,?,?,?,?,?)",
+                        (_new_id("t_"), wid, term, _bundle_text(t.get("definition")),
+                         _bundle_text(t.get("preferred")),
+                         _bundle_text(t.get("forbidden")) or "[]",
+                         _bundle_float(t.get("created_at"), now) or now),
+                    )
+
+                # ---- 图谱：卡片 → 实体 → 关系 / 事件 / 状态 / 伏笔 ----
+                for c in (bundle.get("cards") or []):
+                    if not isinstance(c, dict):
+                        continue
+                    old = _bundle_text(c.get("id"))
+                    if not old or old in card_map:
+                        continue
+                    card_map[old] = _new_id("card_")
+                    await self._db.execute(
+                        "INSERT INTO cards(id, work_id, kind, name, aliases, summary, data_json, "
+                        "pinned, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (card_map[old], wid, _bundle_text(c.get("kind")) or "character",
+                         _bundle_text(c.get("name")) or "未命名",
+                         _bundle_text(c.get("aliases")) or "[]",
+                         _bundle_text(c.get("summary")),
+                         _bundle_text(c.get("data_json")) or "{}",
+                         _bundle_int(c.get("pinned")),
+                         _bundle_float(c.get("updated_at"), now) or now),
+                    )
+
+                seen_canon: set[str] = set()
+                for e in (bundle.get("entities") or []):
+                    if not isinstance(e, dict):
+                        continue
+                    old = _bundle_text(e.get("id"))
+                    canonical = _bundle_text(e.get("canonical")).strip()
+                    if not old or old in entity_map or not canonical or canonical in seen_canon:
+                        continue
+                    seen_canon.add(canonical)
+                    entity_map[old] = _new_id("e_")
+                    await self._db.execute(
+                        "INSERT INTO entities(id, work_id, kind, name, canonical, aliases, card_id, "
+                        "first_ordinal, status, status_ordinal) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (entity_map[old], wid, _bundle_text(e.get("kind")) or "character",
+                         _bundle_text(e.get("name")) or canonical, canonical,
+                         _bundle_text(e.get("aliases")) or "[]",
+                         card_map.get(_bundle_text(e.get("card_id"))),
+                         _bundle_int(e.get("first_ordinal")),
+                         _bundle_text(e.get("status")) or "alive",
+                         _bundle_int(e.get("status_ordinal"))),
+                    )
+                    counts["entities"] += 1
+
+                for r in (bundle.get("relations") or []):
+                    if not isinstance(r, dict):
+                        continue
+                    src = entity_map.get(_bundle_text(r.get("src_id")))
+                    dst = entity_map.get(_bundle_text(r.get("dst_id")))
+                    if not src or not dst:
+                        continue
+                    await self._db.execute(
+                        "INSERT OR IGNORE INTO relations(id, work_id, src_id, dst_id, rel_type, "
+                        "since_ordinal, until_ordinal, confidence, evidence_ordinal) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)",
+                        (_new_id("r_"), wid, src, dst, _bundle_text(r.get("rel_type")) or "关系",
+                         _bundle_int(r.get("since_ordinal")),
+                         None if r.get("until_ordinal") is None else _bundle_int(r.get("until_ordinal")),
+                         _bundle_float(r.get("confidence"), 1.0),
+                         None if r.get("evidence_ordinal") is None
+                         else _bundle_int(r.get("evidence_ordinal"))),
+                    )
+
+                for ev in (bundle.get("events") or []):
+                    if not isinstance(ev, dict):
+                        continue
+                    summary = _bundle_text(ev.get("summary")).strip()
+                    if not summary:
+                        continue
+                    await self._db.execute(
+                        "INSERT INTO events(id, work_id, ordinal, seq_in_unit, summary, participants, "
+                        "location_id, story_time, importance) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (_new_id("ev_"), wid, _bundle_int(ev.get("ordinal")),
+                         _bundle_int(ev.get("seq_in_unit")), summary,
+                         _map_participants(ev.get("participants"), entity_map),
+                         entity_map.get(_bundle_text(ev.get("location_id"))),
+                         _bundle_text(ev.get("story_time")),
+                         _bundle_int(ev.get("importance"), 1)),
+                    )
+                    counts["events"] += 1
+
+                seen_states: set[tuple[str, int]] = set()
+                for st in (bundle.get("states") or []):
+                    if not isinstance(st, dict):
+                        continue
+                    eid = entity_map.get(_bundle_text(st.get("entity_id")))
+                    ordinal = _bundle_int(st.get("ordinal"))
+                    if not eid or (eid, ordinal) in seen_states:
+                        continue
+                    seen_states.add((eid, ordinal))
+                    await self._db.execute(
+                        "INSERT INTO entity_states(id, work_id, entity_id, ordinal, state_json) "
+                        "VALUES(?,?,?,?,?)",
+                        (_new_id("st_"), wid, eid, ordinal,
+                         _bundle_text(st.get("state_json")) or "{}"),
+                    )
+
+                for fs in (bundle.get("foreshadows") or []):
+                    if not isinstance(fs, dict):
+                        continue
+                    content = _bundle_text(fs.get("content")).strip()
+                    if not content:
+                        continue
+                    await self._db.execute(
+                        "INSERT INTO foreshadows(id, work_id, planted_ordinal, planned_payoff_ordinal, "
+                        "resolved_ordinal, content, status, importance) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (_new_id("fs_"), wid, _bundle_int(fs.get("planted_ordinal")),
+                         None if fs.get("planned_payoff_ordinal") is None
+                         else _bundle_int(fs.get("planned_payoff_ordinal")),
+                         None if fs.get("resolved_ordinal") is None
+                         else _bundle_int(fs.get("resolved_ordinal")),
+                         content, _bundle_text(fs.get("status")) or "open",
+                         _bundle_int(fs.get("importance"), 1)),
+                    )
+
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
+
+        return {"id": wid, "title": title, **counts}
 
     # ==================== 统计 ====================
 

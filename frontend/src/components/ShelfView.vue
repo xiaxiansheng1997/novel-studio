@@ -30,6 +30,27 @@
       <button class="view-chip" :class="{ 'is-on': showArchived }" @click="showArchived = true">
         已归档 {{ archivedWorks.length }}
       </button>
+      <!-- 迁移是整库级动作，与视图切换同排：换机只靠这一个包 -->
+      <div class="shelf-migrate">
+        <button
+          class="btn btn-sm"
+          title="导入作品包：整库包与单本包都认，每本落成一本新书"
+          :disabled="bundleBusy"
+          @click="pickFile"
+        >
+          <AppIcon name="upload" :size="13" /> 导入
+        </button>
+        <button
+          class="btn btn-sm"
+          title="整库打包成一个文件：正文、版本、素材与图谱都在里面"
+          :disabled="bundleBusy"
+          @click="exportAll"
+        >
+          <AppIcon name="download" :size="13" /> 导出整库
+        </button>
+        <!-- 藏在按钮后面：浏览器只允许用户手势直接开文件框，不能脚本代办 -->
+        <input ref="fileEl" type="file" accept="application/json,.json" hidden @change="onImportFile" />
+      </div>
     </div>
 
     <!-- 写作日历：数据从 write_days 现算，不在别处另记一份 -->
@@ -130,6 +151,13 @@
           <AppIcon :name="showArchived ? 'refresh' : 'archive'" :size="12" />
         </button>
         <button
+          class="work-export"
+          title="导出作品包（树、版本、素材与图谱；派生索引不打包）"
+          @click.stop="exportOne(w)"
+        >
+          <AppIcon name="download" :size="12" />
+        </button>
+        <button
           class="work-del"
           title="删除作品（连同节点树与全部历史版本；删前留一份整库副本）"
           @click.stop="removeWork(w)"
@@ -184,6 +212,8 @@ const ideaDraft = ref('')
 const ideaBusy = ref(false)
 const pendingIdea = ref('')
 const shelfEl = ref(null)
+const fileEl = ref(null)
+const bundleBusy = ref(false)
 
 // 类型下拉来自 /studio/content-types（content-types.yaml），新增文种只改 YAML
 const kinds = computed(() =>
@@ -273,6 +303,52 @@ async function removeWork(w) {
     `删除《${w.title}》？会连同它的节点树、正文与全部历史版本一并删掉。\n\n`
     + '删之前会先拷一份整库副本到 storage/backups/works/，要找回只能停服务把那个文件盖回去。')) return
   if (!(await store.deleteWork(w.id))) emit('notice', store.error || '删除失败', true)
+}
+
+function pickFile() {
+  fileEl.value?.click()
+}
+
+/** 同一个文件连选两次也要触发 change，所以读完就把 value 清空 */
+async function onImportFile(e) {
+  const file = e.target.files?.[0]
+  e.target.value = ''
+  if (!file || bundleBusy.value) return
+  bundleBusy.value = true
+  try {
+    const res = await store.importBundle(await file.text())
+    if (!res) {
+      emit('notice', store.error || '导入失败', true)
+      return
+    }
+    const imported = res.imported || []
+    const failed = res.failed || []
+    if (failed.length) {
+      emit('notice', `导入 ${imported.length} 本，${failed.length} 本没进来：${failed[0].error}`, true)
+    } else {
+      emit('notice', `导入 ${imported.length} 本：${imported[0]?.title || ''}`)
+    }
+    // 只导进一本就顺手打开；整库一次搬多本时留在书架，让人先看眼书目
+    if (!failed.length && imported.length === 1) emit('open', imported[0].id)
+  } finally {
+    bundleBusy.value = false
+  }
+}
+
+async function exportOne(w) {
+  if (bundleBusy.value) return
+  bundleBusy.value = true
+  const ok = await store.exportBundle(w)
+  bundleBusy.value = false
+  if (!ok) emit('notice', store.error || '导出失败', true)
+}
+
+async function exportAll() {
+  if (bundleBusy.value) return
+  bundleBusy.value = true
+  const ok = await store.exportLibrary()
+  bundleBusy.value = false
+  if (!ok) emit('notice', store.error || '导出失败', true)
 }
 
 async function create() {
@@ -396,8 +472,15 @@ function barHeight(chars) {
 }
 .shelf-views {
   display: flex;
+  align-items: center;
   gap: 6px;
   margin: -6px 0 18px;
+}
+.shelf-migrate {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .view-chip {
   height: 26px;
@@ -643,6 +726,31 @@ function barHeight(chars) {
   opacity: 1;
 }
 .work-arch:hover {
+  color: var(--run);
+  background: rgba(var(--run-rgb), 0.12);
+}
+.work-export {
+  position: absolute;
+  top: 8px;
+  right: 60px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease), color 0.15s var(--ease);
+}
+.work-card:hover .work-export,
+.work-card:focus-within .work-export {
+  opacity: 1;
+}
+.work-export:hover {
   color: var(--run);
   background: rgba(var(--run-rgb), 0.12);
 }
