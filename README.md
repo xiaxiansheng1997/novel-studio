@@ -95,6 +95,9 @@ exe 上跑它们时没通过还会弹一个框。
 
 ## 一条完整主线
 
+写作台随时可以按 `Ctrl+Shift+F`（或顶栏「专注」）进入专注模式：左树与右栏收起，只留作品名、保存状态、正文与生成条，
+`Esc` 或「退出专注」回来。它只动视线不动排版——字号行距仍归「排版」那一档管，切节也留在专注里。
+
 1. 建作品（选 kind / subtype / 模板）→ 生成大纲 → 逐节生成（`POST /studio/works/{id}/pipeline` 走 SSE 看着它写，或 `POST …/batch` 落库入队关页面不管）
 2. 每节生成前按桶装配上下文（S0–S8 + S_src；novel 默认 28,000 字符、article 18,000）。`POST /studio/context/preview` 只装配不花钱，能看到每桶占多少、丢了什么——**调 prompt 靠这个，不然就是盲调**
 3. 生成后可选自动后处理：分块索引 → 三段式摘要（事件 / 变化 / 钩子）→ 图谱抽取 → 一致性检查
@@ -122,7 +125,9 @@ exe 上跑它们时没通过还会弹一个框。
     「用它开写」只把它填进新建表单；生成结果可以逐段勾选后再采用，编辑器顶部有「本节 / 目标」进度
 13. **结构与资料可维护**：左树能折叠（写完的卷先收起来，状态按作品记住；跳到被折叠的节会自动展开祖先），
     树头「导入」能把旧稿一次搬进来——粘贴或拖 `.txt / .md`，按「第X章 / ## 标题」或空行拆节，看过预览再逐节建；
-    右栏的素材、事实卡、术语都能就地改，素材正文改完会重建这一条的检索索引（不改的话生成还在按旧文字找资料）
+    右栏的素材、事实卡、术语都能就地改，素材正文改完会重建这一条的检索索引（不改的话生成还在按旧文字找资料）；
+    左树上把一章**拖到另一卷**就行——只搬章与节（卷本身不拖），落点只有目标卷的末尾，松手后全书章号按树序重排成 1..N，
+    摘要、分块与图谱里的章号一起跟过去
 
 ## 两种形态
 
@@ -163,6 +168,8 @@ exe 上跑它们时没通过还会弹一个框。
 - **上下移会把章号一起带走**。树上的 ↑↓ 只跟同一个父节点下的紧邻兄弟互换；「第几章」这个数在库里存了十份
   （章节序、摘要序号、分块序、实体的登场/死亡章号、关系与事件与伏笔的章号、角色状态章号），
   交换时一起对调，否则「已死的角色在第 5 章出场」这类判定会跟着错位。
+  跨卷拖拽不是对调而是整体重排：按树序把全书章号写成 1..N，同样那十列一起映射（先整体取负再翻正，
+  避开 `UNIQUE(entity_id, ordinal)` 与关系唯一键的中间态）；映射外的章号（比如伏笔计划在尚未写到的第 100 章回收）原样留着。
   内容没变，所以不重算索引与摘要，只把库标脏。
 - **删除前自动留备份**。删一节（含整棵子树与全部历史版本）先写一份 JSON 到 `storage/backups/nodes/`，
   删作品先在锁内取一份整库副本到 `storage/backups/works/`（`VACUUM INTO` 的一致快照，不是热拷文件）；
@@ -193,6 +200,8 @@ exe 上跑它们时没通过还会弹一个框。
 ## 图谱
 
 实体 / 关系 / 事件 / 伏笔从正文里抽出来存库，除了列表还能开力导向视图（虚线圈 = 已死/已毁，虚线边 = 已过期关系）。
+弹层头部可切「关系 / 时间轴」：时间轴按节把事件（谁参与、故事内时间、重要度）与人物状态排开，点一行跳回那一节；
+还没抽过的作品在那里只有一句「先在右栏点『抽本节』」，不是空白。
 抽取要真调模型（`smoke_m3.py --llm` 是它的验收入口），右栏「图谱」那页会给出实体 / 关系 / 伏笔的计数。
 
 ## 文种全部配置化
@@ -264,7 +273,7 @@ AI 草稿预览与流水线预览也吃当前字体档，字号给到 15px / 14p
 ```
 app/
   main.py runtime.py config.py
-  api/      studio_routes.py（89 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
+  api/      studio_routes.py（93 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
   studio/   schema.py store.py content_types.py assembler.py prompting.py tokenize.py chunker.py
             indexer.py retrieval.py summarizer.py graph.py consistency.py soft_rules.py
             scoring.py tasks.py jobs.py jsonutil.py
@@ -289,7 +298,7 @@ dev.py      frontend / backend / build / all
 scripts/    smoke_studio.py  smoke_m1_tail.py  smoke_m2.py  smoke_m3.py  smoke_m4.py  smoke_soft_rules.py
             measure_baseline.py  shot_studio.py  cleanup_works.py  restore_backup.py  login.py  recon.py  check.ps1
             setup_desktop.ps1（桌面版一键装机 + 快捷方式）
-tests/      pytest（全量 342 例，含桌面壳 40 例；写作侧用 tmp_path 建临时库，不碰 storage/）
+tests/      pytest（全量 354 例，含桌面壳 40 例；写作侧用 tmp_path 建临时库，不碰 storage/）
 storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
             backups/nodes（删节前的 JSON 备份）/ backups/works（删作品前的整库副本）
             backups/snapshots（每日整库快照，留 7 份），已 gitignore>
@@ -357,13 +366,14 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
   每日快照（留 7 份），而快照是当天的一份、不是逐次改动的——今天早些时候的正文靠的是版本表（右栏「历史」），
   不是备份。整库副本没有界面化恢复入口：节点备份走 `scripts/restore_backup.py`，整库副本靠停服务把文件盖回
   `storage/studio.sqlite`；库文件彻底损坏时能用的是 `backups/snapshots/` 里那一份。
-- **上下移只在同层**：不能把一节拖到另一个卷下面（要跨卷得自己剪切正文重排）。
+- **拖拽只搬叶子、只落末尾**：章与节可以拖进任意一卷的末尾（或顶层），卷本身不拖、也不能插到某一节之前
+  （那要另配一套插入交互与半自动排序）；跨作品拖拽不做。
 - 生成吞吐受网页账号的限流与风控硬约束，串行跑一本长篇要按小时计；想要并发得自己解决账号问题。
 - 底座（`/v1` OpenAI 接口、模式与文案校准）的限制另有 **十几条**，见 `docs/reverse-proxy.md` 的「已知限制（底座侧）」。
 
 ## 文档索引
 
-- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.8）
+- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.9）
 - `docs/m0-baseline.md` — M0 基线实测数据
 - `docs/content-types.md` — 文种与模板配置约定
 - `docs/reverse-proxy.md` — 底座：驱动三家网页端、`/v1` API 用法、风控排查细则
