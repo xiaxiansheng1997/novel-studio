@@ -70,9 +70,18 @@ _ORDINAL_COLUMNS: tuple[tuple[str, str], ...] = (
 # 节点备份是一份 JSON，整库副本是一份 .sqlite（单作品级精准恢复做不了，不那个意）。
 BACKUP_NODE_KEEP = 20
 BACKUP_WORK_KEEP = 5
+# 每日快照留 7 份。库实测 1 MB 出头，七份不到 10 MB，换的是「库文件本身坏了也有退路」——
+# 上面两份都是**删除那一刻**才写的，没删过的东西不会自己多一份副本。
+BACKUP_SNAPSHOT_KEEP = 7
 # 备份目录里什么算「一份备份」：列举与清理共用这一条口径。
 # 写临时名留下的 `.part`、别人顺手丢进来的东西都不在名单里。
-_BACKUP_GLOB: dict[str, str] = {"nodes": "*.json", "works": "*.sqlite"}
+_BACKUP_GLOB: dict[str, str] = {
+    "nodes": "*.json", "works": "*.sqlite", "snapshots": "*.sqlite",
+}
+# 快照的两本记账：今天是否已取过、上次取的时候库最后一次改动到几点。
+# 这两个键由循环自己写，不进 `_SETTING_KEYS` 白名单——人不该手工改它。
+SNAPSHOT_DAY_KEY = "snapshot_last_day"
+SNAPSHOT_TS_KEY = "snapshot_last_change"
 
 
 class BackupError(RuntimeError):
@@ -89,6 +98,18 @@ def _new_id(prefix: str = "") -> str:
 
 def _hash(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _to_float(raw: str) -> float:
+    """settings 里存的是字符串，读的人只想要一个数。
+
+    读不出来的当 0（=「从没快照过」）而不是抛错：这一本账是记账用的，
+    一个被人手工改坏的值不该让后台快照整轮不做。
+    """
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _backup_stat(p: Path) -> Optional[tuple[float, int]]:
@@ -764,22 +785,27 @@ class StudioStore:
 
     # ==================== 删除备份与找回 ====================
 
-    def _backup_dir(self, kind: str) -> Path:
-        """备份目录：`storage/studio.sqlite` → `storage/backups/<kind>/`。不存在就建。"""
+    def _backup_dir(self, kind: str, action: str = "删除") -> Path:
+        """备份目录：`storage/studio.sqlite` → `storage/backups/<kind>/`。不存在就建。
+
+        `action` 只影响报错措辞：快照失败不能说「已拒绝删除」，那是在讲另一件事。
+        """
         target = self.db_path.parent / "backups" / kind
         try:
             target.mkdir(parents=True, exist_ok=True)
         except OSError as exc:  # 包一层：调用方只需要知道「备份写不成」
             # 完整原因进日志：detail 会显示到界面上，不能把库在本机的位置说出去
             logger.error(f"[studio] 备份目录不可用 {target}: {exc}")
-            raise BackupError("备份目录不可用，已拒绝删除") from exc
+            raise BackupError(f"备份目录不可用，已拒绝{action}") from exc
         return target
 
     def _stamp(self) -> str:
         return datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    async def _copy_db_backup(self, label: str) -> Path:
-        """删作品前的整库副本，用 `VACUUM INTO` 取一份一致快照。
+    async def _write_db_snapshot(
+        self, kind: str, prefix: str, keep: int, action: str,
+    ) -> Path:
+        """用 `VACUUM INTO` 往 `backups/<kind>/` 取一份一致快照。
 
         不学 `scripts/cleanup_works.py` 用 `shutil.copy2`：那条只是维护脚本顺手做，
         这一份却是稿子的唯一退路。本库是默认的 rollback journal 模式，热拷贝既不参与
@@ -789,13 +815,13 @@ class StudioStore:
         assert self._db is not None
         dest: Optional[Path] = None
         try:
-            folder = self._backup_dir("works")
+            folder = self._backup_dir(kind, action=action)
             stamp = self._stamp()
-            dest = folder / f"studio-before-delete-{label}-{stamp}.sqlite"
-            # `VACUUM INTO` 遇同名文件会报错，而时间戳只到秒：同一秒连着删两本就撞上了
+            dest = folder / f"{prefix}-{stamp}.sqlite"
+            # `VACUUM INTO` 遇同名文件会报错，而时间戳只到秒：同一秒连着取两本就撞上了
             n = 1
             while dest.exists():
-                dest = folder / f"studio-before-delete-{label}-{stamp}_{n}.sqlite"
+                dest = folder / f"{prefix}-{stamp}_{n}.sqlite"
                 n += 1
             # 文件名也要在 try 里拼：时间戳取不到同样是「备份没写成」，不能漏成裸 OSError 冒出去
             await self._db.commit()   # VACUUM 不能在事务里跑：先把在途改动落盘
@@ -804,8 +830,95 @@ class StudioStore:
             raise                          # _backup_dir 已经把话说清楚了，不再套一层
         except Exception as exc:           # 不止 OSError：SQL 报错、磁盘满都算「备份没写成」
             logger.error(f"[studio] 整库副本没写成 {dest}: {exc}")
-            raise BackupError("整库副本没写成，删除已中止") from exc
-        self._prune_quietly("works", BACKUP_WORK_KEEP)
+            raise BackupError(f"整库副本没写成，{action}已中止") from exc
+        self._prune_quietly(kind, keep)
+        return dest
+
+    async def _copy_db_backup(self, label: str) -> Path:
+        """删作品前的整库副本（`backups/works/`，留 `BACKUP_WORK_KEEP` 份）。"""
+        return await self._write_db_snapshot(
+            "works", f"studio-before-delete-{label}", BACKUP_WORK_KEEP, "删除")
+
+    # ---- 每日快照：库文件坏了也有一条退路 ----
+
+    async def _last_change_ts(self) -> float:
+        """库里最后一次改动的时间戳（`nodes` 与 `works` 的 `updated_at` 取大者）。
+
+        用它判「今天有没有写过字」而不是文件的 mtime：整本 VACUUM、换机拷文件都会动
+        mtime，而正文一个字没变。改标题、改状态、建节、存正文都会写这一列。
+        """
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT MAX(x) FROM ("
+                "SELECT MAX(updated_at) AS x FROM nodes "
+                "UNION ALL SELECT MAX(updated_at) FROM works)")
+            row = await cur.fetchone()
+        return float(row[0] or 0.0) if row else 0.0
+
+    async def _has_any_work(self) -> bool:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute("SELECT COUNT(*) FROM works")
+            row = await cur.fetchone()
+        return bool(row) and int(row[0]) > 0
+
+    async def _take_db_snapshot(self, prefix: str) -> Path:
+        """取一份每日/手动快照，并在锁内做。
+
+        锁不是礼节：`VACUUM` 要自己开一个事务，另一个协程正卡在写事务中间时它只能失败；
+        `delete_work` 那条路径本来就持着锁走到 `_copy_db_backup`，这里补齐同样的前提。
+        库实测 1 MB 出头，锁只持有几十毫秒，不会把前台写入卡住。
+        """
+        async with self._lock:
+            return await self._write_db_snapshot(
+                "snapshots", prefix, BACKUP_SNAPSHOT_KEEP, "快照")
+
+    async def maybe_daily_snapshot(self) -> Optional[Path]:
+        """每天第一次真改过正文后取一份整库快照，留 `BACKUP_SNAPSHOT_KEEP` 份。
+
+        三个条件全过才动手，缺一个就什么都不做（返回 None）：空库不占名额、
+        没写过字不产重复副本、今天已经取过不再取第二次。
+
+        写不成也只返回 None：这一条是后台记账，它自己不拥有任何拒绝的权力。
+        账不写回去，下一轮（半小时后）会再看一眼，不会因为这一下失败就永远不再取。
+
+        为什么需要它：`backups/works/` 那一份只在**删作品**那一刻写，而真实事故是
+        「写了三个月，库文件坏了 / 磁盘没了」——那种情况下没有任何一份副本。
+        """
+        assert self._db is not None
+        change = await self._last_change_ts()
+        if not change:
+            return None
+        if not await self._has_any_work():
+            return None      # 还没建过作品：空库不值得留一份副本
+        today = datetime.now().date().isoformat()
+        if await self.get_setting(SNAPSHOT_DAY_KEY) == today:
+            return None
+        prev = _to_float(await self.get_setting(SNAPSHOT_TS_KEY))
+        if change <= prev:
+            # 上次快照之后一个字没改：今天这一份和昨天那份内容相同，白占一个名额
+            return None
+        try:
+            dest = await self._take_db_snapshot("studio-daily")
+        except (BackupError, OSError) as exc:
+            logger.warning(f"[studio] 每日库快照没写成，下一轮再看：{exc}")
+            return None
+        await self.set_setting(SNAPSHOT_DAY_KEY, today)
+        await self.set_setting(SNAPSHOT_TS_KEY, str(change))
+        logger.info(f"[studio] 每日库快照已写：{dest.name}")
+        return dest
+
+    async def snapshot_now(self) -> Path:
+        """立刻取一份整库快照（控制台那个按钮）：跳过「今天已有 / 没改动」两道判断。
+
+        人按下去就是要一份，不跟他讲条件。仍然把 `snapshot_last_change` 记上，
+        免得后台循环紧接着又补一份内容相同的；但**不记 `snapshot_last_day`**：
+        早上手动一份不该把今天的自动那份顶掉，否则白天写了一天、晚上崩了就没退路。
+        """
+        dest = await self._take_db_snapshot("studio-manual")
+        await self.set_setting(SNAPSHOT_TS_KEY, str(await self._last_change_ts()))
+        logger.info(f"[studio] 手动库快照已写：{dest.name}")
         return dest
 
     async def _node_backup_bundle_locked(self, node_id: str) -> Optional[dict[str, Any]]:
@@ -860,16 +973,22 @@ class StudioStore:
         """备份目录的对外入口（接口与脚本用它定位文件，不在外面拼路径）。"""
         return self._backup_dir(kind)
 
-    def list_work_backups(self) -> list[dict[str, Any]]:
-        """整库副本列举（新在前）：名字 / 大小 / 时间。找回靠 `scripts/restore_backup.py`。"""
+    def list_db_backups(self, kind: str) -> list[dict[str, Any]]:
+        """整库类备份列举（新在前）：名字 / 大小 / 时间。找回靠 `scripts/restore_backup.py`。"""
         rows: list[dict[str, Any]] = []
-        for p in self._backup_dir("works").glob(_BACKUP_GLOB["works"]):
+        for p in self._backup_dir(kind).glob(_BACKUP_GLOB[kind]):
             st = _backup_stat(p)
             if st is None:
                 continue     # 正好被并发清理摸掉了：少一行列表，不该让整个请求报错
             rows.append({"name": p.name, "bytes": st[1], "created_at": st[0]})
         rows.sort(key=lambda r: (r["created_at"], r["name"]), reverse=True)
         return rows
+
+    def list_work_backups(self) -> list[dict[str, Any]]:
+        return self.list_db_backups("works")
+
+    def list_snapshot_backups(self) -> list[dict[str, Any]]:
+        return self.list_db_backups("snapshots")
 
     def prune_backups(self, kind: str, keep: int) -> list[str]:
         """只留最近 `keep` 份，返回被清掉的文件名。

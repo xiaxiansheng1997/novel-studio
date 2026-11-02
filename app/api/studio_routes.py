@@ -41,7 +41,7 @@ from app.studio.assembler import assemble, record_used_sources
 from app.studio.jsonutil import as_list as _as_list
 from app.studio.jsonutil import parse_json_loose as _parse_json_loose
 from app.studio.prompting import node_instruction as _node_instruction
-from app.studio.store import BackupError
+from app.studio.store import BACKUP_SNAPSHOT_KEEP, BackupError
 
 router = APIRouter()
 
@@ -182,6 +182,8 @@ async def list_templates(request: Request, kind: str = "", subtype: str = ""):
 # 前端会把 `detail` 直接显示出来，而 `BackupError` 的原话里带着本机库文件与备份目录的位置，
 # 那句只该进日志。
 _BACKUP_DENIED = "备份失败，已拒绝删除，详见服务端日志"
+# 快照失败同一口径：它不是「拒绝了某个破坏性动作」，只是多一份副本没落成。
+_SNAPSHOT_FAILED = "快照没写成，详见服务端日志"
 
 # node_versions.source 的取值集合，与前端 SOURCE_LABEL 一一对应。
 # 放开成任意字符串的话，历史页会出现「未知」这种没人看得懂的行，回滚前不敢点。
@@ -467,19 +469,41 @@ async def restore_version(node_id: str, version_id: str, request: Request):
     return node
 
 
-# ==================== 删除备份 ====================
+# ==================== 删除备份与每日快照 ====================
 
 @router.get("/studio/backups", dependencies=[Depends(verify_key)])
 async def list_backups(request: Request):
-    """列出删除前的备份：节点 JSON 与整库副本。只读。"""
+    """列出备份：删除前的节点 JSON 与整库副本，加上每天的整库快照。只读。"""
     store = _store(request)
     return {
         "nodes": store.list_node_backups(),
         "works": store.list_work_backups(),
+        "snapshots": store.list_snapshot_backups(),
+        # 前端拿这个数说「留最近 N 份」，不让它自己再写一份常量
+        "snapshot_keep": BACKUP_SNAPSHOT_KEEP,
         # 只给「相对存储目录」的写法：绝对路径会原样显示到界面上，把部署位置说出去。
         # 想看完整位置用 `scripts/restore_backup.py --list`，那才是给人用的入口。
         "dir": f"{store.db_path.parent.name}/backups/nodes",
+        # 快照与删除副本是两个目录，不给这一行前端就只能说一个地方
+        "snapshot_dir": f"{store.db_path.parent.name}/backups/snapshots",
     }
+
+
+@router.post("/studio/backups/snapshot", dependencies=[Depends(verify_key)])
+async def take_snapshot(request: Request):
+    """立刻取一份整库快照：写一大段之前先存一份，不用等到明天。
+
+    与每日快照同一个目录、同一条保留策略（两类一起数 N 份），所以手动按多了也会
+    挤掉最旧的那一份——这是有意的：留的是「最近的几份」，不是「每天的那一份」。
+    """
+    store = _store(request)
+    try:
+        dest = await store.snapshot_now()
+    except BackupError as exc:
+        logger.error(f"[studio] 手动快照失败: {exc}")
+        raise HTTPException(status_code=500, detail=_SNAPSHOT_FAILED) from exc
+    st = dest.stat()
+    return {"name": dest.name, "bytes": st.st_size, "created_at": st.st_mtime}
 
 
 @router.post("/studio/backups/{filename}/restore", dependencies=[Depends(verify_key)])

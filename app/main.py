@@ -45,6 +45,33 @@ def _add_file_sink(rt) -> int:
     )
 
 
+# 库快照多久看一眼。不必更勤：它防的是「库坏了」，不是「丢了最近几分钟的字」，
+# 而最近那几分钟已经由 nodes 表本身落盘了。
+SNAPSHOT_SWEEP_SEC = 1800
+
+
+async def _snapshot_loop(store, stop: asyncio.Event) -> None:
+    """整库每日快照：开机先补一次（关机过夜后早上打开就落一份），之后每 30 分钟看一眼。
+
+    睡眠用 `Event.wait` 而不是裸 `sleep`：桌面壳的优雅关停只给 10 秒
+    （`desktop/serve.py` 的 `GRACEFUL_SHUTDOWN_SEC`），一个正在睡整觉的后台任务
+    不该把关停拖到超时，那会把整条链路变成 `taskkill /T /F`。
+    失败只写日志：快照是记账，写不成不拦着任何一件事，也不该让服务起不来。
+    """
+    while True:
+        try:
+            await store.maybe_daily_snapshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 含 BackupError：下一轮再看
+            logger.warning(f"[studio] 每日库快照没写成，先不管：{exc}")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=SNAPSHOT_SWEEP_SEC)
+        except asyncio.TimeoutError:
+            continue
+        return   # stop 被置上：优雅收工
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Windows + uvicorn --reload 会切到 SelectorEventLoop，该循环不支持子进程，
@@ -82,9 +109,15 @@ async def lifespan(app: FastAPI):
         f"| http://{rt.settings.host}:{rt.settings.port}/v1 "
         f"| 日志={rt.settings.resolved_storage_dir() / 'logs'}"
     )
+    # 库的每日快照：上面那句「写作队列已恢复」管的是任务，这一句管的是稿子本身。
+    snap_stop = asyncio.Event()
+    snap_task = asyncio.create_task(_snapshot_loop(rt.studio, snap_stop))
     try:
         yield
     finally:
+        snap_stop.set()
+        snap_task.cancel()
+        await asyncio.gather(snap_task, return_exceptions=True)
         await teardown(rt)
         try:
             logger.remove(sink_id)  # 先关文件 sink，避免 teardown 日志写进已关闭的文件

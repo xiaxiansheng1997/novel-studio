@@ -508,6 +508,32 @@
             <p v-if="!workBackups.length" class="hint-line">还没有整库副本。</p>
           </div>
         </section>
+
+        <section class="card">
+          <div class="card-head">
+            <span class="card-title">库与快照</span>
+            <span class="card-sub">每天第一次改动后自动落一份整库快照，留最近 {{ snapshotKeep }} 份</span>
+            <span class="head-spacer"></span>
+            <span class="mono card-path">{{ snapshotDir }}</span>
+            <button class="btn btn-sm" :disabled="snapshotBusy" @click="takeSnapshot">
+              {{ snapshotBusy ? '快照中…' : '立即快照' }}
+            </button>
+          </div>
+          <div class="card-body">
+            <p v-if="snapshotNote" class="hint-line">{{ snapshotNote }}</p>
+            <div v-for="s in recentSnapshots" :key="s.name" class="bak-line">
+              <span class="mono bak-name">{{ s.name }}</span>
+              <span class="bak-meta">{{ fmtStamp(s.created_at) }} · {{ fmtBytes(s.bytes) }}</span>
+            </div>
+            <p v-if="!snapshotBackups.length" class="hint-line">
+              还没有快照：写过字之后服务会在半小时内自己取一份，赶时间就点上面的按钮。
+            </p>
+            <p v-else-if="snapshotBackups.length > recentSnapshots.length" class="hint-line">
+              共 {{ snapshotBackups.length }} 份，只列最近 {{ recentSnapshots.length }} 份；
+              要拿某一份盖回去，先停服务再用 `scripts/restore_backup.py`。
+            </p>
+          </div>
+        </section>
       </section>
 
       <!-- ---------- 配置：重载 / 公众号设置 / 内容类型（批次四从写作台迁入） ---------- -->
@@ -666,6 +692,12 @@ const checkBusy = ref(false)
 const nodeBackups = ref([])
 const workBackups = ref([])
 const backupDir = ref('')
+// ---- 库快照：与删除副本同一条保留策略，所以手动按多了会挤掉最旧的 ----
+const snapshotBackups = ref([])
+const snapshotKeep = ref(7)
+const snapshotDir = ref('')
+const snapshotBusy = ref(false)
+const snapshotNote = ref('')
 const restoringBackup = ref(false)
 const dataError = ref('')
 const dataNote = ref('')
@@ -1045,9 +1077,36 @@ async function loadBackups() {
     const j = await r.json()
     nodeBackups.value = j.nodes || []
     workBackups.value = j.works || []
+    snapshotBackups.value = j.snapshots || []
+    snapshotKeep.value = j.snapshot_keep || 7
+    snapshotDir.value = j.snapshot_dir || ''
     backupDir.value = j.dir || ''
   } catch (e) {
     dataError.value = '备份列表不可用：' + e.message
+  }
+}
+
+// 列表只给 5 行：这一页要回答的是「最近有没有在取」，不是备份档案室。
+// 真需要翻旧的那一份，`scripts/restore_backup.py --list` 才是完整清单。
+const recentSnapshots = computed(() => snapshotBackups.value.slice(0, 5))
+
+async function takeSnapshot() {
+  snapshotBusy.value = true
+  snapshotNote.value = ''
+  dataError.value = ''
+  try {
+    const r = await apiFetch('/studio/backups/snapshot', { method: 'POST' })
+    if (!r.ok) {
+      dataError.value = await errLine(r, '快照失败')
+      return
+    }
+    const j = await r.json()
+    snapshotNote.value = `已存下 ${j.name}（${fmtBytes(j.bytes)}）`
+    await loadBackups()
+  } catch (e) {
+    dataError.value = '快照失败：' + e.message
+  } finally {
+    snapshotBusy.value = false
   }
 }
 
