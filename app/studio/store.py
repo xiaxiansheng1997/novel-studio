@@ -3337,3 +3337,94 @@ class StudioStore:
             "facts": int(f["c"]),
             "open_issues": int(i["c"]),
         }
+
+    async def cost_quality(self, work_limit: int = 50, node_limit: int = 50) -> dict[str, Any]:
+        """生成账本：runs 的耗时/字数按作品与按节汇总，再加未处理硬告警。
+
+        只统计真的跑过的作品与节——没调用过模型的书不进成本表。
+        「质量」只看两样落过库的：跑批打分（runs.score）与未处理 error 级
+        告警（warn/info 是提示，不算错）。没打分的跑批不按 0 分算，直接不计入
+        均分——把「没评」混进「差评」会把均分拉得毫无意义。
+        """
+        assert self._db is not None
+        wl = max(1, min(work_limit, 100))
+        nl = max(1, min(node_limit, 200))
+        agg = (
+            "COUNT(*) AS runs, "
+            "SUM(CASE WHEN r.status='ok' THEN 1 ELSE 0 END) AS ok, "
+            "SUM(CASE WHEN r.status='failed' THEN 1 ELSE 0 END) AS failed, "
+            "SUM(CASE WHEN r.status='interrupted' THEN 1 ELSE 0 END) AS interrupted, "
+            "SUM(CASE WHEN r.status='running' THEN 1 ELSE 0 END) AS running, "
+            "COALESCE(SUM(r.elapsed_ms),0) AS elapsed_ms, "
+            "COALESCE(SUM(r.prompt_chars),0) AS prompt_chars, "
+            "COALESCE(SUM(r.output_chars),0) AS output_chars, "
+            "COUNT(r.score) AS scored, AVG(r.score) AS avg_score"
+        )
+
+        def shape(row: Any) -> dict[str, Any]:
+            d = dict(row)
+            for k in ("runs", "ok", "failed", "interrupted", "running", "elapsed_ms",
+                      "prompt_chars", "output_chars", "scored"):
+                d[k] = int(d.get(k) or 0)
+            d["done"] = d["ok"] + d["failed"] + d["interrupted"]
+            d["avg_elapsed_ms"] = (
+                int(round(d["elapsed_ms"] / d["done"])) if d["done"] else 0
+            )
+            avg = d.get("avg_score")
+            d["avg_score"] = round(float(avg), 2) if avg is not None else None
+            return d
+
+        async with self._lock:
+            cur = await self._db.execute(
+                f"SELECT {agg}, MAX(r.started_at) AS last_at FROM runs r"
+            )
+            overall = shape(await cur.fetchone())
+
+            cur = await self._db.execute(
+                f"SELECT r.task_type, {agg} FROM runs r GROUP BY r.task_type "
+                "ORDER BY elapsed_ms DESC"
+            )
+            by_task = [shape(r) for r in await cur.fetchall()]
+
+            cur = await self._db.execute(
+                f"SELECT r.work_id, w.title AS work_title, {agg}, MAX(r.started_at) AS last_at "
+                "FROM runs r LEFT JOIN works w ON w.id = r.work_id "
+                "GROUP BY r.work_id ORDER BY elapsed_ms DESC LIMIT ?",
+                (wl,),
+            )
+            works = [shape(r) for r in await cur.fetchall()]
+
+            cur = await self._db.execute(
+                "SELECT work_id, COUNT(*) AS c FROM issues "
+                "WHERE resolved = 0 AND severity = 'error' GROUP BY work_id"
+            )
+            work_errors = {r["work_id"]: int(r["c"]) for r in await cur.fetchall()}
+            cur = await self._db.execute(
+                "SELECT node_id, COUNT(*) AS c FROM issues "
+                "WHERE resolved = 0 AND severity = 'error' AND node_id IS NOT NULL "
+                "GROUP BY node_id"
+            )
+            node_errors = {r["node_id"]: int(r["c"]) for r in await cur.fetchall()}
+
+            cur = await self._db.execute(
+                f"SELECT r.work_id, w.title AS work_title, r.node_id, n.title AS node_title, "
+                f"n.path AS node_path, {agg} "
+                "FROM runs r LEFT JOIN nodes n ON n.id = r.node_id "
+                "LEFT JOIN works w ON w.id = r.work_id "
+                "WHERE r.node_id IS NOT NULL AND r.node_id != '' "
+                "GROUP BY r.work_id, r.node_id ORDER BY elapsed_ms DESC LIMIT ?",
+                (nl,),
+            )
+            nodes = [shape(r) for r in await cur.fetchall()]
+
+        for w in works:
+            w["open_errors"] = work_errors.get(w["work_id"], 0)
+        for n in nodes:
+            n["open_errors"] = node_errors.get(n["node_id"], 0)
+        return {
+            "overall": overall,
+            "by_task": by_task,
+            "works": works,
+            "nodes": nodes,
+            "limits": {"works": wl, "nodes": nl},
+        }

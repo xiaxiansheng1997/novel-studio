@@ -151,7 +151,7 @@
               <span class="action-icon"><AppIcon name="database" :size="16" /></span>
               <span class="action-text">
                 <strong>数据与发布台账</strong>
-                <small>删除备份恢复、公众号发布记录</small>
+                <small>生成成本与质量、删除备份恢复、公众号发布记录</small>
               </span>
               <AppIcon name="chevronRight" :size="15" class="action-arrow" />
             </button>
@@ -366,6 +366,107 @@
 
       <!-- ---------- 数据：发布台账 / 备份（批次四从写作台迁入） ---------- -->
       <section v-else-if="tab === 'data'" class="tab-pane" role="tabpanel">
+        <!-- 成本与质量：runs 现算，不另记一份账 -->
+        <section class="card">
+          <div class="card-head">
+            <span class="card-title">生成成本与质量</span>
+            <span class="card-sub">runs 现算：按作品与按节汇总耗时、输出与评分</span>
+            <span class="head-spacer"></span>
+            <span class="card-sub">
+              {{ cqOverall.last_at ? '最近 ' + fmtStamp(cqOverall.last_at) : '还没有生成记录' }}
+            </span>
+          </div>
+          <div class="card-body">
+            <div class="q-stats">
+              <span class="q-stat"><b>{{ cqOverall.runs || 0 }}</b> 次调用</span>
+              <span class="q-stat" :class="{ 'is-bad': cqOverall.failed }">
+                <b>{{ cqOverall.failed || 0 }}</b> 失败
+              </span>
+              <span v-if="cqOverall.running" class="q-stat"><b>{{ cqOverall.running }}</b> 进行中</span>
+              <span class="q-stat"><b>{{ fmtDur(cqOverall.elapsed_ms) }}</b> 总耗时</span>
+              <span class="q-stat"><b>{{ fmtDur(cqOverall.avg_elapsed_ms) }}</b> 每次</span>
+              <span class="q-stat"><b>{{ fmtChars(cqOverall.output_chars) }}</b> 输出</span>
+              <span class="q-stat">
+                <b>{{ fmtScore(cqOverall.avg_score) }}</b> 均分<template v-if="cqOverall.scored">（{{ cqOverall.scored }} 次评分）</template>
+              </span>
+            </div>
+            <!-- 任务分解只在多于一种时才有信息量；只有一种就是上面那一行 -->
+            <div v-if="cqByTask.length > 1" class="q-triage-list cq-tasks">
+              <span v-for="t in cqByTask" :key="t.task_type" class="q-triage-item">
+                {{ t.task_type }} <b>{{ t.runs }}</b> 次 · {{ fmtDur(t.elapsed_ms) }}
+                <template v-if="t.avg_score != null">· 均分 {{ fmtScore(t.avg_score) }}</template>
+              </span>
+            </div>
+            <p v-if="!cqWorks.length" class="hint-line">
+              还没有生成记录：跑过一章或一版改写之后，这里会出现成本账。
+            </p>
+            <p v-else class="hint-line">
+              总耗时是各次跑批 elapsed_ms 之和；「每次」只除已结束的跑批。均分只算打过分的，
+              没打分不计入，也不按 0 分算；「硬告警」只数未处理的 error 级。
+            </p>
+          </div>
+          <div v-if="cqWorks.length" class="table-wrap">
+            <table class="req-table">
+              <thead>
+                <tr>
+                  <th>作品</th>
+                  <th class="col-ms">调用</th>
+                  <th class="col-ms">失败</th>
+                  <th class="col-ms">总耗时</th>
+                  <th class="col-ms">每次</th>
+                  <th class="col-ms">输出</th>
+                  <th class="col-ms">均分</th>
+                  <th class="col-ms">硬告警</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="w in cqWorks" :key="w.work_id">
+                  <td class="path-cell" :title="w.work_id">{{ w.work_title || w.work_id }}</td>
+                  <td class="mono col-ms">{{ w.runs }}</td>
+                  <td class="mono col-ms" :class="{ 'cq-bad': w.failed }">{{ w.failed }}</td>
+                  <td class="mono col-ms">{{ fmtDur(w.elapsed_ms) }}</td>
+                  <td class="mono col-ms">{{ fmtDur(w.avg_elapsed_ms) }}</td>
+                  <td class="mono col-ms">{{ fmtChars(w.output_chars) }}</td>
+                  <td class="mono col-ms">{{ fmtScore(w.avg_score) }}</td>
+                  <td class="mono col-ms" :class="{ 'cq-bad': w.open_errors }">{{ w.open_errors }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="cqNodes.length" class="card-body cq-nodes">
+            <div class="cq-sub">最耗时的节</div>
+            <div class="table-wrap">
+              <table class="req-table">
+                <thead>
+                  <tr>
+                    <th>节</th>
+                    <th>作品</th>
+                    <th class="col-ms">调用</th>
+                    <th class="col-ms">失败</th>
+                    <th class="col-ms">耗时</th>
+                    <th class="col-ms">均分</th>
+                    <th class="col-ms">硬告警</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="n in cqNodes" :key="n.node_id">
+                    <td class="path-cell" :title="n.node_path || n.node_id">{{ n.node_title || n.node_id }}</td>
+                    <td class="path-cell" :title="n.work_id">{{ n.work_title || n.work_id }}</td>
+                    <td class="mono col-ms">{{ n.runs }}</td>
+                    <td class="mono col-ms" :class="{ 'cq-bad': n.failed }">{{ n.failed }}</td>
+                    <td class="mono col-ms">{{ fmtDur(n.elapsed_ms) }}</td>
+                    <td class="mono col-ms">{{ fmtScore(n.avg_score) }}</td>
+                    <td class="mono col-ms" :class="{ 'cq-bad': n.open_errors }">{{ n.open_errors }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="hint-line">
+              只列耗时最长的 {{ cqNodes.length }} 节；全书级任务（大纲、摘要）只进上面的表。
+            </p>
+          </div>
+        </section>
+
         <section class="card">
           <div class="card-head">
             <span class="card-title">发布台账</span>
@@ -681,6 +782,8 @@ let tasksTimer = 0
 
 // ---- 数据 ----
 const works = ref([])
+// 生成成本：整块从 /studio/stats/cost-quality 来，不在前端另算一遍
+const costQuality = ref(null)
 const pubSummary = ref([])
 const worksError = ref('')
 const pubWork = ref('')
@@ -1024,6 +1127,10 @@ const checkWarn = computed(() => (checkResult.value?.items || []).filter(i => i.
 const checkInfo = computed(() => (checkResult.value?.items || []).filter(i => i.severity !== 'warn').length)
 const checkItems = computed(() => (checkResult.value?.items || []).slice(0, 6))
 const checkMore = computed(() => Math.max(0, (checkResult.value?.items || []).length - 6))
+const cqOverall = computed(() => costQuality.value?.overall || {})
+const cqWorks = computed(() => costQuality.value?.works || [])
+const cqNodes = computed(() => costQuality.value?.nodes || [])
+const cqByTask = computed(() => costQuality.value?.by_task || [])
 
 function workName(id) {
   if (!id) return '—'
@@ -1034,7 +1141,7 @@ async function refreshData() {
   dataBusy.value = true
   dataError.value = ''
   try {
-    await Promise.all([loadWorks(), loadPubSummary(), loadBackups()])
+    await Promise.all([loadWorks(), loadPubSummary(), loadBackups(), loadCostQuality()])
     // 选着的作品被删了：别把一个过期 id 带到下面的接口里去
     if (pubWork.value && !works.value.some(w => w.id === pubWork.value)) {
       pubWork.value = ''
@@ -1067,6 +1174,18 @@ async function loadPubSummary() {
     pubSummary.value = await r.json()
   } catch (e) {
     dataError.value = '发布台账不可用：' + e.message
+  }
+}
+
+async function loadCostQuality() {
+  try {
+    const r = await apiFetch('/studio/stats/cost-quality?works=30&nodes=30')
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    costQuality.value = await r.json()
+  } catch (e) {
+    // 拿不到就清空：宁可显示「还没有生成记录」，也不摆一份过期账
+    costQuality.value = null
+    dataError.value = '生成成本不可用：' + e.message
   }
 }
 
@@ -1246,6 +1365,25 @@ function fmtBytes(n) {
   const v = Number(n) || 0
   if (v >= 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB'
   return Math.max(1, Math.round(v / 1024)) + ' KB'
+}
+
+// 生成账的三种度量：耗时、字符数、评分（null = 没评过，不显示成 0）
+function fmtDur(ms) {
+  const v = Number(ms) || 0
+  if (!v) return '—'
+  if (v < 1000) return v + 'ms'
+  if (v < 60000) return (v / 1000).toFixed(1) + 's'
+  return `${Math.floor(v / 60000)}分${Math.round((v % 60000) / 1000)}秒`
+}
+
+function fmtChars(n) {
+  const v = Number(n) || 0
+  if (!v) return '0'
+  return v >= 10000 ? (v / 10000).toFixed(1) + '万字' : v + '字'
+}
+
+function fmtScore(v) {
+  return v == null ? '—' : Number(v).toFixed(1)
 }
 
 function fmtTime(ts) {
@@ -1750,6 +1888,23 @@ function alignClass(p) {
   font-size: 12px;
   width: auto;
   max-width: 220px;
+}
+
+/* ---------- 生成成本与质量 ---------- */
+.cq-tasks {
+  margin-top: 10px;
+}
+.cq-bad {
+  color: var(--danger-fg);
+}
+.cq-nodes {
+  border-top: 1px solid var(--line-soft);
+}
+.cq-sub {
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
 }
 
 /* ---------- 任务 ---------- */

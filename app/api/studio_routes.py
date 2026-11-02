@@ -490,6 +490,15 @@ async def daily_writes(request: Request, days: int = 30):
     }
 
 
+@router.get("/studio/stats/cost-quality", dependencies=[Depends(verify_key)])
+async def cost_quality(request: Request, works: int = 50, nodes: int = 50):
+    """生成成本与质量：runs 的耗时/字数按作品与按节汇总，附未处理硬告警。
+
+    `works` / `nodes` 只限返回行数，与统计口径无关；均分只算打过分的跑批。
+    """
+    return await _store(request).cost_quality(work_limit=works, node_limit=nodes)
+
+
 
 # ==================== 节点 ====================
 
