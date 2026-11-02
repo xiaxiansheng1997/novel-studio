@@ -1,0 +1,33 @@
+frontend/src/components/StudioTree.vue
+  s_85cd431edb9d78::t_8cfa63cbc73286 114,373-379
+  s_85cd431edb9d78::t_0a76841e3e187e 25-29,31,33-37,115-155,380
+tests/test_studio_reparent.py
+  s_85cd431edb9d78::t_fcf0618bcce498 155
+  s_85cd431edb9d78::t_904cb6a3fbd997 238,241,247-248
+  s_85cd431edb9d78::t_69e4e277eabe06 1-154,156-237,239-240,242-246,249
+frontend/src/views/StudioView.vue
+  s_85cd431edb9d78::t_73b6f6b41e4e65 35,983-1002
+app/api/studio_routes.py
+  s_85cd431edb9d78::t_3a4f507491d825 117-121,439-454
+app/studio/store.py
+  s_85cd431edb9d78::t_2e40f29a46721f 748-753,755-889
+  s_85cd431edb9d78::t_a976187444f4b3 754
+frontend/src/stores/studio.js
+  s_85cd431edb9d78::t_0a1689fbbe4f73 466-492,1464
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "639e9896c9957287cfbfe240975109ec14c7a809",
+  "prompts": {},
+  "sessions": {
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
