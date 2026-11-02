@@ -1,0 +1,19 @@
+frontend/src/utils/writer.js
+  s_85cd431edb9d78::t_1c3cf9966a4432 9-10,16-19,28-37,40,43,53-61,69,97-99,119-122,136-139,145-148,154
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6276e7b0d2aecf08e36e9355d982d92f7c97e089",
+  "prompts": {},
+  "sessions": {
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
