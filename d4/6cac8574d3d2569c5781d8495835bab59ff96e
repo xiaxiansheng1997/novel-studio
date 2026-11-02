@@ -1,0 +1,27 @@
+app/api/studio_routes.py
+  s_85cd431edb9d78::t_4cf74898b397cc 493-501
+app/studio/store.py
+  s_85cd431edb9d78::t_d204e4e6c262f6 3354-3361,3378-3380,3384
+  s_85cd431edb9d78::t_925cf0d5f1c85b 3340-3353,3362-3377,3381-3383,3385-3430
+frontend/src/views/ConsoleView.vue
+  s_85cd431edb9d78::t_472171e38d771a 154,369-469,785-786,1130-1133,1144,1180-1191,1370-1388,1893-1909
+tests/test_studio_cost_quality.py
+  s_85cd431edb9d78::t_387f1642a3e6fa 100-104
+  s_85cd431edb9d78::t_9d16359d673f7f 1-99,105-184
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d46cac8574d3d2569c5781d8495835bab59ff96e",
+  "prompts": {},
+  "sessions": {
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
