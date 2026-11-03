@@ -12,14 +12,14 @@
 
       <div class="body">
         <p class="tip">
-          粘一篇旧稿，或把 .txt / .md 拖进来。导进来的每一节都是正常正文：能接着写、能被检索、算进作品字数；
+          粘一篇旧稿，或把 .txt / .md / .docx 拖进来。导进来的每一节都是正常正文：能接着写、能被检索、算进作品字数；
           但它不算「今天写的字」，写作日历不会被旧稿刷高。
           <template v-if="parentTitle">这次会挂在「{{ parentTitle }}」下面。</template>
         </p>
 
         <label class="drop" @dragover.prevent @drop.prevent="onDrop">
-          <input type="file" accept=".txt,.md,.markdown,.text" hidden @change="onPick" />
-          <span>{{ fileName || '拖入 .txt / .md，或点这里选文件' }}</span>
+          <input type="file" accept=".txt,.md,.markdown,.text,.docx" hidden @change="onPick" />
+          <span>{{ fileName || '拖入 .txt / .md / .docx，或点这里选文件' }}</span>
         </label>
 
         <textarea
@@ -65,7 +65,7 @@
       </div>
 
       <footer class="foot">
-        <span v-if="busy" class="prog">正在导入 {{ progress }} / {{ sections.length }}…</span>
+        <span v-if="busy" class="prog">{{ text ? '正在解析 docx…' : `正在导入 ${progress} / ${sections.length}…` }}</span>
         <span v-else class="foot-tip">拆错了换个方式再看，点「导入」之前一个字都不会写库</span>
         <div class="foot-act">
           <button class="btn btn-sm" :disabled="busy" @click="close">取消</button>
@@ -170,8 +170,27 @@ function firstLine(body) {
 
 async function readFile(file) {
   if (!file) return
+  if (/\.docx$/i.test(file.name)) {
+    // Word 的二进制浏览器解不动：传给后端用标准库解 zip+XML，拿回纯文本继续预览
+    busy.value = true
+    try {
+      const r = await store.docxToText(file)
+      if (!r.ok) {
+        error.value = r.reason || '这份 docx 解不开'
+        return
+      }
+      text.value = r.text
+      fileName.value = file.name
+      error.value = r.headings
+        ? `解出 ${r.chars} 字、${r.headings} 行标题：默认「自动」就能按标题拆`
+        : '解出纯文本了，但没认出标题行：拆不开就换下面的拆法'
+      return
+    } finally {
+      busy.value = false
+    }
+  }
   if (!/\.(txt|md|markdown|text)$/i.test(file.name)) {
-    error.value = '只支持 .txt / .md；Word 与 PDF 请先另存为纯文本'
+    error.value = '只支持 .txt / .md / .docx；PDF 请先另存为纯文本或 Word'
     return
   }
   try {

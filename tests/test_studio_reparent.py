@@ -10,8 +10,8 @@
 `relations UNIQUE(src_id, rel_type, dst_id, since_ordinal)` 让逐行直接写变成
 中间态碰撞，只能先整体取负、再翻成新号（`_renumber_locked`）。
 
-这一轮的口径：只搬有 ordinal 的叶子，目标是同作品的容器或顶层，落点只有
-「目标末尾」；卷不动、不插到某一节之前。
+这一轮的口径：搬有 ordinal 的叶子，目标是同作品的容器、顶层或「已经有子节点的章」；
+落点可以是目标末尾，也可以用 `before_id` 插到某个兄弟之前。卷自己走 `move_node`。
 """
 from __future__ import annotations
 
@@ -207,6 +207,89 @@ async def test_container_source_and_unknown_node(store) -> None:
     assert await store.reparent_node(f["a1"]["id"], "n_不存在") is None
 
 
+# ==================== 插到某节之前 ====================
+
+async def test_insert_before_first_of_another_volume(store) -> None:
+    """B1 拖到 A1 之前：换卷、插到最前，A1/A2/B2 的章号整体后移。"""
+    f = await two_volumes(store)
+
+    r = await store.reparent_node(f["b1"]["id"], None, before_id=f["a1"]["id"])
+
+    assert r["moved"] is True and r["before_title"] == "A1"
+    assert r["parent_title"] == "第一卷" and r["ordinal"] == 1
+    rows = {n["id"]: n for n in await store.list_tree(f["work_id"])}
+    assert rows[f["b1"]["id"]]["parent_id"] == f["v1"]["id"]
+    assert rows[f["b1"]["id"]]["path"] == f"{f['v1']['path']}.0001"
+    assert [n["title"] for n in await store.list_tree(f["work_id"])] == [
+        "第一卷", "B1", "A1", "A2", "第二卷", "B2"]
+    assert await chapter_ordinals(store, f["work_id"]) == {
+        "B1": 1, "A1": 2, "A2": 3, "B2": 4}
+
+
+async def test_insert_before_middle_sibling(store) -> None:
+    """A1 插到 B2 之前：落到第二卷中间，B2 与后面的位置顺延。"""
+    f = await two_volumes(store)
+
+    r = await store.reparent_node(f["a1"]["id"], None, before_id=f["b2"]["id"])
+
+    assert r["moved"] is True and r["before_title"] == "B2"
+    assert r["parent_title"] == "第二卷"
+    assert [n["title"] for n in await store.list_tree(f["work_id"])] == [
+        "第一卷", "A2", "第二卷", "B1", "A1", "B2"]
+    assert await chapter_ordinals(store, f["work_id"]) == {
+        "A2": 1, "B1": 2, "A1": 3, "B2": 4}
+
+
+async def test_insert_before_current_next_is_a_noop(store) -> None:
+    """A1 本来就紧挨在 A2 前面：返回 moved False，一行都不改。"""
+    f = await two_volumes(store)
+    before = [(n["id"], n["path"], n["ordinal"]) for n in await store.list_tree(f["work_id"])]
+
+    r = await store.reparent_node(f["a1"]["id"], None, before_id=f["a2"]["id"])
+
+    assert r == {"moved": False, "reason": "已经在这个位置"}
+    assert [(n["id"], n["path"], n["ordinal"]) for n in await store.list_tree(f["work_id"])] == before
+
+
+async def test_insert_before_rejects_self_and_other_work(store) -> None:
+    f = await two_volumes(store)
+    other_work = await store.create_work(kind="novel", title="另一本", scale="series")
+    other_vol = await store.create_node(
+        work_id=other_work["id"], kind="volume", title="别卷")
+    other_ch = await store.create_node(
+        work_id=other_work["id"], kind="chapter", parent_id=other_vol["id"],
+        title="别章", content="别处" * 60, ordinal=1)
+
+    with pytest.raises(ValueError, match="不能插到自己前面"):
+        await store.reparent_node(f["a1"]["id"], None, before_id=f["a1"]["id"])
+    with pytest.raises(ValueError, match="不能跨作品"):
+        await store.reparent_node(f["a1"]["id"], None, before_id=other_ch["id"])
+    assert await store.reparent_node(f["a1"]["id"], None, before_id="n_不存在") is None
+    assert [n["title"] for n in await store.list_tree(f["work_id"])] == [
+        "第一卷", "A1", "A2", "第二卷", "B1", "B2"]
+
+
+async def test_chapter_with_children_can_be_a_parent(store) -> None:
+    """已经有子节点的章可以再接一节：拖进空章仍然拒绝，非空章按容器处理。"""
+    work = await store.create_work(kind="novel", title="章节带节", scale="series")
+    vol = await store.create_node(work_id=work["id"], kind="volume", title="第一卷")
+    c1 = await store.create_node(work_id=work["id"], kind="chapter", parent_id=vol["id"],
+                                 title="第一章", content="一" * 60, ordinal=1)
+    s1 = await store.create_node(work_id=work["id"], kind="section", parent_id=c1["id"],
+                                 title="第一节", content="二" * 60, ordinal=2)
+    assert s1["parent_id"] == c1["id"]
+    c2 = await store.create_node(work_id=work["id"], kind="chapter", parent_id=vol["id"],
+                                 title="第二章", content="三" * 60, ordinal=3)
+
+    r = await store.reparent_node(c2["id"], c1["id"])
+
+    assert r["moved"] is True and r["parent_title"] == "第一章"
+    rows = {n["id"]: n for n in await store.list_tree(work["id"])}
+    assert rows[c2["id"]]["parent_id"] == c1["id"] and rows[c2["id"]]["depth"] == 2
+    assert [n["title"] for n in await store.list_readable(work["id"])] == [
+        "第一章", "第一节", "第二章"]
+
+
 # ==================== 接口层 ====================
 
 def test_reparent_route_maps_404_and_400(tmp_path) -> None:
@@ -247,3 +330,37 @@ def test_reparent_route_maps_404_and_400(tmp_path) -> None:
         # 拖回顶层也是合法落点：章 2 从卷里出来，落到顶层末尾
         assert client.post(f"/studio/nodes/{ids[1]}/reparent",
                            json={"parent_id": None}).json()["moved"] is True
+
+
+def test_reparent_route_accepts_before_id(tmp_path) -> None:
+    """`before_id` 让「放到这一行前面」走同一条接口，返回里带上落点标题。"""
+    store = StudioStore(tmp_path / "studio.db")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await app.state.studio_store.init()
+        yield
+        await app.state.studio_store.close()
+
+    app = FastAPI(lifespan=lifespan)
+    app.state.settings = SimpleNamespace(api_key="", allow_origins="", host="127.0.0.1", port=8000)
+    app.state.studio_store = store
+    app.include_router(studio_routes.router)
+
+    with TestClient(app) as client:
+        work = client.post("/studio/works", json={"kind": "novel", "title": "插入拖拽",
+                                                 "scale": "series"}).json()
+        vol = client.post(f"/studio/works/{work['id']}/nodes",
+                          json={"kind": "volume", "title": "第一卷"}).json()
+        ids = [client.post(f"/studio/works/{work['id']}/nodes",
+                           json={"kind": "chapter", "title": f"第{i}章",
+                                 "parent_id": vol["id"],
+                                 "content": f"内容{i}" * 60}).json()["id"] for i in (1, 2)]
+
+        r = client.post(f"/studio/nodes/{ids[1]}/reparent",
+                        json={"parent_id": vol["id"], "before_id": ids[0]})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["moved"] is True and body["before_title"] == "第1章"
+        assert [n["title"] for n in client.get(
+            f"/studio/works/{work['id']}/tree").json()] == ["第一卷", "第2章", "第1章"]

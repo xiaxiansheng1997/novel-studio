@@ -24,12 +24,19 @@
         class="tree-row"
         :class="{
           'is-active': n.id === activeId,
+          'is-picked': selectedIds.includes(n.id),
           'is-dragging': dragNode && dragNode.id === n.id,
-          'is-drop': dropId === n.id,
+          'is-drop-inside': dropPos.id === n.id && dropPos.pos === 'inside',
+          'is-drop-before': dropPos.id === n.id && dropPos.pos === 'before',
+          'is-drop-after': dropPos.id === n.id && dropPos.pos === 'after',
         }"
         :style="{ paddingLeft: 6 + Math.min(n.depth, 3) * 14 + 'px' }"
         :draggable="n.ordinal != null"
         @click="$emit('select', n.id)"
+        @click.shift.prevent="$emit('update:selected', rangeTo(n.id))"
+        @click.ctrl.prevent="$emit('update:selected', togglePick(n.id))"
+        @click.meta.prevent="$emit('update:selected', togglePick(n.id))"
+        @contextmenu.prevent.stop="openMenu($event, n)"
         @dragstart="onDragStart($event, n)"
         @dragend="onDragEnd"
         @dragover="onDragOver($event, n)"
@@ -58,7 +65,6 @@
         <span class="tree-dot" :class="n.status"></span>
         <span class="tree-ops">
           <button
-            v-if="n.ordinal != null"
             class="op"
             title="上移"
             :disabled="rankOf(n.id).first"
@@ -67,7 +73,6 @@
             <AppIcon name="chevronUp" :size="12" />
           </button>
           <button
-            v-if="n.ordinal != null"
             class="op"
             title="下移"
             :disabled="rankOf(n.id).last"
@@ -89,11 +94,50 @@
       </div>
     </div>
 
-    <footer v-if="stats" class="tree-foot">
+    <footer v-if="selectedIds.length" class="tree-batch">
+      <span class="batch-n">已选 {{ selectedIds.length }} 节</span>
+      <select v-model="batchTarget" class="batch-sel" title="把选中的节整体搬进这个容器">
+        <option value="">搬入…</option>
+        <option v-for="c in containers" :key="c.id" :value="c.id">{{ '　'.repeat(c.depth) }}{{ c.title }}</option>
+      </select>
+      <button class="op" title="把选中的节移入上面选的容器（按原顺序）" :disabled="!batchTarget" @click="emitBatch('move')">
+        <AppIcon name="folder" :size="12" />
+      </button>
+      <button class="op" title="把连续相邻的选中节逐对合并（正文拼进最前一节，其余节先备份再删）" @click="emitBatch('merge')">⤵</button>
+      <button class="op" title="删除选中的节（每节删前落备份）" @click="emitBatch('remove')">
+        <AppIcon name="trash" :size="12" />
+      </button>
+      <button class="op" title="取消选择" @click="$emit('update:selected', [])">
+        <AppIcon name="x" :size="12" />
+      </button>
+    </footer>
+
+    <footer v-else-if="stats" class="tree-foot">
       <span>{{ stats.nodes }} 个节点</span>
       <span class="tree-sep">·</span>
       <span>{{ fmt(stats.words) }}<template v-if="target"> / {{ fmt(target) }}</template> 字</span>
     </footer>
+
+    <!-- 右键菜单：挂在 body 上，不受树栏 overflow 裁剪 -->
+    <Teleport to="body">
+      <div v-if="menu.node" class="ctx-mask" @click="closeMenu" @contextmenu.prevent="closeMenu">
+        <div class="ctx-menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }" role="menu">
+          <p class="ctx-title">{{ menu.node.title }}</p>
+          <button
+            v-for="it in menuItems"
+            :key="it.act"
+            class="ctx-item"
+            :class="{ 'is-danger': it.danger, 'is-off': it.disabled }"
+            role="menuitem"
+            :disabled="it.disabled"
+            @click="runMenu(it)"
+          >
+            <span class="ctx-label">{{ it.label }}</span>
+            <span v-if="it.hint" class="ctx-hint">{{ it.hint }}</span>
+          </button>
+        </div>
+      </div>
+    </Teleport>
   </aside>
 </template>
 
@@ -110,12 +154,17 @@ const props = defineProps({
   target: { type: Number, default: 0 },
   // 折叠状态按作品分开存：同一本书下次打开还是上次收起来的样子
   workId: { type: String, default: '' },
+  // 多选（Ctrl/Shift 点选）：集合存在父层，树只负责圈出来与发起批量动作
+  selectedIds: { type: Array, default: () => [] },
+  // 当前正文非空、能在光标处拆分的节 id（拆分入口只对这一节亮着）
+  splittableId: { type: String, default: '' },
 })
-const emit = defineEmits(['select', 'create', 'remove', 'move', 'import', 'reparent'])
+const emit = defineEmits(['select', 'create', 'remove', 'move', 'import', 'reparent',
+  'update:selected', 'duplicate', 'split', 'merge', 'insert', 'batch'])
 
-// 拖动的是哪一行（只允许有 ordinal 的叶子），以及当前悬停的容器行
+// 拖动的是哪一行（只允许有 ordinal 的叶子），以及当前悬停的落点
 const dragNode = ref(null)
-const dropId = ref('')
+const dropPos = ref({ id: '', pos: '' })
 
 function onDragStart(e, n) {
   if (n.ordinal == null) return
@@ -127,31 +176,61 @@ function onDragStart(e, n) {
 
 function onDragEnd() {
   dragNode.value = null
-  dropId.value = ''
+  dropPos.value = { id: '', pos: '' }
 }
 
-/** 只有容器行接得下：叶子行不 preventDefault，光标会自己显示「放不进去」 */
+/**
+ * 落点分三种：行上沿=插到它前面、行下沿=插到它后面、行中间=放进它里面。
+ * 只有容器（卷/篇）或已经有子节点的章接得住「里面」；普通叶子只在上下沿接。
+ * 拖进自己的子树直接不接，免得后端再报一次「不能拖进自己的子树」。
+ */
 function onDragOver(e, n) {
-  if (!dragNode.value || n.ordinal != null) return
-  if (n.id === dragNode.value.id) return
+  const src = dragNode.value
+  if (!src || n.id === src.id) return
+  if (n.path && src.path && n.path.startsWith(`${src.path}.`)) return
+  const rect = e.currentTarget.getBoundingClientRect()
+  const ratio = rect.height ? (e.clientY - rect.top) / rect.height : 0.5
+  let pos
+  if (n.ordinal == null) {
+    pos = 'inside'
+  } else if (ratio < 0.28) {
+    pos = 'before'
+  } else if (ratio > 0.72) {
+    pos = 'after'
+  } else if (childful.value.has(n.id)) {
+    pos = 'inside'
+  } else {
+    return
+  }
   e.preventDefault()
   e.dataTransfer.dropEffect = 'move'
-  dropId.value = n.id
+  dropPos.value = { id: n.id, pos }
 }
 
 function onDragLeave(e, n) {
   // 移到行内子元素上也会触发 dragleave：还在这一行里就不清高亮
   if (e.currentTarget.contains(e.relatedTarget)) return
-  if (dropId.value === n.id) dropId.value = ''
+  if (dropPos.value.id === n.id) dropPos.value = { id: '', pos: '' }
+}
+
+function nextSiblingOf(n) {
+  const parent = n.parent_id || ''
+  const siblings = props.tree.filter((x) => (x.parent_id || '') === parent)
+  const idx = siblings.findIndex((x) => x.id === n.id)
+  return idx >= 0 ? siblings[idx + 1] || null : null
 }
 
 function onDrop(e, n) {
-  if (!dragNode.value || n.ordinal != null) return
+  const src = dragNode.value
+  if (!src || !dropPos.value.id) return
   e.preventDefault()
-  const node = dragNode.value
+  const pos = dropPos.value.pos
+  const next = pos === 'after' ? nextSiblingOf(n) : null
   dragNode.value = null
-  dropId.value = ''
-  emit('reparent', node, n)
+  dropPos.value = { id: '', pos: '' }
+  if (pos === 'inside') emit('reparent', src, n, { mode: 'inside' })
+  else if (pos === 'before') emit('reparent', src, n, { mode: 'before' })
+  else emit('reparent', src, n, { mode: 'after', beforeId: next?.id || '' })
 }
 
 // 树是扁平数组（按 path 排序），折叠只影响这一屏的渲染，不动数据结构
@@ -255,12 +334,12 @@ watch(() => props.workId, () => {
 // 同层上下移只能跟同一个父节点下的兄弟换：后端也是这么找邻居的（只在同 parent_id 里取
 // 紧邻的前/后一个），所以「首/末行该不该置灰」也按同一套分组算。
 // 树是按 path 返回的，同一父节点的子节点会被孙节点隔开，因此不能按相邻行分组，
-// 得先按 parent_id 归堆。只统计参与排序的那些（容器节点 ordinal 为空，它不移动）。
+// 得先按 parent_id 归堆。容器（卷/篇）与叶子分开排：卷只跟卷换，章只跟章换。
 const ranks = computed(() => {
   const groups = new Map()
   for (const n of props.tree) {
-    if (n.ordinal == null) continue
-    const key = n.parent_id || ''
+    const kind = n.ordinal == null ? 'container' : 'leaf'
+    const key = `${n.parent_id || ''}|${kind}`
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key).push(n.id)
   }
@@ -274,6 +353,109 @@ const ranks = computed(() => {
 function rankOf(id) {
   return ranks.value.get(id) || { first: true, last: true }
 }
+
+// ---- 多选：Ctrl 点增删、Shift 按树序圈一段 ----
+function togglePick(id) {
+  const cur = new Set(props.selectedIds)
+  if (cur.has(id)) cur.delete(id)
+  else cur.add(id)
+  return [...cur]
+}
+
+function rangeTo(id) {
+  // Shift 段按扁平树序取，两端都算；没有锚点时等于只选这一个
+  const anchor = props.activeId || props.selectedIds[props.selectedIds.length - 1]
+  const ids = props.tree.map((x) => x.id)
+  const a = anchor ? ids.indexOf(anchor) : -1
+  const b = ids.indexOf(id)
+  if (a < 0 || b < 0 || a === b) return [id]
+  const [lo, hi] = a < b ? [a, b] : [b, a]
+  return ids.slice(lo, hi + 1)
+}
+
+// ---- 右键菜单 ----
+const menu = ref({ node: null, x: 0, y: 0 })
+
+function openMenu(e, n) {
+  // 在已选集合里右键：保留多选，菜单里的批量项才有用；否则右键即单选这行
+  if (!props.selectedIds.includes(n.id)) emit('update:selected', [n.id])
+  menu.value = {
+    node: n,
+    // 贴边收敛：菜单约 220 宽、最多 12 项，超出视口就换边/上提
+    x: Math.max(8, Math.min(e.clientX, window.innerWidth - 236)),
+    y: Math.max(8, Math.min(e.clientY, window.innerHeight - 380)),
+  }
+}
+
+function closeMenu() {
+  menu.value = { node: null, x: 0, y: 0 }
+}
+
+const containers = computed(() => props.tree.filter((x) => x.ordinal == null))
+
+/** 同一父节点下、树序里紧接其后的叶子兄弟（「与下一节合并」的判据） */
+function nextLeafSibling(n) {
+  const sibs = props.tree.filter((x) => (x.parent_id || '') === (n.parent_id || ''))
+  const i = sibs.findIndex((x) => x.id === n.id)
+  const next = i >= 0 ? sibs[i + 1] : null
+  return next && next.ordinal != null ? next : null
+}
+
+const menuItems = computed(() => {
+  const n = menu.value.node
+  if (!n) return []
+  const isLeaf = n.ordinal != null
+  const items = [
+    { act: 'create', label: '新建子节点', on: () => emit('create', n) },
+  ]
+  if (isLeaf) {
+    items.push(
+      { act: 'insertBefore', label: '在前面插入', on: () => emit('insert', n, 'before') },
+      { act: 'insertAfter', label: '在后面插入', on: () => emit('insert', n, 'after') },
+      { act: 'up', label: '上移', disabled: rankOf(n.id).first, on: () => emit('move', n, 'up') },
+      { act: 'down', label: '下移', disabled: rankOf(n.id).last, on: () => emit('move', n, 'down') },
+      { act: 'duplicate', label: '复制（连子树）', on: () => emit('duplicate', n) },
+      {
+        act: 'split',
+        label: '在光标处拆分',
+        disabled: n.id !== props.splittableId,
+        hint: n.id !== props.splittableId ? '先在正文里放好光标' : '',
+        on: () => emit('split', n),
+      },
+      {
+        act: 'merge',
+        label: '与下一节合并',
+        disabled: !nextLeafSibling(n),
+        hint: nextLeafSibling(n) ? '' : '后面没有叶子兄弟',
+        on: () => emit('merge', n),
+      },
+    )
+  }
+  items.push({ act: 'remove', label: '删除', danger: true, on: () => emit('remove', n) })
+  return items
+})
+
+function runMenu(it) {
+  closeMenu()
+  if (!it.disabled) it.on()
+}
+
+function emitBatch(act) {
+  emit('batch', act, props.selectedIds, { targetId: batchTarget.value })
+  batchTarget.value = ''
+}
+const batchTarget = ref('')
+
+watch(menu, (m) => {
+  if (!m.node) return
+  const onKey = (e) => {
+    if (e.key === 'Escape') {
+      closeMenu()
+      window.removeEventListener('keydown', onKey)
+    }
+  }
+  window.addEventListener('keydown', onKey)
+})
 
 function fmt(n) {
   if (!n) return '0'
@@ -370,13 +552,35 @@ function fmt(n) {
   border-radius: 2px;
   background: var(--run);
 }
-/* 拖起来的那行淡下去；接得住的容器行描一圈，人不至于对着光标猜落点 */
+/* Ctrl/Shift 圈中的行：描一圈虚线，与「正在编辑」的左侧实条区分开 */
+.tree-row.is-picked {
+  background: rgba(var(--run-rgb), 0.07);
+  box-shadow: inset 0 0 0 1px rgba(var(--run-rgb), 0.35);
+}
+/* 拖起来的那行淡下去；落点用「上下沿一条线 / 中间描一圈」区分插入与放进 */
 .tree-row.is-dragging {
   opacity: 0.42;
 }
-.tree-row.is-drop {
+.tree-row.is-drop-inside {
   background: rgba(var(--run-rgb), 0.12);
   box-shadow: inset 0 0 0 1px rgba(var(--run-rgb), 0.45);
+}
+.tree-row.is-drop-before::after,
+.tree-row.is-drop-after::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--run);
+  pointer-events: none;
+}
+.tree-row.is-drop-before::after {
+  top: -1px;
+}
+.tree-row.is-drop-after::after {
+  bottom: -1px;
 }
 .tree-twist {
   flex-shrink: 0;
@@ -487,5 +691,90 @@ function fmt(n) {
 }
 .tree-sep {
   opacity: 0.5;
+}
+/* 多选时替掉统计条：批量动作就摆在这一排，不用回到菜单里一个个点 */
+.tree-batch {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 10px;
+  border-top: 1px solid var(--line-soft);
+  background: rgba(var(--run-rgb), 0.05);
+}
+.batch-n {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-family: theme('fontFamily.mono');
+  color: var(--run);
+}
+.batch-sel {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.ctx-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 160;
+}
+.ctx-menu {
+  position: absolute;
+  width: 220px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 18px 44px -16px rgba(var(--shade-rgb), 0.7);
+}
+.ctx-title {
+  margin: 2px 8px 4px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+.ctx-item:hover {
+  background: rgba(var(--over), 0.07);
+}
+.ctx-item.is-danger {
+  color: var(--danger-fg);
+}
+.ctx-item.is-off,
+.ctx-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.ctx-label {
+  flex-shrink: 0;
+}
+.ctx-hint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--text-faint);
 }
 </style>

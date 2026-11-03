@@ -27,6 +27,7 @@ from app.llm.gateway import Gateway, pick_model
 from app.studio import (
     content_types,
     consistency,
+    exporters,
     graph,
     indexer,
     prompting,
@@ -40,6 +41,7 @@ from app.studio import (
     wechat,
 )
 from app.studio.assembler import assemble, record_used_sources
+from app.studio.docx_import import docx_to_text
 from app.studio.jsonutil import as_list as _as_list
 from app.studio.jsonutil import parse_json_loose as _parse_json_loose
 from app.studio.prompting import node_instruction as _node_instruction
@@ -151,6 +153,20 @@ class NodeMove(BaseModel):
 class NodeReparent(BaseModel):
     # 拖到哪个容器末尾；null 表示搬到顶层
     parent_id: Optional[str] = None
+    # 非空时插到该兄弟节点之前（优先于 parent_id，落点由它的 parent 决定）
+    before_id: str = ""
+
+
+class NodeSplit(BaseModel):
+    # 正文字符下标，升序；第 i 段留在原节，其余各段成为紧跟其后的兄弟节
+    offsets: list[int] = Field(default_factory=list, max_length=20)
+
+
+class NodeMerge(BaseModel):
+    # 从这一节起往后吃几节（含自己），至少 2
+    count: int = Field(2, ge=2, le=50)
+    # 段落间隔；空白串退回空行，免得拼出一坨
+    separator: str = "\n\n"
 
 
 class SourceCreate(BaseModel):
@@ -945,17 +961,72 @@ async def move_node(node_id: str, body: NodeMove, request: Request):
 
 @router.post("/studio/nodes/{node_id}/reparent", dependencies=[Depends(verify_key)])
 async def reparent_node(node_id: str, body: NodeReparent, request: Request):
-    """把一节拖进另一卷末尾（`parent_id` 为 null 则拖回顶层）。
+    """把一节拖进另一卷末尾（`parent_id` 为 null 则拖回顶层），或插到某节之前。
 
+    `before_id` 非空时按「放到这一行前面」处理，落点由那个节点的父级决定。
     与 move 不同，这里的不合法多数是误拖（拖到叶子上、拖进自己、跨作品）：
     404 表示节点或目标不存在，400 带一句人看得懂的原因，前端直接显示。
     """
     try:
-        result = await _store(request).reparent_node(node_id, body.parent_id)
+        result = await _store(request).reparent_node(
+            node_id, body.parent_id, before_id=body.before_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if result is None:
         raise HTTPException(status_code=404, detail="节点或目标不存在")
+    return result
+
+
+@router.post("/studio/nodes/{node_id}/duplicate", dependencies=[Depends(verify_key)])
+async def duplicate_node(node_id: str, request: Request):
+    """复制这一节连同整棵子树，插到原节紧后方。
+
+    只复制树上的壳（正文/节拍卡/计划/状态），版本历史与索引不跟。
+    新节需要前端重新 select：章号会随树序重排，与 reparent 同一口径。
+    """
+    try:
+        result = await _store(request).duplicate_node(node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    return result
+
+
+@router.post("/studio/nodes/{node_id}/split", dependencies=[Depends(verify_key)])
+async def split_node(node_id: str, body: NodeSplit, request: Request):
+    """按字符偏移把一节的正文切成若干节，新节紧跟在原节后面。
+
+    切割点由前端在编辑器里选（光标位置即切点），后端只验越界与顺序。
+    offsets 为空什么也不改（`split: false`），方便前端「没选切点就点拆分」给提示。
+    """
+    try:
+        result = await _store(request).split_node(node_id, body.offsets)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    return result
+
+
+@router.post("/studio/nodes/{node_id}/merge", dependencies=[Depends(verify_key)])
+async def merge_node(node_id: str, body: NodeMerge, request: Request):
+    """把连续几节合并成一节：正文拼进第一节，其余节先落备份再删。
+
+    被吸收的节删前会像单删一样写节点备份（在 storage/backups/nodes/），
+    备份写不成为 500；只吃叶子节，遇到容器或带子节点的节是 400。
+    """
+    store = _store(request)
+    try:
+        result = await store.merge_nodes(node_id, count=body.count,
+                                         separator=body.separator)
+    except BackupError as exc:
+        logger.error(f"[studio] 合并被备份拦住 {node_id}: {exc}")
+        raise HTTPException(status_code=500, detail=_BACKUP_DENIED) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="节点不存在")
     return result
 
 
@@ -1050,6 +1121,30 @@ async def restore_backup_node(filename: str, request: Request):
     if out is None:
         raise HTTPException(status_code=404, detail="备份不存在、读不懂，或那本书已整本删除")
     return out
+
+
+# ==================== DOCX 导入 ====================
+
+@router.post("/studio/import/docx", dependencies=[Depends(verify_key)])
+async def import_docx(request: Request):
+    """把 .docx 解成纯文本（不写库）：前端拿去填进导入弹层，预览、拆节、落库都走老路。
+
+    收原始字节而不是 multipart：那样要新增 python-multipart 依赖，而这一份本来就是
+    单机内网的小工具接口。解析只用标准库（见 `app.studio.docx_import`）。
+    """
+    data = await request.body()
+    try:
+        text = docx_to_text(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not text:
+        raise HTTPException(status_code=400, detail="这份 docx 里没有可读的文字")
+    return {
+        "text": text,
+        "chars": len(text),
+        # 带井号的标题行数：前端拿来提示「按标题拆能不能拆得开」
+        "headings": sum(1 for line in text.splitlines() if line.startswith("#")),
+    }
 
 
 # ==================== 素材 / 事实 / 术语 ====================
@@ -1946,19 +2041,45 @@ class DigestRequest(BaseModel):
 
 @router.get("/studio/works/{work_id}/export", dependencies=[Depends(verify_key)])
 async def export_document(work_id: str, request: Request, include_empty: bool = False,
-                          format: Literal["md", "html"] = "md",
-                          theme: str = "", footer: bool = True, archive: bool = True):
-    """导出：md 存档，html 是公众号编辑器认得的富文本（全部内联样式）。
+                          format: Literal["md", "html", "txt", "docx", "epub"] = "md",
+                          theme: str = "", footer: bool = True, archive: bool = True,
+                          author: str = ""):
+    """导出：md 存档，html 是公众号富文本，txt/docx/epub 是交给编辑与阅读器的成稿。
 
     公众号编辑器不认 Markdown：粘 `.md` 进去只会看到一堆井号。`format=html`
     这一份可以直接写进剪贴板，粘到公众号后台带格式。
 
     `theme` 空串表示用「设置里存的默认版式」；`footer` / `archive` 可以关，
-    用于只想拿一份干净正文的场合。
+    用于只想拿一份干净正文的场合。`author` 只写进 docx/epub 的元数据。
     """
     store = _store(request)
     work = await _require_work(request, work_id)
     safe = re.sub(r'[\\/:*?"<>|]+', "_", work["title"])[:60] or "draft"
+
+    if format in ("txt", "docx", "epub"):
+        sections = await _readable_sections(store, work, include_empty)
+        if not sections:
+            raise HTTPException(status_code=400, detail="还没有可导出的内容")
+        if format == "txt":
+            body = exporters.render_txt(work, sections, author=author).encode("utf-8")
+            media = "text/plain; charset=utf-8"
+        elif format == "docx":
+            body = exporters.render_docx(work, sections, author=author)
+            media = ("application/vnd.openxmlformats-officedocument."
+                     "wordprocessingml.document")
+        else:
+            body = exporters.render_epub(work, sections, author=author)
+            media = "application/epub+zip"
+        encoded = quote(f"{safe}.{format}")
+        return Response(
+            content=body,
+            media_type=media,
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=export.{format}; filename*=UTF-8''{encoded}"),
+                "X-Sections": str(len(sections)),
+            },
+        )
 
     if format == "html":
         sections = await _readable_sections(store, work, include_empty)

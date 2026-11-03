@@ -28,12 +28,20 @@
           :stats="store.stats"
           :target="store.work.target_words || 0"
           :work-id="store.work.id"
+          :selected-ids="[...pickedIds]"
+          :splittable-id="splittableId"
           @select="onSelectNode"
           @create="quickCreate"
           @remove="removeNode"
           @move="moveNode"
           @reparent="onReparent"
           @import="importOpen = true"
+          @update:selected="setPicked"
+          @duplicate="onDuplicate"
+          @split="onSplitHere"
+          @merge="onMergeWithNext"
+          @insert="onInsertSibling"
+          @batch="onBatch"
         />
 
         <main class="editor" :style="writerVars">
@@ -113,7 +121,7 @@
                       title="排进队列，关页面也会继续跑" @click="doEnqueue">
                 <AppIcon name="activity" :size="13" /> 排队
               </button>
-              <button class="btn btn-sm" title="拼装成 Markdown 并下载" @click="store.downloadExport()">
+              <button class="btn btn-sm" title="选择格式导出成稿（md / txt / docx / epub）" @click="exportOpen = true">
                 <AppIcon name="download" :size="13" /> 导出
               </button>
               <button class="btn btn-sm" title="公众号排版预览、发布前检查与一键复制" @click="wechatOpen = true">
@@ -422,6 +430,7 @@
     />
 
     <WechatDialog v-model:open="wechatOpen" @goto="gotoIssue" />
+    <ExportDialog v-model:open="exportOpen" />
     <GlobalSearch v-model:open="searchOpen" :initial="searchSeed" @goto="gotoSearchHit" />
     <ImportDocDialog
       v-model:open="importOpen"
@@ -467,6 +476,7 @@ import StudioPanel from '../components/StudioPanel.vue'
 import AskPanel from '../components/AskPanel.vue'
 import TransformDialog from '../components/TransformDialog.vue'
 import WechatDialog from '../components/WechatDialog.vue'
+import ExportDialog from '../components/ExportDialog.vue'
 import GlobalSearch from '../components/GlobalSearch.vue'
 import ImportDocDialog from '../components/ImportDocDialog.vue'
 import ReplaceDialog from '../components/ReplaceDialog.vue'
@@ -536,6 +546,8 @@ const workDigestDraft = ref('')
 const savingWork = ref(false)
 const digestBusy = ref(false)
 const wechatOpen = ref(false)
+// 导出成稿弹层：格式与署名在这里选，下载动作在弹层里自己收口
+const exportOpen = ref(false)
 
 // 全库搜索弹层：书架与工作台共用（Ctrl+K，或书架上的「搜正文」）
 const searchOpen = ref(false)
@@ -785,10 +797,11 @@ const focus = ref(false)
 function toggleFocus() {
   focus.value = !focus.value
 }
-// Esc 优先给弹层：排版、替换、公众号、加工、搜索、导入、先聊聊、作品信息都算弹层
+// Esc 优先给弹层：排版、替换、公众号、加工、搜索、导入、先聊聊、作品信息、导出都算弹层
 const dialogOpen = computed(() => (
   typeOpen.value || replaceOpen.value || wechatOpen.value || transformOpen.value
   || searchOpen.value || importOpen.value || askOpen.value || workEditOpen.value
+  || exportOpen.value
 ))
 
 // 键盘可达：Ctrl+S 立即存，Ctrl+Enter 生成（见 design-system MASTER.md）
@@ -984,23 +997,221 @@ async function moveNode(node, direction) {
 }
 
 /**
- * 跨卷拖拽：把一节挂到另一卷（或顶层）末尾。
+ * 拖拽落点：放进容器、插到某节之前/之后都走同一条 reparent。
  *
  * 与上下移一样先 flushSave：搬完按树序重排全书章号，摘要、分块与图谱上的
  * 章号引用一起改；编辑器里还没落盘的正文不先存上，重拉回来的节点就会盖掉它。
  * 落点后重跑一次一致性检查（规则按章号判定），再刷右栏上下文。
  */
-async function onReparent(node, target) {
+async function onReparent(node, target, placement = { mode: 'inside' }) {
   await flushSave()
-  const r = await store.reparentNode(node.id, target ? target.id : null)
+  let r
+  if (placement.mode === 'before') {
+    r = await store.reparentNode(node.id, target?.parent_id || null, target?.id)
+  } else if (placement.mode === 'after') {
+    r = await store.reparentNode(
+      node.id, target?.parent_id || null, placement.beforeId || '')
+  } else {
+    r = await store.reparentNode(node.id, target ? target.id : null)
+  }
   if (!r.moved) {
     showNotice(r.reason || '移动失败', true)
     return
   }
-  const where = r.parent_title || '顶层'
-  showNotice(`已把「${node.title}」移到「${where}」末尾，全书章号已重排`)
+  const where = r.before_title
+    ? `「${r.before_title}」之前`
+    : `「${r.parent_title || '顶层'}」末尾`
+  showNotice(`已把「${node.title}」移到${where}，全书章号已重排`)
   await store.runCheck()
   await panelRef.value?.refreshContext()
+}
+
+// ---- 结构操作（迭代 B）：复制 / 拆分 / 合并 / 相邻插入 / 多选批量 ----
+// 多选集合只属于这一屏：换作品要清空，不然 id 对到另一本书上就串了
+const pickedIds = ref(new Set())
+function setPicked(ids) {
+  pickedIds.value = new Set(ids || [])
+}
+watch(() => store.work?.id, () => setPicked([]))
+
+/** 只有当前选中的这一节能拆（光标在它正文里）：空正文也没意义 */
+const splittableId = computed(() => (
+  store.node && (store.node.content || '').trim() ? store.node.id : ''
+))
+
+/** 结构动作前的统一一步：正文必须先落盘，后面的章号重排才对得上库里的内容 */
+async function prepareStructure() {
+  setPicked([])
+  return flushSave()
+}
+
+async function finishStructure(msg) {
+  showNotice(msg)
+  await store.runCheck()
+  await panelRef.value?.refreshContext()
+}
+
+async function onDuplicate(node) {
+  if (!(await prepareStructure())) return
+  const r = await store.duplicateNode(node.id)
+  if (!r.ok) {
+    showNotice(r.reason || '复制失败', true)
+    return
+  }
+  // 编辑器里那份是原节的正文：新节同文，不重灌草稿就会把原节旧字再存回新节
+  contentDraft.value = store.node?.content || ''
+  saveState.value = 'saved'
+  await finishStructure(`已复制出「${node.title}」的副本，全书章号已重排`)
+}
+
+async function onSplitHere(node) {
+  if (!editorEl.value || node.id !== store.node?.id) return
+  if (!(contentDraft.value || '').trim()) {
+    showNotice('这一节还没有正文，拆不出东西', true)
+    return
+  }
+  // v-model 让草稿就是编辑器此刻的内容：下面 prepareStructure 落盘的就是这一份
+  const pos = editorEl.value.selectionStart ?? -1
+  const len = (contentDraft.value || '').length
+  if (pos <= 0 || pos >= len) {
+    showNotice('先把光标放到正文中间：拆分按光标位置切成前后两节', true)
+    return
+  }
+  if (!(await prepareStructure())) return
+  const r = await store.splitNode(node.id, [pos])
+  if (!r.ok) {
+    showNotice(r.reason || '拆分失败', true)
+    return
+  }
+  if (!r.split) {
+    showNotice('没切开：光标不在正文里', true)
+    return
+  }
+  contentDraft.value = store.node?.content || ''
+  saveState.value = 'saved'
+  await finishStructure(`已拆成 ${r.parts.length} 节，切出的那一节紧跟在后面`)
+}
+
+async function onMergeWithNext(node) {
+  const sibs = store.tree.filter((x) => (x.parent_id || '') === (node.parent_id || ''))
+  const i = sibs.findIndex((x) => x.id === node.id)
+  const next = i >= 0 ? sibs[i + 1] : null
+  if (!next || next.ordinal == null) {
+    showNotice('后面没有可合并的叶子兄弟：合并只吃紧接其后的章/节', true)
+    return
+  }
+  if (!window.confirm(
+    `把「${node.title}」与「${next.title}」合成一节？\n\n`
+    + '正文按顺序拼进前一节；被合掉的那节删前会先落备份，可找回。',
+  )) return
+  if (!(await prepareStructure())) return
+  const r = await store.mergeNodes(node.id, 2)
+  if (!r.ok) {
+    showNotice(r.reason || '合并失败', true)
+    return
+  }
+  contentDraft.value = store.node?.content || ''
+  saveState.value = 'saved'
+  await finishStructure(`已合并为「${r.title}」，全书章号已重排`)
+}
+
+/** 右键菜单的「在前面/后面插入」：建一个空兄弟节，落在指定位 */
+async function onInsertSibling(node, where) {
+  if (!(await prepareStructure())) return
+  const meta = scaleMeta.value
+  const kind = node.kind === 'volume' ? (meta?.leaf_kind || 'chapter') : node.kind
+  const label = meta?.leaf_label || '节'
+  const got = await store.createNode({ kind, title: `新${label}`, parent_id: node.parent_id || null })
+  if (!got) {
+    showNotice(store.error || '建不起来', true)
+    return
+  }
+  let r
+  if (where === 'before') {
+    r = await store.reparentNode(got.id, node.parent_id || null, node.id)
+  } else {
+    const sibs = store.tree.filter((x) => (x.parent_id || '') === (node.parent_id || ''))
+    const i = sibs.findIndex((x) => x.id === node.id)
+    const next = i >= 0 ? sibs[i + 1] : null
+    r = next
+      ? await store.reparentNode(got.id, node.parent_id || null, next.id)
+      : await store.reparentNode(got.id, node.parent_id || null)
+  }
+  if (!r.moved) {
+    showNotice(r.reason || '位置没调成，新节在这一层末尾', true)
+    return
+  }
+  contentDraft.value = ''
+  saveState.value = 'saved'
+  await finishStructure(`已在「${node.title}」${where === 'before' ? '前面' : '后面'}插了一节`)
+}
+
+/** 批量：移入容器 / 逐对合并 / 删除。都沿用同一个后端接口，不另开门 */
+async function onBatch(act, ids, opts = {}) {
+  const leaves = store.tree.filter((n) => ids.includes(n.id) && n.ordinal != null)
+  if (!leaves.length) {
+    showNotice('选里的容器不参与批量：只圈章与节', true)
+    return
+  }
+  if (!(await prepareStructure())) return
+  if (act === 'move') {
+    let moved = 0
+    for (const n of leaves) {
+      if (n.id === opts.targetId) continue
+      const r = await store.reparentNode(n.id, opts.targetId)
+      if (r.moved) moved += 1
+      else if (r.reason && r.reason !== '已经在这一卷末尾') showNotice(r.reason, true)
+    }
+    await finishStructure(`已把 ${moved} 节移入目标容器，全书章号已重排`)
+    return
+  }
+  if (act === 'merge') {
+    // 按同一父节点下紧相邻的段逐段合并：选 4 连节 → 收成 1 节
+    const groups = []
+    let cur = []
+    for (const n of store.tree) {
+      if (n.ordinal == null) { cur = []; continue }
+      if (!leaves.some((x) => x.id === n.id)) { cur = []; continue }
+      if (cur.length && (cur[0].parent_id || '') !== (n.parent_id || '')) { cur = []; }
+      cur.push(n)
+      if (cur.length >= 2) {
+        if (groups.length && groups[groups.length - 1].slice(-1)[0] === cur[0]) continue
+        groups.push([...cur])
+      }
+    }
+    const runs = groups.filter((g) => {
+      // 去掉被上一段吃掉开头的 group：[a,b] 与 [b,c] 只保留 [a,b,c] 那一条链
+      const prev = groups[groups.indexOf(g) - 1]
+      return !(prev && prev.includes(g[0]))
+    })
+    if (!runs.length) {
+      showNotice('批量合并要选紧相邻的同层节：中间隔了别的就合不了', true)
+      return
+    }
+    let done = 0
+    for (const run of runs) {
+      const r = await store.mergeNodes(run[0].id, run.length)
+      if (r.ok) done += r.merged - 1
+      else showNotice(r.reason || '有段没合上', true)
+    }
+    contentDraft.value = store.node?.content || ''
+    saveState.value = 'saved'
+    await finishStructure(done ? `已合并掉 ${done} 节` : '一节都没合上')
+    return
+  }
+  if (act === 'remove') {
+    if (!window.confirm(
+      `删除选中的 ${leaves.length} 节（连同各自子树）？\n\n`
+      + '每一节删前都会先落备份，可用 scripts/restore_backup.py 找回。',
+    )) return
+    let gone = 0
+    for (const n of leaves) {
+      if (await store.deleteNode(n.id)) gone += 1
+      else showNotice(store.error || `「${n.title}」删掉了但备份没写成`, true)
+    }
+    await store.afterStructureChange()
+    await finishStructure(`已删除 ${gone} 节，全书章号已重排`)
+  }
 }
 
 function onInput() {

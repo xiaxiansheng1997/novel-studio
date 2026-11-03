@@ -1014,6 +1014,40 @@ class StudioStore:
             me = await cur.fetchone()
             if not me:
                 return {"moved": False, "reason": "节点不存在"}
+            if me["ordinal"] is None:
+                # 容器（卷 / 篇）也允许上下移：交换的是整棵子树的 path 前缀，
+                # 再按新的树序重排全书章号。只换 ordinal 不换 path 的话，
+                # 树是按 path 排的，卷会一动不动。
+                parent = me["parent_id"]
+                args: list[Any] = [me["work_id"]]
+                link = "parent_id = ?" if parent else "parent_id IS NULL"
+                if parent:
+                    args.append(parent)
+                op, order = ("<", "DESC") if direction == "up" else (">", "ASC")
+                cur = await self._db.execute(
+                    f"SELECT id, path, title FROM nodes "
+                    f"WHERE work_id = ? AND {link} AND ordinal IS NULL AND path {op} ? "
+                    f"ORDER BY path {order} LIMIT 1",
+                    [*args, me["path"]],
+                )
+                other = await cur.fetchone()
+                if not other:
+                    return {"moved": False, "reason": "已到边界"}
+                now = _now()
+                tmp = f"~{me['id'].replace('_', '')}"
+                await self._repath_locked(me["work_id"], me["path"], tmp)
+                await self._repath_locked(me["work_id"], other["path"], me["path"])
+                await self._repath_locked(me["work_id"], tmp, other["path"])
+                renumbered = await self._renumber_locked(me["work_id"])
+                await self._db.execute(
+                    "UPDATE works SET updated_at = ? WHERE id = ?", (now, me["work_id"])
+                )
+                await self._mark_index_dirty_locked(me["work_id"])
+                await self._db.commit()
+                return {
+                    "moved": True, "direction": direction, "ordinal": None,
+                    "swapped_with_title": other["title"], "renumbered": renumbered,
+                }
             mine = int(me["ordinal"] or 0)
             if mine <= 0:
                 return {"moved": False, "reason": "容器节点不参与排序"}
@@ -1118,16 +1152,18 @@ class StudioStore:
                 )
         return True
 
-    async def reparent_node(self, node_id: str, parent_id: Optional[str]) -> Optional[dict[str, Any]]:
-        """把一节挂到另一卷末尾（`parent_id` 为 None 表示顶层）。
+    async def reparent_node(
+        self, node_id: str, parent_id: Optional[str], before_id: str = "",
+    ) -> Optional[dict[str, Any]]:
+        """把一节挂到另一卷/章末尾，或插到某个兄弟节点之前。
 
-        只搬有 ordinal 的叶子（章/节），目标必须是同作品的容器（卷/篇）或顶层：
-        卷自己不动（搬整卷要连带重排卷内节号，是另一套交互），落点也只有「目标末尾」
-        （插到某一节之前需要半自动排序，这一轮不做）。
+        `before_id` 非空时优先于 `parent_id`：落点由那个兄弟的 parent 决定，
+        用于拖拽到「某一行之前」。只搬有 ordinal 的叶子（章/节）；容器走
+        `move_node` 的上下移。搬完按 path 重排全书章号（`_renumber_locked`），
+        并标脏索引台账、刷新作品时间。
 
-        搬完按 path 重排全书章号（`_renumber_locked`），并标脏索引台账、刷新作品时间。
-        返回 `{moved, ordinal, parent_title, renumbered}`；已经在目标卷末尾且全书序号
-        已连续时什么都不改，返回 `moved: False`。
+        返回 `{moved, ordinal, parent_title, renumbered}`；插到某节之前时
+        多一个 `before_title`。已经在目标位置且全书序号连续时什么都不改。
         """
         assert self._db is not None
         async with self._lock:
@@ -1141,6 +1177,23 @@ class StudioStore:
             if me["ordinal"] is None:
                 raise ValueError("容器节点不能拖动：这里只搬章与节")
             work_id = me["work_id"]
+
+            before = None
+            if before_id:
+                if before_id == node_id:
+                    raise ValueError("不能插到自己前面")
+                cur = await self._db.execute(
+                    "SELECT id, work_id, parent_id, path, depth, title FROM nodes WHERE id = ?",
+                    (before_id,),
+                )
+                before = await cur.fetchone()
+                if not before:
+                    return None
+                if before["work_id"] != work_id:
+                    raise ValueError("不能跨作品拖动")
+                if str(before["path"]).startswith(f"{me['path']}."):
+                    raise ValueError("不能把节点拖进它自己的子树")
+                parent_id = before["parent_id"]
 
             target = None
             if parent_id:
@@ -1156,46 +1209,87 @@ class StudioStore:
                 if target["work_id"] != work_id:
                     raise ValueError("不能跨作品拖动")
                 if target["ordinal"] is not None:
-                    raise ValueError("目标不是容器：只能落到卷/篇或顶层")
+                    # 章节带节时也算容器；空章仍拒绝，避免把章塞进另一个章里
+                    cur = await self._db.execute(
+                        "SELECT 1 FROM nodes WHERE parent_id = ? LIMIT 1", (parent_id,))
+                    if not await cur.fetchone():
+                        raise ValueError("目标不是容器：只能落到卷/篇或顶层")
                 # 防御：叶子本来没有子树，真有人手工塞出环时别把 path 撞进自家分支
                 if str(target["path"]).startswith(f"{me['path']}."):
                     raise ValueError("不能把节点拖进它自己的子树")
 
-            link = "parent_id = ?" if parent_id else "parent_id IS NULL"
-            args: list[Any] = [work_id, parent_id] if parent_id else [work_id]
-            cur = await self._db.execute(
-                f"SELECT path FROM nodes WHERE work_id = ? AND {link} ORDER BY path DESC LIMIT 1",
-                args,
-            )
-            last = await cur.fetchone()
-            same_parent = (me["parent_id"] or None) == (parent_id or None)
-            at_end = bool(same_parent and last and last["path"] == me["path"])
-
-            cur = await self._db.execute(
-                "SELECT ordinal FROM nodes WHERE work_id = ? AND ordinal IS NOT NULL ORDER BY path",
-                (work_id,),
-            )
-            ords = [int(r["ordinal"]) for r in await cur.fetchall()]
-            if at_end and ords == list(range(1, len(ords) + 1)):
-                return {"moved": False, "reason": "已经在这一卷末尾"}
+            # 同一父节点下已经紧挨在 before 前面：不动
+            if before and (me["parent_id"] or None) == (parent_id or None):
+                link = "parent_id = ?" if parent_id else "parent_id IS NULL"
+                args: list[Any] = [work_id, parent_id] if parent_id else [work_id]
+                cur = await self._db.execute(
+                    f"SELECT id FROM nodes WHERE work_id = ? AND {link} ORDER BY path", args)
+                ids = [r["id"] for r in await cur.fetchall()]
+                if node_id in ids and before_id in ids:
+                    if ids.index(before_id) == ids.index(node_id) + 1:
+                        return {"moved": False, "reason": "已经在这个位置"}
 
             now = _now()
-            if not at_end:
-                seq = await self._next_seq(work_id, parent_id)
-                new_path = f"{target['path'] + '.' if target else ''}{seq:04d}"
+            if before:
+                # 先落到目标父节点下的临时 path，再把这一层兄弟按 path 重排。
+                # 两段式（全部先挪到 ~i，再写 0001..N）是为了避开
+                # UNIQUE(work_id, path)：插到最前面时，0001 还占着位置。
+                prefix = f"{target['path']}." if target else ""
+                temp = f"{prefix}~{node_id.replace('_', '')}"
                 new_depth = int(target["depth"]) + 1 if target else 0
-                # 先把 path 换掉，depth 按差值整棵子树平移（叶子没有子树，
-                # 但接口不该因为「现在没有」就在将来悄悄错位）
-                await self._repath_locked(work_id, me["path"], new_path)
+                await self._repath_locked(work_id, me["path"], temp)
                 await self._db.execute(
                     "UPDATE nodes SET depth = depth + ? "
                     "WHERE work_id = ? AND (path = ? OR path LIKE ?)",
-                    (new_depth - int(me["depth"]), work_id, new_path, f"{new_path}.%"),
+                    (new_depth - int(me["depth"]), work_id, temp, f"{temp}.%"),
                 )
                 await self._db.execute(
                     "UPDATE nodes SET parent_id = ?, updated_at = ? WHERE id = ?",
                     (parent_id, now, node_id),
                 )
+                link = "parent_id = ?" if parent_id else "parent_id IS NULL"
+                args = [work_id, parent_id] if parent_id else [work_id]
+                cur = await self._db.execute(
+                    f"SELECT id FROM nodes WHERE work_id = ? AND {link} ORDER BY path", args)
+                ids = [r["id"] for r in await cur.fetchall()]
+                ids.remove(node_id)
+                ids.insert(ids.index(before_id), node_id)
+                await self._reorder_siblings_locked(work_id, parent_id, prefix, ids)
+            else:
+                link = "parent_id = ?" if parent_id else "parent_id IS NULL"
+                args = [work_id, parent_id] if parent_id else [work_id]
+                cur = await self._db.execute(
+                    f"SELECT path FROM nodes WHERE work_id = ? AND {link} ORDER BY path DESC LIMIT 1",
+                    args,
+                )
+                last = await cur.fetchone()
+                same_parent = (me["parent_id"] or None) == (parent_id or None)
+                at_end = bool(same_parent and last and last["path"] == me["path"])
+
+                cur = await self._db.execute(
+                    "SELECT ordinal FROM nodes WHERE work_id = ? AND ordinal IS NOT NULL ORDER BY path",
+                    (work_id,),
+                )
+                ords = [int(r["ordinal"]) for r in await cur.fetchall()]
+                if at_end and ords == list(range(1, len(ords) + 1)):
+                    return {"moved": False, "reason": "已经在这一卷末尾"}
+
+                if not at_end:
+                    seq = await self._next_seq(work_id, parent_id)
+                    new_path = f"{target['path'] + '.' if target else ''}{seq:04d}"
+                    new_depth = int(target["depth"]) + 1 if target else 0
+                    # 先把 path 换掉，depth 按差值整棵子树平移（叶子没有子树，
+                    # 但接口不该因为「现在没有」就在将来悄悄错位）
+                    await self._repath_locked(work_id, me["path"], new_path)
+                    await self._db.execute(
+                        "UPDATE nodes SET depth = depth + ? "
+                        "WHERE work_id = ? AND (path = ? OR path LIKE ?)",
+                        (new_depth - int(me["depth"]), work_id, new_path, f"{new_path}.%"),
+                    )
+                    await self._db.execute(
+                        "UPDATE nodes SET parent_id = ?, updated_at = ? WHERE id = ?",
+                        (parent_id, now, node_id),
+                    )
 
             renumbered = await self._renumber_locked(work_id)
             await self._db.execute(
@@ -1206,12 +1300,326 @@ class StudioStore:
 
             cur = await self._db.execute("SELECT ordinal FROM nodes WHERE id = ?", (node_id,))
             ordinal = int((await cur.fetchone())["ordinal"])
-        return {
+        result = {
             "moved": True,
             "ordinal": ordinal,
             "parent_title": target["title"] if target else "",
             "renumbered": renumbered,
         }
+        if before:
+            result["before_title"] = before["title"]
+        return result
+
+    async def _reorder_siblings_locked(
+        self, work_id: str, parent_id: Optional[str], prefix: str,
+        ordered_ids: list[str],
+    ) -> None:
+        """按给定顺序重排一层兄弟的 path。**调用方必须已持有 self._lock**。
+
+        两段式（先整体挪到 `~i`，再写 `0001..N`）是为了避开
+        `UNIQUE(work_id, path)`：插到最前面时，`0001` 还占着位置。
+        reparent 的「插到某节之前」与 duplicate 的「复制到原节之后」
+        都用这一套：三处各写一遍的话，迟早只有一处修 UNIQUE 的坑。
+        """
+        assert self._db is not None
+        for i, cid in enumerate(ordered_ids):
+            cur = await self._db.execute("SELECT path FROM nodes WHERE id = ?", (cid,))
+            row = await cur.fetchone()
+            if not row:
+                raise ValueError(f"兄弟节点不存在: {cid}")
+            await self._repath_locked(work_id, row["path"], f"{prefix}~{i}")
+        for i, cid in enumerate(ordered_ids):
+            await self._repath_locked(work_id, f"{prefix}~{i}", f"{prefix}{i + 1:04d}")
+
+    @staticmethod
+    def _subtree_order(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """把子树按「父先于子、同层按 path」排——克隆插回时必须按这个顺序建。
+
+        `parent_id` 有外键指向 `nodes(id)`，子行必须等父行插完才能写；
+        depth 升序 + path 恰好就是这个顺序（path 字典序本来就是「先序即树序」）。
+        """
+        return sorted(rows, key=lambda r: (int(r["depth"]), str(r["path"])))
+
+    async def duplicate_node(self, node_id: str) -> Optional[dict[str, Any]]:
+        """复制这一节连同整棵子树，插到原节的紧后方。
+
+        只搬树上的壳：`content` / `summary`（节拍卡）/ `plan_json` / `status`
+        跟着走；版本历史、摘要表、索引分块都不复制——新节的内容
+        是自己正文的初稿，不是原节的历史。字数不进写作日历：那是复制不是创作。
+
+        插完按树序重排全书章号（`_renumber_locked`）并标脏索引台账，
+        与 reparent 同一套收口。返回 `{ok, new_node_id, copied, renumbered}`；节点不存在返回 None。
+        """
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT * FROM nodes WHERE id = ?", (node_id,))
+            me = await cur.fetchone()
+            if not me:
+                return None
+            me = dict(me)
+            work_id = me["work_id"]
+
+            # 整棵子树（含自己）：删除用的那套谓词（等于 id 或 path 前缀）在这里同样成立
+            cur = await self._db.execute(
+                "SELECT * FROM nodes WHERE work_id = ? AND (id = ? OR path LIKE ?)",
+                (work_id, node_id, f"{me['path']}.%"))
+            rows = [dict(r) for r in await cur.fetchall()]
+            cur = await self._db.execute("SELECT kind FROM works WHERE id = ?", (work_id,))
+            work_row = await cur.fetchone()
+            if not work_row:
+                return None
+
+            new_ids: dict[str, str] = {r["id"]: _new_id("n_") for r in rows
+                                       if str(r["path"]) == me["path"]
+                                       or str(r["path"]).startswith(f"{me['path']}.")}
+            by_id = {r["id"]: r for r in rows}
+            clone_root = new_ids[node_id]
+            parent_id = me["parent_id"]
+            prefix = f"{me['path'].rsplit('.', 1)[0]}." if "." in me["path"] else ""
+
+            # 克隆整棵子树先落在同层临时 path（带子树后缀，不撞兄弟的 0001..N）：
+            # 库里有了这些行，后面的兄弟重排才能把它们当真实节点排序
+            # （与 reparent 的 before 分支同一段两段式临时名逻辑）
+            now = _now()
+            try:
+                await self._db.execute(
+                    "INSERT INTO nodes(id, work_id, parent_id, path, depth, ordinal, kind, title, "
+                    "content, status, word_count, content_hash, summary, plan_json, created_at, updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (clone_root, work_id, parent_id, f"{prefix}~{clone_root.replace('_', '')}",
+                     int(me["depth"]), me["ordinal"], me["kind"], me["title"], me["content"], me["status"],
+                     int(me["word_count"] or 0), me["content_hash"] or "",
+                     me["summary"] or "", me["plan_json"] or "{}", now, now))
+                child_rows = self._subtree_order([r for r in rows if r["id"] != node_id])
+                for r in child_rows:
+                    # 父在子前：新父要么本轮已插（在 new_ids 里查到），要么就是原父（根克隆的 parent）
+                    np = new_ids.get(r["parent_id"]) or parent_id
+                    cur = await self._db.execute("SELECT path FROM nodes WHERE id = ?", (np,))
+                    prow = await cur.fetchone()
+                    if not prow:
+                        raise ValueError(f"新父节点不在库里: {np}")
+                    pp = prow["path"]
+                    rel = str(r["path"]).removeprefix(str(by_id[r["parent_id"]]["path"])).lstrip(".")
+                    await self._db.execute(
+                        "INSERT INTO nodes(id, work_id, parent_id, path, depth, ordinal, kind, title, "
+                        "content, status, word_count, content_hash, summary, plan_json, created_at, updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (new_ids[r["id"]], work_id, np, f"{pp}.{rel}", int(r["depth"]),
+                         r["ordinal"], r["kind"], r["title"], r["content"], r["status"],
+                         int(r["word_count"] or 0), r["content_hash"] or "",
+                         r["summary"] or "", r["plan_json"] or "{}", now, now))
+
+                # 把临时名里的克隆根（只根这一层）插到原节之后，整层重排 path；
+                # 克隆子树跟着根走——_repath_locked 换的是整段前缀
+                link = "parent_id = ?" if parent_id else "parent_id IS NULL"
+                args: list[Any] = [work_id] + ([parent_id] if parent_id else [])
+                cur = await self._db.execute(
+                    f"SELECT id FROM nodes WHERE work_id = ? AND {link} ORDER BY path", args)
+                sib_ids = [r["id"] for r in await cur.fetchall()]
+                sib_ids.remove(clone_root)
+                sib_ids.insert(sib_ids.index(node_id) + 1, clone_root)
+                await self._reorder_siblings_locked(work_id, parent_id, prefix, sib_ids)
+
+                renumbered = await self._renumber_locked(work_id)
+                await self._db.execute(
+                    "UPDATE works SET updated_at = ? WHERE id = ?", (now, work_id))
+                await self._mark_index_dirty_locked(work_id)
+                await self._db.commit()
+            except BaseException:
+                # 事务半途失败必须回滚：不然这半截克隆留在连接里，
+                # 会被下一次写操作的 commit 一起带进库（merge_nodes 同一口径）
+                await self._db.rollback()
+                raise
+        return {"ok": True, "new_node_id": clone_root, "copied": len(rows),
+                "renumbered": renumbered}
+
+    async def split_node(self, node_id: str, offsets: list[int]) -> Optional[dict[str, Any]]:
+        """按字符偏移把一节的正文切成若干节，新节紧跟在原节后面。
+
+        `offsets` 是切割点（正文下标，升序、不含首尾），第 i 段留在原节，
+        其余各段成为同级兄弟节——与 reparent 同层，不跨容器。
+        有子节点的容器切不了：正文在章上而子节跟着章走，切开之后那套
+        层级没有合理解释，让人自己在树上搬。
+
+        原节的节拍卡（summary）不自动分给两段——节拍卡写的是整节的意思，
+        猜一半是编数据；置空后由计划页重抽。plan_json 各段都带上同一份计划。
+        """
+        assert self._db is not None
+        clean = sorted({int(o) for o in offsets or [] if 0 < int(o)})
+        async with self._lock:
+            cur = await self._db.execute("SELECT * FROM nodes WHERE id = ?", (node_id,))
+            row = await cur.fetchone()
+            if not row:
+                return None
+            me = dict(row)
+            work_id = me["work_id"]
+            content = me["content"] or ""
+            if not clean:
+                return {"ok": True, "node_id": node_id, "parts": [node_id], "split": False}
+            if max(clean) >= len(content):
+                raise ValueError(f"切割点越界：正文只有 {len(content)} 字")
+            cur = await self._db.execute(
+                "SELECT 1 FROM nodes WHERE parent_id = ? LIMIT 1", (node_id,))
+            if await cur.fetchone():
+                raise ValueError("这一节下面还有子节点：切分只针对有正文的叶子")
+
+            now = _now()
+            try:
+                bounds = [0, *clean, len(content)]
+                parts = [content[bounds[i]:bounds[i + 1]] for i in range(len(bounds) - 1)]
+                # 原节只留第一段：正文变了，下游摘要与索引按 update 同一套规则失效
+                await self._db.execute(
+                    "UPDATE nodes SET content = ?, word_count = ?, content_hash = ?, summary = '', "
+                    "updated_at = ? WHERE id = ?",
+                    (parts[0], _count_words(parts[0]), _hash(parts[0]) if parts[0] else "",
+                     now, node_id))
+                await self._mark_stale_locked(work_id, node_id)
+
+                new_ids: list[str] = []
+                for i, part in enumerate(parts[1:], start=2):
+                    nid = _new_id("n_")
+                    title = self._part_title(me["title"], i)
+                    seq = await self._next_seq(work_id, me["parent_id"])
+                    ppath = ""
+                    if me["parent_id"]:
+                        cur = await self._db.execute(
+                            "SELECT path FROM nodes WHERE id = ?", (me["parent_id"],))
+                        ppath = (await cur.fetchone())["path"] + "."
+                    await self._db.execute(
+                        "INSERT INTO nodes(id, work_id, parent_id, path, depth, ordinal, kind, title, "
+                        "content, status, word_count, content_hash, summary, plan_json, created_at, updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (nid, work_id, me["parent_id"], f"{ppath}{seq:04d}", int(me["depth"]),
+                         me["ordinal"], me["kind"], title, part, "draft",
+                         _count_words(part), _hash(part) if part else "", "",
+                         me["plan_json"] or "{}", now, now))
+                    new_ids.append(nid)
+                    await self._mark_stale_locked(work_id, nid)
+                # 新节按插入顺序落在原节后面：重排这一层，把刚追到末尾的几节插回原位
+                link = "parent_id = ?" if me["parent_id"] else "parent_id IS NULL"
+                args = [work_id, me["parent_id"]] if me["parent_id"] else [work_id]
+                cur = await self._db.execute(
+                    f"SELECT id FROM nodes WHERE work_id = ? AND {link} ORDER BY path", args)
+                ids = [r["id"] for r in await cur.fetchall()]
+                # 倒着插才正：每次都插到「紧挨原节」的位置，后插的把先插的往后顶
+                for nid in reversed(new_ids):
+                    ids.remove(nid)
+                    ids.insert(ids.index(node_id) + 1, nid)
+                prefix = ppath
+                await self._reorder_siblings_locked(work_id, me["parent_id"], prefix, ids)
+                renumbered = await self._renumber_locked(work_id)
+                await self._db.execute(
+                    "UPDATE works SET updated_at = ? WHERE id = ?", (now, work_id))
+                await self._mark_index_dirty_locked(work_id)
+                await self._db.commit()
+            except BaseException:
+                # 切到一半失败（越界、重排撞键）不能把半截段落留在连接里：
+                # 不回滚的话，下一次写操作的 commit 会把这些没成形的节一并带进库
+                await self._db.rollback()
+                raise
+        return {"ok": True, "node_id": node_id, "parts": [node_id, *new_ids],
+                "split": True, "renumbered": renumbered}
+
+    @staticmethod
+    def _part_title(base: str, index: int) -> str:
+        """拆分出的第 index 段的名字：结尾已经是数字的直接追加，否则加括号后缀。"""
+        base = (base or "").strip() or "未命名"
+        if base and base[-1].isdigit():
+            return f"{base}{index}"[:60]
+        return f"{base}（{index}）"[:60]
+
+    async def merge_nodes(
+        self, node_id: str, count: int = 2, separator: str = "\n\n",
+    ) -> Optional[dict[str, Any]]:
+        """把连续几节合并成一节：正文按顺序拼进第一节，其余节连同子树删除。
+
+        只吃「没有子节点的叶子节」：章带节时「合并两章」真正要合的是两棵子树，
+        那一版先不做，把树搬来搬去交给拖拽。被吸收的节在删除前会像
+        `delete_node` 一样先落备份——合并本质上是一次删除，退路必须一样。
+
+        第一节的节拍卡不自动拼接（与拆分同一取向），置空重抽；
+        删完同样走章号重排与索引标脏。
+        """
+        assert self._db is not None
+        n = max(2, int(count))
+        async with self._lock:
+            cur = await self._db.execute("SELECT * FROM nodes WHERE id = ?", (node_id,))
+            row = await cur.fetchone()
+            if not row:
+                return None
+            me = dict(row)
+            work_id = me["work_id"]
+            if me["ordinal"] is None:
+                raise ValueError("容器不参与合并：只合有正文的章与节")
+            link = "parent_id = ?" if me["parent_id"] else "parent_id IS NULL"
+            args: list[Any] = [work_id] + ([me["parent_id"]] if me["parent_id"] else [])
+            cur = await self._db.execute(
+                f"SELECT id FROM nodes WHERE work_id = ? AND {link} ORDER BY path", args)
+            ids = [r["id"] for r in await cur.fetchall()]
+            idx = ids.index(node_id)
+            absorb_ids = ids[idx + 1: idx + n]
+            if not absorb_ids:
+                raise ValueError("后面没有可合并的节了")
+
+            targets: list[dict[str, Any]] = []
+            for aid in absorb_ids:
+                cur = await self._db.execute("SELECT * FROM nodes WHERE id = ?", (aid,))
+                t = await cur.fetchone()
+                if not t:
+                    raise ValueError(f"节点不存在: {aid}")
+                t = dict(t)
+                if t["ordinal"] is None:
+                    raise ValueError("遇到容器节点：只合有正文的章与节")
+                cur = await self._db.execute(
+                    "SELECT 1 FROM nodes WHERE parent_id = ? LIMIT 1", (aid,))
+                if await cur.fetchone():
+                    raise ValueError("这一节下面还有子节点：合并只吃叶子")
+                targets.append(t)
+
+            sep = separator if separator.strip() else "\n\n"
+            pieces = [me["content"] or ""] + [t["content"] or "" for t in targets]
+            merged = sep.join(p for p in pieces if p)
+            titles = [me["title"]] + [t["title"] for t in targets]
+            title = me["title"]
+            if len("／".join(titles)) <= 60:
+                title = "／".join(titles)
+            now = _now()
+            try:
+                await self._db.execute(
+                    "UPDATE nodes SET content = ?, word_count = ?, content_hash = ?, title = ?, "
+                    "summary = '', updated_at = ? WHERE id = ?",
+                    (merged, _count_words(merged), _hash(merged) if merged else "",
+                     title, now, node_id))
+                await self._mark_stale_locked(work_id, node_id)
+
+                for t in targets:
+                    # 与 delete_node 同一条路：每删一节先落备份。整段在同一次持锁里、
+                    # 最后才 commit：备份写不成（BackupError）时下面的回滚把正文拼接一起抹掉，
+                    # 不会留下「正文已拼好、原节没备份」的半截状态
+                    bundle = await self._node_backup_bundle_locked(t["id"])
+                    if bundle is None:
+                        raise ValueError(f"节点不存在: {t['id']}")
+                    self._write_node_backup(bundle)
+                    where = "work_id = ? AND (id = ? OR path LIKE ?)"
+                    params = (work_id, t["id"], f"{bundle['path']}.%")
+                    cur = await self._db.execute(f"SELECT id FROM nodes WHERE {where}", params)
+                    await self._drop_unit_rows("node", [r["id"] for r in await cur.fetchall()])
+                    await self._db.execute(f"DELETE FROM nodes WHERE {where}", params)
+
+                renumbered = await self._renumber_locked(work_id)
+                await self._db.execute(
+                    "UPDATE works SET updated_at = ? WHERE id = ?", (now, work_id))
+                await self._mark_index_dirty_locked(work_id)
+                await self._db.commit()
+            except BaseException:
+                # 备份写不成或删到一半出错：这一阵子里的所有改动一起退回，
+                # 不回滚的话它们会挂连接上、被下一次写操作顺手 commit 进库
+                await self._db.rollback()
+                raise
+        return {"ok": True, "node_id": node_id, "merged": 1 + len(targets),
+                "title": title, "word_count": _count_words(merged),
+                "renumbered": renumbered}
 
     async def _drop_unit_rows(self, ref_kind: str, ref_ids: list[str]) -> None:
         """清掉一个节点/素材被删后不受外键保护的那些行。**调用方必须已持有 self._lock**。

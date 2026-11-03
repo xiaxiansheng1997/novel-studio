@@ -642,6 +642,24 @@ export const useStudioStore = defineStore('studio', () => {
     return { created, failed, firstId }
   }
 
+  /**
+   * 传一份 .docx 给后端解成纯文本：不写库，解出来的文本填进导入弹层继续预览。
+   * 收原始字节（octet-stream），后端不需要 multipart。
+   */
+  async function docxToText(file) {
+    try {
+      const r = await apiFetch('/studio/import/docx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      })
+      if (!r.ok) return { ok: false, reason: await errDetail(r, 'docx 解析失败') }
+      return { ok: true, ...(await r.json()) }
+    } catch (e) {
+      return { ok: false, reason: `文件没传上去：${String(e?.message || e)}` }
+    }
+  }
+
   /** 删节点连同子树。备份写不成时后端会拒绝删除，这里把原因带到 error 上 */
   async function deleteNode(id) {
     const r = await apiFetch(`/studio/nodes/${id}`, { method: 'DELETE' })
@@ -683,18 +701,19 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   /**
-   * 跨卷拖拽：把一节挂到另一卷末尾（`parentId` 为 null 表示顶层）。
+   * 跨卷拖拽：把一节挂到另一卷末尾（`parentId` 为 null 表示顶层），
+   * 或插到某个兄弟节点之前（`beforeId` 非空时优先）。
    *
    * 搬完按树序把全书章号重排，树必须整棵重拉；当前节即便不是被搬的那一节，
    * 它的 ordinal 也可能变了，所以只要还选着节点就重新 select 一次把章号带回。
    * 同一 id 重新 select 不会触发视图重灌草稿（watch 盯的是 id），编辑器里的字还在。
    * 失败把接口那句人话带到 error 上，由调用方当提示显示。
    */
-  async function reparentNode(id, parentId) {
+  async function reparentNode(id, parentId, beforeId = '') {
     const r = await apiFetch(`/studio/nodes/${id}/reparent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ parent_id: parentId || null }),
+      body: JSON.stringify({ parent_id: parentId || null, before_id: beforeId || '' }),
     })
     if (!r.ok) {
       error.value = await errDetail(r, '移动失败')
@@ -705,6 +724,80 @@ export const useStudioStore = defineStore('studio', () => {
       tree.value = await (await apiFetch(`/studio/works/${work.value.id}/tree`)).json()
       const current = node.value?.id
       if (current) await selectNode(current)
+    }
+    return res
+  }
+
+  /**
+   * 结构操作后的统一收尾：树重拉 + 把「当前还选着的那一节」重新 select 一次带回新章号。
+   * 与 reparent 同一个口径：章号重排是全 book 的，不只动被操作的那一节。
+   * `focusId` 非空时改为选中新节（复制/拆分要跳到产物）；传入已删节的 id 时自动退回。
+   */
+  async function afterStructureChange(focusId = '') {
+    if (!work.value) return
+    tree.value = await (await apiFetch(`/studio/works/${work.value.id}/tree`)).json()
+    const target = focusId || node.value?.id
+    // 当前节被合掉/删掉了：不退回就会停在一片空草稿上
+    if (target && !tree.value.some((x) => x.id === target)) {
+      if (node.value?.id === target) node.value = null
+    } else if (target) {
+      await selectNode(target)
+    }
+    const st = await apiFetch(`/studio/works/${work.value.id}/stats`)
+    if (st.ok) stats.value = await st.json()
+  }
+
+  /** 复制一节连子树到原节之后。成功返回新节 id，失败带 reason */
+  async function duplicateNode(id) {
+    const r = await apiFetch(`/studio/nodes/${id}/duplicate`, { method: 'POST' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '复制失败')
+      return { ok: false, reason: error.value }
+    }
+    const res = await r.json()
+    error.value = ''
+    await afterStructureChange(res.new_node_id)
+    return res
+  }
+
+  /** 按光标位置把一节切成若干节（第 1 段留在原节，其余紧跟其后） */
+  async function splitNode(id, offsets) {
+    const r = await apiFetch(`/studio/nodes/${id}/split`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ offsets }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '拆分失败')
+      return { ok: false, reason: error.value }
+    }
+    const res = await r.json()
+    error.value = ''
+    if (res.split) await afterStructureChange()
+    return res
+  }
+
+  /** 从这一节起往后合并 count 节（含自己）：正文拼进第一节，其余节后端先落备份再删 */
+  async function mergeNodes(id, count = 2) {
+    const r = await apiFetch(`/studio/nodes/${id}/merge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '合并失败')
+      return { ok: false, reason: error.value }
+    }
+    const res = await r.json()
+    error.value = ''
+    // 手里正看着被合掉的那一节：先改指到留下来的那一节，afterStructureChange
+    // 才不会把当前节退回 null（后端已把正文拼进第一节，内容没丢）
+    if (node.value?.id && node.value.id !== res.node_id
+      && !tree.value.some((x) => x.id === node.value.id)) {
+      node.value = null
+      await selectNode(res.node_id)
+    } else {
+      await afterStructureChange()
     }
     return res
   }
@@ -1293,18 +1386,24 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  /** 导出要带口令，不能直接 <a href>，否则 401 */
-  async function downloadExport({ includeEmpty = false } = {}) {
-    if (!work.value) return null
-    const r = await apiFetch(
-      `/studio/works/${work.value.id}/export?include_empty=${includeEmpty ? 'true' : 'false'}`,
-    )
+  /**
+   * 导出要带口令，不能直接 <a href>，否则 401。
+   * 格式交给后端拼：md 存档、txt/docx/epub 是成稿；author 只进 docx/epub 元数据。
+   */
+  async function downloadExport({ includeEmpty = false, format = 'md', author = '' } = {}) {
+    if (!work.value) return false
+    const qs = new URLSearchParams({
+      format,
+      include_empty: includeEmpty ? 'true' : 'false',
+    })
+    if (author) qs.set('author', author)
+    const r = await apiFetch(`/studio/works/${work.value.id}/export?${qs}`)
     if (!r.ok) {
-      error.value = `导出失败：HTTP ${r.status}`
-      return null
+      error.value = await errDetail(r, '导出失败')
+      return false
     }
     const blob = await r.blob()
-    saveBlob(blob, `${work.value.title || 'draft'}.md`)
+    saveBlob(blob, `${work.value.title || 'draft'}.${format}`)
     return true
   }
 
@@ -1787,7 +1886,9 @@ export const useStudioStore = defineStore('studio', () => {
     loadTemplates, fetchWorks, createWork, updateWork, setWorkStatus, globalSearch,
     ideas, dailyWrites, loadIdeas, addIdea, useIdea, deleteIdea, loadDailyWrites,
     selectWork, selectNode, deleteWork,
-    saveNode, finalGate, createNode, importNodes, deleteNode, moveNode, reparentNode, replaceText,
+    saveNode, finalGate, createNode, importNodes, docxToText, deleteNode, moveNode, reparentNode, replaceText,
+    // 迭代 B：结构操作与统一收尾（批量操作也走 afterStructureChange 重拉树）
+    duplicateNode, splitNode, mergeNodes, afterStructureChange,
     loadSources, addSource, loadSource, searchSources, extractFacts, deleteSource, updateSource,
     loadFacts, addFact, deleteFact, updateFact,
     loadTerms, addTerm, deleteTerm, updateTerm,
