@@ -1,0 +1,100 @@
+app/studio/store.py
+  s_c7df7c295a4159::t_371135b3ee0a1a 3690-3714
+app/api/studio_routes.py
+  s_c7df7c295a4159::t_c6a9e9bbbf17f1 30,1831-1866
+  s_c7df7c295a4159::t_900ab63860e2d7 3102-3103,3152-3166
+  s_c7df7c295a4159::t_f3456f877148cc 2091-2109
+  s_c7df7c295a4159::t_778f5b775448ad 1656-1657,1867-1868,1892-1904,3167
+frontend/src/stores/studio.js
+  s_c7df7c295a4159::t_3223237a4c1e40 1227,1238,1861,1872,1894-1933,1979-1980
+  s_c7df7c295a4159::t_178730f5256bee 1389-1400,1964
+frontend/package.json
+  s_2f48636382e013::t_92bda2939db624 24,26,29-30
+  s_c7df7c295a4159::t_fa06d0cdfdf12e 9-11
+app/core/registry.py
+  s_c7df7c295a4159::t_ea60bd74162983 21-29,40,70-71,79-82
+frontend/src/router.js
+  s_c7df7c295a4159::t_877f3fa7650471 8-9
+app/providers/openai_compat.py
+  s_c7df7c295a4159::t_fbf66658513a5d 1-130
+app/studio/cost.py
+  s_c7df7c295a4159::t_a11a31ba4f7b1e 1-45,48-123
+  s_c7df7c295a4159::t_5e5705620bf10f 46-47
+frontend/src/components/BatchEstimateDialog.vue
+  s_c7df7c295a4159::t_b54edd5f826fb5 1-311
+app/config.py
+  s_c7df7c295a4159::t_0ebc6f54744a7b 112-123
+frontend/vitest.config.js
+  s_c7df7c295a4159::t_c7f96a2e61f43a 1-12
+scripts/smoke_frontend.py
+  s_c7df7c295a4159::t_1f5895036bac4e 1-129
+scripts/check.ps1
+  s_e171b10445cf7f::t_fa0608f75c7e41 1
+  s_c7df7c295a4159::t_2d8396508e8fab 2,5,25,28-31,38-41
+frontend/src/utils/find.js
+  s_c7df7c295a4159::t_827cd6d51bb1a1 1-25
+tests/test_reading_view.py
+  s_c7df7c295a4159::t_a3f507638b8973 1-89
+tests/test_openai_compat.py
+  s_c7df7c295a4159::t_6d7b927531c332 73,116,140,152,256-257
+  s_c7df7c295a4159::t_903492147de187 1-72,74-115,117-139,141-151,153-255,258-260
+frontend/tests/BatchEstimateDialog.spec.js
+  s_c7df7c295a4159::t_29bc015654151c 1-92
+.env.example
+  s_c7df7c295a4159::t_72d739c522e0f9 25-28
+tests/test_pipeline_estimate.py
+  s_c7df7c295a4159::t_909aab104a52af 21,58,165-169,174-176,219
+  s_c7df7c295a4159::t_dc83c8c8b7bb9f 230-243
+  s_c7df7c295a4159::t_380463e5800925 1-20,22-57,59-164,170-173,177-218,220-229
+frontend/src/views/ReadView.vue
+  s_c7df7c295a4159::t_0478cca49b4390 1-408
+app/llm/gateway.py
+  s_c7df7c295a4159::t_0cc1945bedda52 119-130
+frontend/src/views/StudioView.vue
+  s_c7df7c295a4159::t_bb659c685edc04 124-126,275-282,307,315-319
+  s_c7df7c295a4159::t_f36a34546c0407 285-302,337,354-359,576-584,815-831,834-838,840-853,855-868,870-885,940-941,956,958-961,991-996,2188-2212,2436-2438
+  s_c7df7c295a4159::t_9427dda40a617c 283-284,477-481,528,613-615,869,886,949,953,997-998,1631-1654,1657,1705-1706,2213,2302-2303,2439,2536
+  s_c7df7c295a4159::t_92a646b0e75ee6 532,571-572
+  s_c7df7c295a4159::t_3f230afc11ae81 535,832-833,839,854
+  s_c7df7c295a4159::t_c3a76c33c74615 724-731,929-930,987-990,1702-1704,2246-2301,2533-2535
+frontend/tests/find.spec.js
+  s_c7df7c295a4159::t_14d7c3f1763dbc 19
+  s_c7df7c295a4159::t_eebe38ee28de79 1-18,20-53
+config.yaml
+  s_c7df7c295a4159::t_7e713b7207fe26 129
+  s_c7df7c295a4159::t_9b85a1d0ac3747 98-128,130
+frontend/package-lock.json
+  s_c7df7c295a4159::t_9c448894ca280f 21,23,26-27,113-119,122-125,127,130-136,139-144,147-153,156-159,161,164-170,173-176,178,181-187,190-193,195,198-204,207-212,215-218,220,226,229,232-235,237,243,246,249-252,254,260,263,266-269,271,277,280,283-286,288,294,297,300-303,305,314,317-320,322,331,334-337,339,348,351-354,356,365,368-371,382,385-388,399,402-405,407,413,416,419-422,424,430,433,436-439,447,450,453-456,464,467,470-949,954-1381,1388-1454,1457-1462,1465-1478,1480-1483,1487,1489-1502,1504-1505,1636-1666,1695-1704,1748-1757,1794-1806,1854-1863,1895-1921,1970-1980,2035-2062,2087-2115,2145-2193,2216-2225,2318-2335,2349-2376,2406-2412,2485-2520,2826-2842,2888-2920,2993-3008,3052-3085,3309-3315,3424-3470,3501-3520,3530-3556,3654-3903,3907-3914,3917,3920,3923,3941,3954-3957,3961-3969,3972-4026,4029-4032,4034-4040,4042-4045,4047-4093,4095-4096,4098-4111,4113-4119,4122-4124,4126-4127,4130-4139,4142-4145,4149-4159,4162-4167,4170-4186,4190-4195,4213,4232-4234,4291-4297,4336-4372
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1e3ecf33e627d59f36de427db1f81c59e4eb0747",
+  "prompts": {},
+  "sessions": {
+    "s_2f48636382e013": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793688464186902500",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_e171b10445cf7f": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793689164618736600",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
