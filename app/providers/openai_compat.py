@@ -62,17 +62,33 @@ class OpenAICompatAdapter(ProviderAdapter):
             h["Authorization"] = f"Bearer {key}"
         return h
 
-    @staticmethod
-    def _parse_chunk(payload: str) -> Optional[DeltaEvent]:
+    def ready(self) -> bool:
+        """「配了且现在能用吗」：config 里 enabled 只是作者 declaration，
+        Ollama 没起、OPENAI_API_KEY 没设都算没就绪（审查 M2）。
+        pick_model 拿它筛候选——就绪校验只能查「key 取得到」，
+        查不了「服务活着没」：那要发网络请求，不该出现在选模型里。"""
+        if not (self.cfg.base_url or "").strip():
+            return False
+        if self.cfg.api_key_env and not self._api_key():
+            return False
+        return bool(self.cfg.models)
+
+    def _parse_chunk(self, payload: str) -> Optional[DeltaEvent]:
         """一条 OpenAI chunk → DeltaEvent；解不动的行（心跳/注释）返回 None。"""
         try:
             obj: Any = json.loads(payload)
         except ValueError:
             return None
-        if isinstance(obj, dict) and obj.get("error"):
+        # 合法 JSON 但不是对象（null / 数字 / 裸数组）：跳行而不是抛 AttributeError
+        # 穿透流式协程（审查 m6）
+        if not isinstance(obj, dict):
+            return None
+        if obj.get("error"):
             err = obj["error"]
             detail = err.get("message") if isinstance(err, dict) else str(err)
-            raise ProviderError("openai_compat", f"上游报错：{detail}")
+            # 用 self.key 而不是硬编码类名：openai 与 ollama 的上游报错要在
+            # 日志和响应里分得清是谁家的（审查 m8）
+            raise ProviderError(self.key, f"上游报错：{detail}")
         choices = obj.get("choices") or []
         if not choices:
             return None
@@ -113,18 +129,34 @@ class OpenAICompatAdapter(ProviderAdapter):
                             status=502,
                         )
                     buf = SSEBuffer()
+                    # 终止权不全交给 [DONE]：上游带着长连接不写它时，
+                    # read=300 会把一次调用整整堵 5 分钟（审查 m7）。
+                    # finish_reason 到手 = 模型已经说完，[DONE] 到手 = 上游说完了，
+                    # 两个都算数。
+                    done = False
                     async for text in resp.aiter_text():
                         for payload in buf.feed(text):
+                            if not payload:
+                                continue
+                            if is_done(payload):
+                                done = True
+                                break
+                            ev = self._parse_chunk(payload)
+                            if ev is None:
+                                continue
+                            yield ev
+                            if ev.finish_reason:
+                                done = True
+                                break
+                        if done:
+                            break
+                    if not done:
+                        # 流自然断开且没见终止信号：把最后没成行的一段补发掉
+                        for payload in buf.flush():
                             if not payload or is_done(payload):
                                 continue
                             ev = self._parse_chunk(payload)
                             if ev is not None:
                                 yield ev
-                    for payload in buf.flush():
-                        if not payload or is_done(payload):
-                            continue
-                        ev = self._parse_chunk(payload)
-                        if ev is not None:
-                            yield ev
             except httpx.HTTPError as exc:
                 raise ProviderError(self.key, f"连不上 {base}：{exc}") from exc

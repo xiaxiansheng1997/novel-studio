@@ -44,7 +44,15 @@ class ProviderAdapter(abc.ABC):
         return self.cfg.key
 
     def matches(self, model: str) -> bool:
-        return model.startswith(self.cfg.model_prefix) or model == self.cfg.key
+        # 空前缀不能让 startswith("") 恒真：那等于新加的 compat 条目忘配
+        # model_prefix 就劫持全部模型路由（审查 m9）。没前缀时只认两样东西：
+        # 自家 key，和自己在 config 里声明过的模型 id——id 是显式清单，
+        # 不存在「碰巧接住别人的模型」；compat 条目常常不给 id 加前缀。
+        if model == self.cfg.key:
+            return True
+        if self.cfg.model_prefix and model.startswith(self.cfg.model_prefix):
+            return True
+        return any(m.id == model for m in self.cfg.models)
 
     def default_models(self) -> list[ModelInfo]:
         return [ModelInfo(id=m.id, owned_by=self.cfg.display_name or self.key) for m in self.cfg.models]

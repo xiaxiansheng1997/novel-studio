@@ -16,7 +16,9 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-# 中文混合文本的粗折算：约 2 字符 = 1 token
+# 中文混合文本的粗折算：约 2 字符 = 1 token。这是「预估花费」的从严口径，
+# 与 core/cut.py 的本地截断预算 CUT_CHARS_PER_TOKEN（放宽到 4）方向相反、
+# 各有用途，别合并成一个常量（审查 m5）
 CHARS_PER_TOKEN = 2.0
 # 没有历史样本时的保守默认（M0 实测 28k 输入是上限场景，日常装配远低于它）
 DEFAULT_PROMPT_CHARS = 12000
@@ -74,8 +76,14 @@ async def estimate_pipeline(
     work_id: str,
     sections: int,
     model: str,
+    spent_before: float = 0.0,
 ) -> dict[str, Any]:
-    """对「即将批量生成的 sections 节」给一份预估。纯读，不动队列不落库。"""
+    """对「即将批量生成的 sections 节」给一份预估。纯读，不动队列不落库。
+
+    spent_before 是这本书已经按同一套单价花掉的钱（路由层拿 runs 历史算好
+    传进来）：预算是总额度，闸门判「已花 + 本次预估 > 上限」——只比本次
+    的话，上限 1 元连点两次各 0.6 都能放行（审查 m10）。
+    """
     base = await store.run_baselines(work_id)
     if base.get("count", 0) >= MIN_RUNS_FOR_BASELINE:
         prompt_chars = max(1, int(base["prompt_median"]))
@@ -119,5 +127,10 @@ async def estimate_pipeline(
             "price_provider": price["provider"],
         })
     est["budget_limit"] = budget
-    est["over_budget"] = bool(est.get("priced")) and budget > 0 and (est.get("est_cost") or 0) > budget
+    # 已花 + 本次预估：投产后总共多少，才是和上限比的那个数
+    est["spent_before"] = round(max(0.0, float(spent_before)), 4)
+    est["projected_total"] = round(est["spent_before"] + (est.get("est_cost") or 0.0), 4)
+    est["over_budget"] = (
+        bool(est.get("priced")) and budget > 0 and est["projected_total"] > budget
+    )
     return est

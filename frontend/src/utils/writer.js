@@ -4,10 +4,11 @@
  * 只存 localStorage，不进后端 —— 这是「我在这台机器上看着舒服」，不是作品的属性；
  * 换台电脑打开同一篇，正文一个字不差，只是显示口味回到默认，这样才对。
  *
- * 落地方式：值拼成 --w-* 变量写在编辑器根节点（StudioView 的 .editor）上，
- * 正文样式靠继承读它们，所以 textarea 的 CSS 里只有 var(--w-size) 这种引用，
- * 没有第二份需要跟着改的常量。字体栈本体也不在这里：那里只存档位 id，
- * 对应的 --w-<id> 由 .editor 从 Tailwind theme 里给全。
+ * 落地方式：值拼成 --w-* 变量写在排版根节点（StudioView 的 .editor、
+ * ReadView 的 .read）上，正文样式靠继承读它们，所以 textarea 的 CSS 里只有
+ * var(--w-size) 这种引用，没有第二份需要跟着改的常量。字体栈本体也不在这里：
+ * 那里只存档位 id，对应的 --w-<id> 由两个宿主各自从 Tailwind theme 里给全——
+ * 哪个宿主漏了四个字体变量，那个页面的正文就掉回浏览器默认字体。
  */
 import { computed, ref } from 'vue'
 

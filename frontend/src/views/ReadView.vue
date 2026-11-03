@@ -54,9 +54,9 @@
             <h3 class="sec-head">{{ sec.title }}</h3>
             <!-- 文章按 Markdown 渲染；小说认段落，正文里不该有井号 -->
             <div v-if="isArticle" class="md" v-html="renderMd(sec.content)"></div>
-            <template v-else>
+            <div v-else class="prose">
               <p v-for="(para, i) in paras(sec.content)" :key="i">{{ para }}</p>
-            </template>
+            </div>
           </section>
         </template>
 
@@ -187,6 +187,13 @@ onUnmounted(() => {
 
 <style scoped>
 .read {
+  /* 字体栈在这里给全（本体在 tailwind.config.js 的 theme 里）：
+     utils/writer.js 的 --w-font 指向 var(--w-<id>)，四个变量缺一个
+     整条 font-family 就静默失效，阅读页会掉回浏览器默认字体（审查 m2） */
+  --w-serif: theme('fontFamily.serif');
+  --w-kai: theme('fontFamily.kai');
+  --w-sans: theme('fontFamily.sans');
+  --w-mono: theme('fontFamily.mono');
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -338,14 +345,21 @@ onUnmounted(() => {
   font-size: 14px;
 }
 
-/* 小说段落用首行缩进更像成书；段间不空行也读得开 */
-.doc:not(.as-md) p + p {
+/* 小说段落用首行缩进更像成书；只作用于 .prose，
+   不再靠那个全仓库没人绑定的 as-md 类（审查 m1：v-html 里的段落
+   曾同时吃中缩进规则与 !important 之外的覆盖，特异性算下来赢的是缩进） */
+.prose p + p {
   text-indent: 2em;
 }
 
 /* Markdown 渲染（文章）：只给基本元素配版式，细节跟写作台预览一致 */
 .md :deep(p) {
-  text-indent: 0;
+  margin: 0 0 1em;
+  font-family: var(--w-font);
+  font-size: var(--w-size);
+  line-height: var(--w-height);
+  color: var(--text);
+  max-width: var(--w-measure);
 }
 .md :deep(h1),
 .md :deep(h2),

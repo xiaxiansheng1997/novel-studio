@@ -15,7 +15,7 @@ import pytest
 from app.api.schemas import ChatCompletionRequest
 from app.config import AppConfig, ProviderConfig
 from app.core.base import AppContext, ProviderAdapter
-from app.core.errors import ProviderError
+from app.core.errors import ModelNotFound, ProviderError
 from app.core.registry import Registry
 from app.llm.gateway import pick_model
 from app.providers.openai_compat import OpenAICompatAdapter
@@ -170,6 +170,63 @@ async def test_no_base_url_and_http_error_and_stream_error():
         await drain(adapter.stream(req))
 
 
+@pytest.mark.asyncio
+async def test_upstream_error_names_the_provider(monkeypatch):
+    """审查 m8：报错抬头用条目 key，不用硬编码类名——openai 与 ollama
+    的上游报错要在日志里分得清是谁家的。"""
+    err = json.dumps({"error": "quota"})  # error 也可能直接是字符串，一样得接住
+    adapter = make_adapter(make_cfg(key="ollama"))
+    patch_client(
+        adapter,
+        lambda request: httpx.Response(200, content=f"data: {err}\n\n".encode("utf-8")),
+    )
+    req = ChatCompletionRequest(model="ollama-x", messages=[{"role": "user", "content": "hi"}], stream=True)
+    with pytest.raises(ProviderError, match=r"\[ollama\] 上游报错") as ei:
+        await drain(adapter.stream(req))
+    assert "openai_compat" not in str(ei.value)
+
+
+def test_parse_chunk_tolerates_non_object_json():
+    """审查 m6：合法 JSON 但不是对象（null/数字/裸数组）跳行而不是 AttributeError 穿透。"""
+    adapter = make_adapter(make_cfg())
+    for payload in ("null", "123", '"x"', "[]"):
+        assert adapter._parse_chunk(payload) is None
+    assert adapter._parse_chunk("不是 JSON") is None
+
+
+@pytest.mark.asyncio
+async def test_finish_reason_ends_stream_without_done_marker():
+    """审查 m7：上游不写 [DONE] 时，finish_reason 到手就该收——不然带长连接
+    要把一次调用堵满 read=300s。"""
+    body = (
+        "data: " + chunk(content="好") + "\n\n"
+        + "data: " + chunk(finish="stop") + "\n\n"
+        # 故意不写 data: [DONE]，也不结尾空行
+    )
+    adapter = make_adapter(make_cfg())
+    patch_client(adapter, lambda request: httpx.Response(200, content=body.encode("utf-8")))
+    req = ChatCompletionRequest(model="ollama-x", messages=[{"role": "user", "content": "hi"}], stream=True)
+    evs = await drain(adapter.stream(req))
+    assert [ev.content for ev in evs] == ["好", None]
+    assert evs[-1].finish_reason == "stop"
+
+
+def test_ready_checks_config_not_liveness():
+    """审查 M2：就绪 = base_url 填了 + 声明的 key 变量取得到 + 有模型；
+    服务活着没不在这里查（那要发网络请求）。"""
+    assert make_adapter(make_cfg()).ready() is True
+    assert make_adapter(make_cfg(base_url="")).ready() is False
+    assert make_adapter(make_cfg(models=[])).ready() is False
+    cfg = make_cfg(api_key_env="W2A_TEST_ABSENT_KEY")
+    assert make_adapter(cfg).ready() is False
+    import os
+    os.environ["W2A_TEST_ABSENT_KEY"] = "sk-有"
+    try:
+        assert make_adapter(cfg).ready() is True
+    finally:
+        os.environ.pop("W2A_TEST_ABSENT_KEY", None)
+
+
 # ---------- registry 登记与路由 ----------
 
 
@@ -244,6 +301,27 @@ def test_pick_model_prefers_enabled_compat(monkeypatch):
     assert pick_model(reg, "nope-9") == "ollama-qwen2.5:14b"
 
 
+def test_pick_model_skips_unready_compat(monkeypatch):
+    """审查 M2：enabled=true 不等于就绪——OPENAI_API_KEY 没设时，
+    默认模型不该被拐进一条 401 死路，而应落回反代。"""
+    monkeypatch.delenv("W2A_TEST_MISSING_KEY", raising=False)
+    monkeypatch.setattr("app.core.registry._adapter_classes", lambda: {"qwen": FakeProxy})
+    cfg = AppConfig.from_raw({
+        "providers": {
+            "qwen": {"model_prefix": "qwen-", "models": ["qwen-max"]},
+            "openai": {
+                "compat": True, "base_url": "https://api.openai.com/v1",
+                "api_key_env": "W2A_TEST_MISSING_KEY", "model_prefix": "gpt-",
+                "models": ["gpt-4o-mini"],
+            },
+        }
+    })
+    ctx = AppContext(config=AppConfig(), sessions=None, store=None)
+    reg = Registry(cfg, ctx)
+    assert isinstance(reg.adapters["openai"], OpenAICompatAdapter)
+    assert pick_model(reg, None) == "qwen-max"
+
+
 def test_pick_model_falls_back_without_compat(monkeypatch):
     monkeypatch.setattr("app.core.registry._adapter_classes", lambda: {"qwen": FakeProxy})
     cfg = AppConfig.from_raw({"providers": {"qwen": {"model_prefix": "qwen-", "models": ["qwen-max"]}}})
@@ -258,3 +336,26 @@ def test_gateway_resolve_contract_untouched(monkeypatch):
     reg = make_registry(monkeypatch)
     model = pick_model(reg, None)
     assert reg.route(model).cfg.compat is True
+
+
+def test_empty_prefix_does_not_hijack_routing(monkeypatch):
+    """审查 m9：model_prefix 默认空串，startswith("") 恒真——忘配前缀的
+    compat 条目会劫持全部模型路由。空前缀时只认自家 key 与声明过的模型 id；
+    compat 条目常不给 id 加前缀（gpt-4o-mini 就直接是上游名），这条得通。"""
+    monkeypatch.setattr("app.core.registry._adapter_classes", lambda: {"qwen": FakeProxy})
+    cfg = AppConfig.from_raw({
+        "providers": {
+            "qwen": {"model_prefix": "qwen-", "models": ["qwen-max"]},
+            "openai": {"compat": True, "base_url": "https://api.openai.com/v1",
+                       "models": ["gpt-4o-mini"]},
+        }
+    })
+    ctx = AppContext(config=AppConfig(), sessions=None, store=None)
+    reg = Registry(cfg, ctx)
+    assert reg.route("qwen-max").key == "qwen"          # 不再被空前缀劫持
+    with pytest.raises(ModelNotFound):
+        reg.route("gpt-5")                              # 没声明过的 id：谁都不接
+    with pytest.raises(ModelNotFound):
+        reg.route("nope-4o")
+    assert reg.route("gpt-4o-mini").key == "openai"     # 声明过的 id 能路由
+    assert reg.route("openai").key == "openai"          # 无前缀时 key 本身可路由

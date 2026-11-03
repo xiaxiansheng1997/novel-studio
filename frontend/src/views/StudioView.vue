@@ -477,6 +477,7 @@
     <BatchEstimateDialog
       v-model:open="batchEstOpen"
       :mode="batchEstMode"
+      :params="batchEstParams"
       @confirm="onBatchEstConfirm"
     />
     <GlobalSearch v-model:open="searchOpen" :initial="searchSeed" @goto="gotoSearchHit" />
@@ -613,6 +614,9 @@ const exportOpen = ref(false)
 // 批量前预估弹层（迭代 C）：两个批量入口共用，mode 区分 SSE 逐节与落库队列
 const batchEstOpen = ref(false)
 const batchEstMode = ref('pipeline')
+// 预估弹层与确认后的开跑共用同一份参数：两边各自靠默认值碰齐，
+// 任何一边改了默认口径就静默分家（审查 M1）
+const batchEstParams = ref({})
 
 // 全库搜索弹层：书架与工作台共用（Ctrl+K，或书架上的「搜正文」）
 const searchOpen = ref(false)
@@ -815,7 +819,7 @@ function locateEvidence(text) {
 // ---- 章内查找（Ctrl+F）----
 // 只管这一节里跳来跳去：全库有 Ctrl+K，跨节替换有 Ctrl+H，三条各管一段
 function openFind() {
-  mdPreview.value = false // 查找作用于源文：预览态下 textarea 被藏着，没处圖选
+  mdPreview.value = false // 查找作用于源文：预览态下 textarea 被藏着，没处圈选
   findOpen.value = true
   nextTick(() => findEl.value?.select())
 }
@@ -840,7 +844,9 @@ function gotoFindHit(i) {
   const [start, end] = hits[findIdx.value]
   const el = editorEl.value
   if (!el) return
-  el.focus()
+  // 绝不对 textarea 调 focus()：没聚焦时 setSelectionRange 照样生效，
+  // 一抢焦点，用户敲的下一个字符就落进正文替换掉选中的命中段——
+  // 坏的是存了库的字，不只是查找体验（审查 C1）
   el.setSelectionRange(start, end)
   // 与 locateEvidence 同一个坑：浏览器常只滚到边上「差一点点」，手工再校准
   const full = contentDraft.value || ''
@@ -852,12 +858,15 @@ function stepFind(delta) {
   const hits = collectFindHits()
   if (!hits.length) return
   gotoFindHit(stepIndex(findIdx.value, delta, hits.length))
+  // 定位完把焦点还给查找框：Enter 连按下一处才顺
+  findEl.value?.focus()
 }
 
+// 输入只重算不定位：每敲一个字就把正文滚动一跳反而晕；
+// 命中数的变化已经反馈了「找没找到」，要去哪处由 Enter/↑↓ 决定
 watch(findQuery, () => {
-  const hits = collectFindHits()
+  collectFindHits()
   findIdx.value = 0
-  if (hits.length) gotoFindHit(0)
 })
 
 // ---- 打字机滚动：流式生成时预览跟着尾巴走 ----
@@ -931,6 +940,12 @@ watch(() => store.work?.id, (id) => {
   // 书架「新建作品」时 createWork 内部已经 selectWork，书架随即卸载，
   // @open 未必赶得上；以「work 已落、路由还没跟上」为准补一段收尾（不重复拉树）。
   if (id && route.params.id !== id) enterWork(id)
+})
+
+// 同一部作品改文种也算离开编辑态：article→novel 后预览按钮和 Ctrl+M 都随
+// v-if 消失，不复位 mdPreview 的话 textarea 被 v-show 藏着，编辑区死锁
+watch(() => store.work?.kind, () => {
+  mdPreview.value = false
 })
 
 watch(() => store.node?.id, () => {
@@ -1626,16 +1641,24 @@ async function doOutline() {
   await store.generateOutline({ instruction: instruction.value, append })
 }
 
+/** 批量开跑的实际参数：同一个对象既送进预估弹层、也喂给确认后的开跑，
+ *  只定义一处——两边各自靠默认值碰齐，任何一边改了默认口径就静默分家 */
+function batchRunParams() {
+  return { instruction: instruction.value }
+}
+
 async function doPipeline() {
   if (store.pipeline.running || !store.work) return
   // 不直接开跑：先弹预估——预算超限在 SSE 里才看见就晚了，字已经一个一个烧掉了
   batchEstMode.value = 'pipeline'
+  batchEstParams.value = batchRunParams()
   batchEstOpen.value = true
 }
 
 async function doEnqueue() {
   if (!store.work) return
   batchEstMode.value = 'batch'
+  batchEstParams.value = batchRunParams()
   batchEstOpen.value = true
 }
 
@@ -1643,7 +1666,7 @@ async function doEnqueue() {
 async function onBatchEstConfirm({ ignoreBudget = false } = {}) {
   if (batchEstMode.value === 'batch') {
     await flushSave()
-    const j = await store.enqueueBatch({ instruction: instruction.value, ignoreBudget })
+    const j = await store.enqueueBatch({ ...batchEstParams.value, ignoreBudget })
     if (!j) {
       showNotice(store.error || '入队失败（可能是超预算被拦）', true)
       return
@@ -1654,7 +1677,7 @@ async function onBatchEstConfirm({ ignoreBudget = false } = {}) {
   }
   await flushSave()
   resetPipeline()
-  await store.runPipeline({ instruction: instruction.value, ignore_budget: ignoreBudget })
+  await store.runPipeline({ ...batchEstParams.value, ignore_budget: ignoreBudget })
 }
 
 // ---- 队列（M4） ----

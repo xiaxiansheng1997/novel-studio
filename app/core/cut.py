@@ -11,8 +11,11 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-# 网页端拿不到真实 token 计数，按约 4 字符 = 1 token 估算
-CHARS_PER_TOKEN = 4
+# 网页端拿不到真实 token 计数：本地截断按「一个 max_tokens 至多买 4 个字符」
+# 放宽估算。名字带 CUT_ 是为了和 studio/cost.py 的计费口径 CHARS_PER_TOKEN
+# （按 2 字符从严估钱）区分开：一个是预算尺放宽、一个是账单尺从严，
+# 方向相反，不该共用一个名字（审查 m5）。
+CUT_CHARS_PER_TOKEN = 4
 
 
 def normalize_stops(stop) -> list[str]:
@@ -26,7 +29,7 @@ def normalize_stops(stop) -> list[str]:
 def char_budget(max_tokens: Optional[int]) -> int:
     if not max_tokens or max_tokens <= 0:
         return 0
-    return int(max_tokens) * CHARS_PER_TOKEN
+    return int(max_tokens) * CUT_CHARS_PER_TOKEN
 
 
 class StreamCut:

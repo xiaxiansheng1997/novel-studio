@@ -54,6 +54,7 @@
               {{ budgetSaving ? '保存中…' : '存上限' }}
             </button>
           </div>
+          <p v-if="budgetHint" class="err">{{ budgetHint }}</p>
 
           <p v-if="est.over_budget" class="err">
             预估 {{ est.est_cost }} 已超预算上限 {{ est.budget_limit }}：
@@ -88,6 +89,9 @@ const props = defineProps({
   open: { type: Boolean, default: false },
   // pipeline = 当前页面 SSE 逐节生成；batch = 落库队列（关了页面也接着跑）
   mode: { type: String, default: 'pipeline' },
+  // 预估参数（only_empty/limit/model）：由调用方传「开跑时用的同一份」，
+  // 不能靠两边各自碰巧一样的默认值——改了默认就静默口径不一（审查 M1）
+  params: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['update:open', 'confirm'])
 const store = useStudioStore()
@@ -106,7 +110,7 @@ watch(() => props.open, async (open) => {
   ignoreBudget.value = false
   loading.value = true
   try {
-    est.value = await store.estimatePipeline({})
+    est.value = await store.estimatePipeline({ ...props.params })
     budgetDraft.value = est.value?.budget_limit ?? (await store.getBudget()) ?? 0
   } finally {
     loading.value = false
@@ -119,17 +123,34 @@ function fmt(n) {
 
 async function saveBudget() {
   if (budgetSaving.value) return
+  // 清空/输成非数字会得到 NaN，而后端 0 = 不设限：不设防的话
+  // 点「存上限」反而是静默解除闸门（审查 m4）。要解除请显式输 0。
+  // 注意 type=number 的输入框清空给的是 ''，Number('') 是 0——空串得单独拦。
+  const raw = String(budgetDraft.value ?? '').trim()
+  const v = Number(raw)
+  if (!raw || !Number.isFinite(v) || v < 0) {
+    showBudgetHint('要给个数字：0 = 不设限，清空不是取消上限')
+    return
+  }
   budgetSaving.value = true
   try {
-    const ok = await store.setBudget(Number(budgetDraft.value) || 0)
+    const ok = await store.setBudget(v)
     if (ok && est.value) {
       // 上限变了，超限判断跟着重算一次：不重算会让人按旧结论点确认
-      est.value = await store.estimatePipeline({})
+      est.value = await store.estimatePipeline({ ...props.params })
       if (est.value && !est.value.over_budget) ignoreBudget.value = false
     }
   } finally {
     budgetSaving.value = false
   }
+}
+
+const budgetHint = ref('')
+let hintTimer = 0
+function showBudgetHint(msg) {
+  budgetHint.value = msg
+  if (hintTimer) clearTimeout(hintTimer)
+  hintTimer = setTimeout(() => { budgetHint.value = '' }, 4000)
 }
 
 function close() {

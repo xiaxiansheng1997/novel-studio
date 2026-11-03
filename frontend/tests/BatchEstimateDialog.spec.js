@@ -41,8 +41,8 @@ beforeEach(() => {
 })
 
 /** 组件靠 watch(open)  false→true 触发拉取：直接以 open:true 挂载不会发请求 */
-async function openDialog(mode = 'pipeline') {
-  const w = mount(BatchEstimateDialog, { props: { open: false, mode } })
+async function openDialog(mode = 'pipeline', extraProps = {}) {
+  const w = mount(BatchEstimateDialog, { props: { open: false, mode, ...extraProps } })
   await w.setProps({ open: true })
   await flushPromises()
   return w
@@ -89,4 +89,24 @@ it('存上限后重算一次：不能让人按旧结论点确认', async () => {
   await flushPromises()
   expect(store.setBudget).toHaveBeenCalledWith(8)
   expect(store.estimatePipeline).toHaveBeenCalledTimes(2)
+})
+
+it('预估吃调用方传来的参数：不靠两边碰巧一样的默认值（审查 M1）', async () => {
+  const w = await openDialog('pipeline', { params: { limit: 2, only_empty: false } })
+  expect(store.estimatePipeline).toHaveBeenCalledWith({ limit: 2, only_empty: false })
+  expect(w).toBeTruthy()
+})
+
+it('预算框清空不存：NaN 落到后端是 0=不设限，静默解闸门（审查 m4）', async () => {
+  const w = await openDialog()
+  await w.get('.budget input').setValue('')
+  await w.get('.budget .btn').trigger('click')
+  await flushPromises()
+  expect(store.setBudget).not.toHaveBeenCalled()
+  expect(w.text()).toContain('要给个数字')
+  // 显式输 0 才是解除上限，这条路得通
+  await w.get('.budget input').setValue('0')
+  await w.get('.budget .btn').trigger('click')
+  await flushPromises()
+  expect(store.setBudget).toHaveBeenCalledWith(0)
 })

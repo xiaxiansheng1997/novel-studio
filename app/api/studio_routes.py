@@ -1842,9 +1842,36 @@ async def estimate_pipeline(work_id: str, body: PipelineRequest, request: Reques
         nodes = nodes[: body.limit]
     model = pick_model(request.app.state.registry, body.model or None)
     est = await cost.estimate_pipeline(
-        store, request.app.state.registry, work_id=work_id, sections=len(nodes), model=model
+        store, request.app.state.registry, work_id=work_id, sections=len(nodes), model=model,
+        spent_before=await _spent_on_model(request, store, work_id, model),
     )
     return est
+
+
+async def _spent_on_model(request: Request, store, work_id: str, model: str) -> float:
+    """这本书已经花掉的钱：成功 runs 的产出字数，按本次目标通道的单价折算。
+
+    口径要说实话：只按产出发、输入侧不计（历史 prompt 构成和这次不一样，
+    硬折算反而假）；单价取的是「这次要走的通道」——换通道后拿旧花费
+    抵新额度本就不该精确，预估体系宁可粗而不装细。反代不计钱，直接 0。
+    """
+    price = cost.model_price(request.app.state.registry, model)
+    if price is None:
+        return 0.0
+    chars = await store.output_chars_total(work_id)
+    return chars / cost.CHARS_PER_TOKEN / 1000.0 * price["out_per_1k"]
+
+
+def _budget_402(est: dict) -> HTTPException:
+    """拦下时的说法：把「已花 + 本次」一起报——只报本次会让人以为额度是每次的。"""
+    return HTTPException(
+        status_code=402,
+        detail=(
+            f"预估花 {est['est_cost']}，加上已花的 {est.get('spent_before', 0)} 共 "
+            f"{est.get('projected_total', est['est_cost'])}，超预算上限 {est['budget_limit']}："
+            "改小范围（limit）、调高预算，或确认后带 ignore_budget 重跑"
+        ),
+    )
 
 
 class BudgetUpdate(BaseModel):
@@ -1891,16 +1918,11 @@ async def run_pipeline(work_id: str, body: PipelineRequest, request: Request):
 
     # 预算闸门：计钱的通道（compat）估超了就不开跑；要硬跑请带 ignore_budget
     est = await cost.estimate_pipeline(
-        store, request.app.state.registry, work_id=work_id, sections=len(nodes), model=model
+        store, request.app.state.registry, work_id=work_id, sections=len(nodes), model=model,
+        spent_before=await _spent_on_model(request, store, work_id, model),
     )
     if est["over_budget"] and not body.ignore_budget:
-        raise HTTPException(
-            status_code=402,
-            detail=(
-                f"预估花 {est['est_cost']}，超预算上限 {est['budget_limit']}："
-                "改小范围（limit）、调高预算，或确认后带 ignore_budget 重跑"
-            ),
-        )
+        raise _budget_402(est)
 
     # 开跑前把全书旧内容补齐索引（增量，没变就跳过）。
     # 手改过的正文不会自动入库，不补这一步，第 20 节就检索不到第 3 节的新版本。
@@ -3099,7 +3121,7 @@ class BatchRequest(BaseModel):
     summarize: bool = True
     extract: bool = True
     check: bool = True
-    # 与 pipeline 同一口径：预估超预算默认拦下（只拦 draft，其他任务类型成本小）
+    # 与 pipeline 同一口径：预估超预算默认拦下；闸门覆盖所有会调模型的任务类型
     ignore_budget: bool = False
 
 
@@ -3149,21 +3171,18 @@ async def enqueue_batch(work_id: str, body: BatchRequest, request: Request):
     if not nodes:
         raise HTTPException(status_code=400, detail="没有可入队的节点（检查 only_empty 与正文是否为空）")
 
-    # 预算闸门：批量写正文才是花销大头，摘要/检查这些单节小任务不拦
-    if body.task_type == "draft":
+    # 预算闸门：凡是要调模型的任务类型都估都拦——beats/polish/extract 这些
+    # 单笔比写正文小，但走的也是计钱通道，积起来一样烧预算（审查 m14）。
+    # check 是纯本地规则不花钱，不在名单里。
+    if body.task_type in ("draft", "article_draft", "beats", "polish", "extract", "summarize"):
         model = pick_model(request.app.state.registry, body.model or None)
         est = await cost.estimate_pipeline(
             store, request.app.state.registry, work_id=work_id,
             sections=len(nodes), model=model,
+            spent_before=await _spent_on_model(request, store, work_id, model),
         )
         if est["over_budget"] and not body.ignore_budget:
-            raise HTTPException(
-                status_code=402,
-                detail=(
-                    f"预估花 {est['est_cost']}，超预算上限 {est['budget_limit']}："
-                    "收窄范围、调高预算，或确认后勾「忽略预算上限」重新入队"
-                ),
-            )
+            raise _budget_402(est)
 
     payload = json.dumps({
         "model": body.model, "mode": body.mode, "instruction": body.instruction,

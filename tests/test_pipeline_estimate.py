@@ -178,16 +178,38 @@ def _build_client(tmp_path, registry):
     return TestClient(app)
 
 
-def _seed_work(client, chapters: int) -> str:
+def _seed_work(client, chapters: int, with_content: str = "") -> str | tuple:
     work = client.post("/studio/works", json={"kind": "novel", "title": "预算作品",
                                               "scale": "series"}).json()
     vol = client.post(f"/studio/works/{work['id']}/nodes",
                       json={"kind": "volume", "title": "第一卷"}).json()
+    ids = []
     for i in range(chapters):
-        client.post(f"/studio/works/{work['id']}/nodes",
-                    json={"kind": "chapter", "title": f"第{i}章", "parent_id": vol["id"],
-                          "content": ""})
+        node = client.post(f"/studio/works/{work['id']}/nodes",
+                           json={"kind": "chapter", "title": f"第{i}章", "parent_id": vol["id"],
+                                 "content": with_content}).json()
+        ids.append(node["id"])
+    if with_content:
+        return work["id"], ids
     return work["id"]
+
+
+def _seed_ok_run(client, work_id, *, task_type, prompt, out):
+    """往 runs 表摆一条成功历史：走 TestClient 的 portal（call 只收函数与位置
+    参数，关键字得包在闭包里），不碰 store 私有接口。"""
+    store = client.app.state.studio_store
+    rid = client.portal.call(lambda: store.start_run(
+        work_id=work_id, node_id=None, task_type=task_type,
+        model="gpt-4o-mini", provider="openai", prompt_chars=prompt))
+    client.portal.call(lambda: store.finish_run(rid, status="ok", output_chars=out))
+
+
+async def _queue_start():
+    """worker 替身：闸门测试只走到入队，不碰真模型。"""
+
+
+async def _queue_status(work_id: str = ""):
+    return {"queued": 0, "active": False}
 
 
 def test_estimate_and_budget_routes(tmp_path):
@@ -241,3 +263,110 @@ def test_batch_route_same_gate(tmp_path):
         r = client.post(f"/studio/works/{wid}/batch", json={"task_type": "draft"})
         assert r.status_code == 402
         assert "预算" in r.json()["detail"]
+
+
+# ==================== 审查回归：M1 / m10 / m14 ====================
+
+
+async def test_run_baselines_includes_queue_draft(store):
+    """审查 M1：pipeline 落 article_draft、队列 worker 落 draft——缺省得算这一档
+    的两个名字，不然小说批量跑得再多历史中位数也永远取不到。"""
+    wid = (await store.create_work(kind="novel", title="队列账", scale="series"))["id"]
+    for _ in range(3):
+        rid = await store.start_run(work_id=wid, node_id=None, task_type="draft",
+                                    model="m", provider="p", prompt_chars=9000)
+        await store.finish_run(rid, status="ok", output_chars=1500)
+
+    base = await store.run_baselines(wid)
+    assert base["count"] == 3
+    assert base["output_median"] == 1500
+    # 显式指定时仍只查那一个：不混账
+    assert (await store.run_baselines(wid, task_type="article_draft"))["count"] == 0
+
+
+async def test_output_chars_total_ok_only(store):
+    wid = (await store.create_work(kind="novel", title="合计", scale="series"))["id"]
+    r1 = await store.start_run(work_id=wid, node_id=None, task_type="draft",
+                               model="m", provider="p", prompt_chars=1)
+    await store.finish_run(r1, status="ok", output_chars=2000)
+    r2 = await store.start_run(work_id=wid, node_id=None, task_type="summarize",
+                               model="m", provider="p", prompt_chars=1)
+    await store.finish_run(r2, status="ok", output_chars=500)
+    r3 = await store.start_run(work_id=wid, node_id=None, task_type="draft",
+                               model="m", provider="p", prompt_chars=1)
+    await store.finish_run(r3, status="failed", output_chars=9999)  # 没结算的不算
+    assert await store.output_chars_total(wid) == 2500
+    assert await store.output_chars_total("w_不存在") == 0
+
+
+async def test_budget_is_total_not_per_run(store):
+    """审查 m10：上限是总额度——同一本书每次 1.8、上限 5.0，
+    第三次带着「已花 3.6」必须被拦；只比本次的话能无限点。"""
+    wid = (await store.create_work(kind="novel", title="两连", scale="series"))["id"]
+    reg = make_registry(compat_cfg())
+    await cost.set_budget_limit(store, 5.0)
+
+    first = await cost.estimate_pipeline(store, reg, work_id=wid, sections=2, model="gpt-4o-mini")
+    # 没历史走默认：2 节共 24000 输入字 + 3000 输出字，÷2 得 12000+1500 token，
+    # 12×0.1 + 1.5×0.4 = 1.8
+    assert first["priced"] is True
+    assert first["est_cost"] == pytest.approx(1.8)
+    assert first["spent_before"] == 0.0
+    assert first["over_budget"] is False   # 1.8 ≤ 5：第一次放行
+
+    second = await cost.estimate_pipeline(
+        store, reg, work_id=wid, sections=2, model="gpt-4o-mini",
+        spent_before=first["est_cost"],
+    )
+    assert second["projected_total"] == pytest.approx(3.6)
+    assert second["over_budget"] is False  # 3.6 ≤ 5：第二次也还在额度里
+
+    # 连点到第三次：已花 3.6 + 本次 1.8 = 5.4 越线；只比本次的话永远追不上上限
+    third = await cost.estimate_pipeline(
+        store, reg, work_id=wid, sections=2, model="gpt-4o-mini",
+        spent_before=second["projected_total"],
+    )
+    assert third["over_budget"] is True
+
+
+def test_estimate_route_reports_spent(tmp_path):
+    """路由层把账本接上：有历史成功 run 时，estimate 回里得带 spent_before，
+    且「已花 + 本次」才是和上限比的那个数。"""
+    reg = make_registry(compat_cfg())
+    with _build_client(tmp_path, reg) as client:
+        wid = _seed_work(client, 1)
+        _seed_ok_run(client, wid, task_type="draft", prompt=1000, out=3000)
+        client.put("/studio/budget", json={"limit": 1.4})
+
+        est = client.post(f"/studio/works/{wid}/pipeline/estimate", json={}).json()
+        # 已花 = 3000 字 ÷ 2 字/token ÷ 1000 × 0.4 = 0.6；本次 1 节默认口径 0.9，合 1.5 > 1.4
+        # ——只比本次的话 0.9 ≤ 1.4 会放行，账本在这里真正改变了结论
+        assert est["est_cost"] == pytest.approx(0.9)
+        assert est["spent_before"] == pytest.approx(0.6)
+        assert est["projected_total"] == pytest.approx(1.5)
+        assert est["over_budget"] is True
+        assert client.post(f"/studio/works/{wid}/pipeline", json={}).status_code == 402
+
+
+def test_batch_gate_covers_all_model_tasks(tmp_path):
+    """审查 m14：beats/polish/extract/summarize 走的也是计钱通道，闸门不再只拦 draft；
+    check 是纯本地规则不花钱，不拦。"""
+    reg = make_registry(compat_cfg())
+    with _build_client(tmp_path, reg) as client:
+        client.app.state.studio_queue = SimpleNamespace(
+            start=_queue_start, status=_queue_status)
+        wid, _chapters = _seed_work(client, 2, with_content="正文内容若干")
+        client.put("/studio/budget", json={"limit": 0.01})
+
+        # 种子章节都带正文：闸门之前的选节靠 only_empty 筛，draft 与那几个
+        # 「只挑有正文节」的任务都要能走到闸门才验得到拦不拦
+        for task in ("draft", "summarize", "polish", "extract", "beats"):
+            r = client.post(f"/studio/works/{wid}/batch",
+                            json={"task_type": task, "only_empty": False})
+            assert r.status_code == 402, task
+
+        # check 不在名单里：不估不拦，能走到入队
+        r = client.post(f"/studio/works/{wid}/batch",
+                        json={"task_type": "check", "only_empty": False})
+        assert r.status_code == 200
+        assert r.json()["queued"] == 2

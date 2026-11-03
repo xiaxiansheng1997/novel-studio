@@ -4,10 +4,15 @@
 业务正确性由 pytest（后端）与 Vitest（组件）负责，这一步只保证
 「构建出来的东西能在真实浏览器里跑起来」。
 
+跑在隔离环境里（审查 m11）：storage 指向临时目录、API key 用冒烟专用假值——
+不然 lifespan 会往真实 storage 写快照，历史里残留的 queued 任务甚至会真的
+去调模型。缺依赖/缺浏览器时 SKIP 返回码是 2 而不是 0：调用方（check.ps1）
+得能分辨「没跑」和「跑了且通过」，不许把没跑汇进「全部通过」（审查 M3）。
+
 用法：
     .venv\\Scripts\\python.exe -m scripts.smoke_frontend
 
-frontend/dist 没构建、playwright 没装或浏览器缺失时跳过并返回 0：
+frontend/dist 没构建、playwright 没装或浏览器缺失时跳过并返回 2：
 check.ps1 在别的机器上不该被浏览器安装卡死。
 """
 from __future__ import annotations
@@ -16,12 +21,15 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DIST = BASE_DIR / "frontend" / "dist"
+
+SKIP_RC = 2
 
 
 def load_env() -> None:
@@ -45,16 +53,21 @@ def free_port() -> int:
 def main() -> int:
     if not (DIST / "index.html").exists():
         print("SKIP：frontend/dist 不存在，先跑 npm run build")
-        return 0
+        return SKIP_RC
     try:
         import httpx
         import uvicorn
         from playwright.sync_api import sync_playwright
     except ImportError as e:
         print(f"SKIP：缺依赖（{e.name}），前端冒烟需要 playwright")
-        return 0
+        return SKIP_RC
 
     load_env()
+    # 环境隔离：环境变量优先于 .env（pydantic-settings 的覆盖链）。
+    # storage 指到临时库、口令换成冒烟假值：不这样做，lifespan 会往
+    # 真实 storage 写快照，queued 任务还会真的去调模型（审查 m11）。
+    os.environ["W2A_STORAGE_DIR"] = tempfile.mkdtemp(prefix="novel-studio-smoke-")
+    os.environ["W2A_API_KEY"] = "smoke-local-key"
     # 自带一个干净端口的服务：不复用 8000，免得跟开发中的 dev.py 抢
     port = free_port()
     from app.main import app
@@ -81,7 +94,7 @@ def main() -> int:
                 browser = p.chromium.launch(headless=True)
             except Exception as e:
                 print(f"SKIP：Chromium 起不来（多半没装浏览器）：{str(e)[:120]}")
-                return 0
+                return SKIP_RC
             errors: list[str] = []
             try:
                 page = browser.new_page()
@@ -102,6 +115,26 @@ def main() -> int:
                         "document.querySelector('#app')?.children.length > 0",
                         timeout=15000)
                     print(f"[{label}] {path} -> 渲染 OK")
+
+                # 阅读页真访问：scoped CSS 变量、目录高亮这类问题只有真浏览器
+                # 渲染才能发现，冒烟不能对自己要保护的功能是瞎的（审查 m12）。
+                # 临时库里没书就用不存在的 id：验证的是「没内容也能降级渲染」。
+                work_id = ""
+                try:
+                    r = httpx.get(f"{base}/studio/works",
+                                  headers={"Authorization": f"Bearer {key}"}, timeout=5)
+                    if r.status_code == 200 and r.json():
+                        work_id = str(r.json()[0].get("id") or "")
+                except Exception:  # noqa: BLE001 - 拿不到书不致使命名场景挂掉
+                    pass
+                read_path = f"/studio/{work_id or 'w_none'}/read"
+                resp = page.goto(f"{base}{read_path}", wait_until="load", timeout=30000)
+                if resp is None or not resp.ok:
+                    print(f"FAIL：阅读页 {read_path} 返回 {getattr(resp, 'status', None)}")
+                    return 1
+                page.wait_for_function(
+                    "document.querySelector('#app')?.children.length > 0", timeout=15000)
+                print(f"[阅读页] {read_path} -> 渲染 OK")
 
                 # 深链接走 SPA fallback：刷新 /studio/xxx 不该看到 JSON 404
                 resp = page.goto(f"{base}/studio/w_smoke", wait_until="load")

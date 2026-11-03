@@ -829,7 +829,9 @@ class StudioStore:
         )
         params: list[Any] = [work_id]
         if only_empty:
-            sql += " AND (content IS NULL OR content = '')"
+            # TRIM 而不是只比空串：正文只有一堆空白的节，batch 侧的 Python strip
+            # 会当它空、这里也得当它空，否则两边选节数对不上（审查 M1）
+            sql += " AND (content IS NULL OR TRIM(content) = '')"
         sql += " ORDER BY ordinal"
         async with self._lock:
             cur = await self._db.execute(sql, params)
@@ -3688,20 +3690,30 @@ class StudioStore:
         return [dict(r) for r in rows]
 
     async def run_baselines(
-        self, work_id: str, task_type: str = "article_draft", sample: int = 200
+        self, work_id: str, task_type: str = "", sample: int = 200
     ) -> dict[str, Any]:
         """这部作品历史成功 run 的字数中位数：批量前成本预估的依据。
 
         只算 status='ok'：失败 run 的输出常是半截或废稿，拿它们拉中位数会低估。
         prompt_chars 是开跑前就能定下来的量，预估吃这个最稳。
+
+        task_type 缺省时算「写正文」一档的两个名字：pipeline 落 article_draft、
+        队列 worker 落 draft——小说批量跑得再多，只查前者就永远取不到历史，
+        闸门判的就是一份假数（审查 M1）。显式给了就只查那一个。
         """
         assert self._db is not None
+        if task_type:
+            where = "task_type = ?"
+            params: list[Any] = [work_id, task_type, max(1, min(sample, _MAX_LIMIT))]
+        else:
+            where = "task_type IN ('article_draft', 'draft')"
+            params = [work_id, max(1, min(sample, _MAX_LIMIT))]
         async with self._lock:
             cur = await self._db.execute(
                 "SELECT prompt_chars, output_chars FROM runs "
-                "WHERE work_id = ? AND task_type = ? AND status = 'ok' "
+                f"WHERE work_id = ? AND {where} AND status = 'ok' "
                 "ORDER BY started_at DESC LIMIT ?",
-                (work_id, task_type, max(1, min(sample, _MAX_LIMIT))),
+                tuple(params),
             )
             rows = await cur.fetchall()
         from app.studio.cost import median
@@ -3711,6 +3723,23 @@ class StudioStore:
             "prompt_median": median([int(r[0] or 0) for r in rows]),
             "output_median": median([int(r[1] or 0) for r in rows]),
         }
+
+    async def output_chars_total(self, work_id: str) -> int:
+        """这部作品历史上所有成功 run 的产出字数合计。
+
+        不筛 task_type：预算是「这本书一共烧了多少钱」，摘要/抽取/检查
+        走的也是同一个计费通道，都是真金（审查 m10 的账本依据）。
+        只算 status='ok'：失败 run 没结算，按它扣预算会凭空压低可用额度。
+        """
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT COALESCE(SUM(output_chars), 0) FROM runs "
+                "WHERE work_id = ? AND status = 'ok'",
+                (work_id,),
+            )
+            row = await cur.fetchone()
+        return int(row[0] or 0)
 
     # ==================== 整本搬迁（作品包导出 / 导入） ====================
 
