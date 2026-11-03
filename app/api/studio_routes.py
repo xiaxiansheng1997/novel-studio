@@ -27,6 +27,7 @@ from app.llm.gateway import Gateway, pick_model
 from app.studio import (
     content_types,
     consistency,
+    cost,
     exporters,
     graph,
     indexer,
@@ -1652,6 +1653,8 @@ class PipelineRequest(BaseModel):
     summarize: bool = True
     # 小说：每节写完就抽一次设定（否则下一节 S6 还是空的），并跑一致性检查（零成本）
     extract: bool = True
+    # 预估超预算时强行开跑（默认拦下；拦的是手滑，不拦清醒的决定）
+    ignore_budget: bool = False
     check: bool = True
 
 
@@ -1825,6 +1828,44 @@ async def generate_outline(work_id: str, body: OutlineRequest, request: Request)
     }
 
 
+@router.post("/studio/works/{work_id}/pipeline/estimate", dependencies=[Depends(verify_key)])
+async def estimate_pipeline(work_id: str, body: PipelineRequest, request: Request):
+    """批量生成前的成本预估：和 run_pipeline 同一套选节与选模型口径，纯读不开跑。
+
+    前端把「点批量」改成「先看这一眼预估再确认」；超预算时开跑会吃 402，
+    这里提前把同一个数摆出来，不让人在 SSE 开到一半才发现要超支。
+    """
+    store = _store(request)
+    await _require_work(request, work_id)
+    nodes = await store.list_readable(work_id, only_empty=body.only_empty)
+    if body.limit > 0:
+        nodes = nodes[: body.limit]
+    model = pick_model(request.app.state.registry, body.model or None)
+    est = await cost.estimate_pipeline(
+        store, request.app.state.registry, work_id=work_id, sections=len(nodes), model=model
+    )
+    return est
+
+
+class BudgetUpdate(BaseModel):
+    limit: float = Field(ge=0)
+
+
+@router.get("/studio/budget", dependencies=[Depends(verify_key)])
+async def get_budget(request: Request):
+    return {"limit": await cost.budget_limit(_store(request))}
+
+
+@router.put("/studio/budget", dependencies=[Depends(verify_key)])
+async def put_budget(body: BudgetUpdate, request: Request):
+    """预算上限（钱数）；0 = 不设限。只拦计钱通道，反代不计钱拦不到。"""
+    try:
+        await cost.set_budget_limit(_store(request), body.limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "limit": float(body.limit)}
+
+
 @router.post("/studio/works/{work_id}/pipeline", dependencies=[Depends(verify_key)])
 async def run_pipeline(work_id: str, body: PipelineRequest, request: Request):
     """逐节生成：每节独立装配、独立落库，中途某个失败不影响已完成的部分。"""
@@ -1847,6 +1888,19 @@ async def run_pipeline(work_id: str, body: PipelineRequest, request: Request):
 
     gateway = _gateway(request)
     model = pick_model(request.app.state.registry, body.model or None)
+
+    # 预算闸门：计钱的通道（compat）估超了就不开跑；要硬跑请带 ignore_budget
+    est = await cost.estimate_pipeline(
+        store, request.app.state.registry, work_id=work_id, sections=len(nodes), model=model
+    )
+    if est["over_budget"] and not body.ignore_budget:
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"预估花 {est['est_cost']}，超预算上限 {est['budget_limit']}："
+                "改小范围（limit）、调高预算，或确认后带 ignore_budget 重跑"
+            ),
+        )
 
     # 开跑前把全书旧内容补齐索引（增量，没变就跳过）。
     # 手改过的正文不会自动入库，不补这一步，第 20 节就检索不到第 3 节的新版本。
@@ -2032,6 +2086,25 @@ async def assemble_document(work_id: str, request: Request, include_empty: bool 
     work = await _require_work(request, work_id)
     markdown, used = await _render_markdown(store, work, include_empty)
     return {"markdown": markdown, "chars": len(markdown), "nodes": used}
+
+
+@router.get("/studio/works/{work_id}/reading", dependencies=[Depends(verify_key)])
+async def reading_view(work_id: str, request: Request, include_empty: bool = False):
+    """整本阅读模式的数据：按全序的节列表，不拼成字符串。
+
+    阅读页要画目录锚点与逐节渲染，拆 markdown 字符串反推结构是最容易漂的做法；
+    服务端本来就有这份列表（导出/发布检查同源），直接给。
+    """
+    store = _store(request)
+    work = await _require_work(request, work_id)
+    sections = await _readable_sections(store, work, include_empty)
+    return {
+        "title": work.get("title") or "",
+        "kind": work.get("kind") or "article",
+        "digest": work.get("digest") or "",
+        "sections": sections,
+        "chars": sum(len(s["content"]) for s in sections),
+    }
 
 
 class DigestRequest(BaseModel):
@@ -3026,6 +3099,8 @@ class BatchRequest(BaseModel):
     summarize: bool = True
     extract: bool = True
     check: bool = True
+    # 与 pipeline 同一口径：预估超预算默认拦下（只拦 draft，其他任务类型成本小）
+    ignore_budget: bool = False
 
 
 class TriageRequest(BaseModel):
@@ -3073,6 +3148,22 @@ async def enqueue_batch(work_id: str, body: BatchRequest, request: Request):
         nodes = nodes[: body.limit]
     if not nodes:
         raise HTTPException(status_code=400, detail="没有可入队的节点（检查 only_empty 与正文是否为空）")
+
+    # 预算闸门：批量写正文才是花销大头，摘要/检查这些单节小任务不拦
+    if body.task_type == "draft":
+        model = pick_model(request.app.state.registry, body.model or None)
+        est = await cost.estimate_pipeline(
+            store, request.app.state.registry, work_id=work_id,
+            sections=len(nodes), model=model,
+        )
+        if est["over_budget"] and not body.ignore_budget:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"预估花 {est['est_cost']}，超预算上限 {est['budget_limit']}："
+                    "收窄范围、调高预算，或确认后勾「忽略预算上限」重新入队"
+                ),
+            )
 
     payload = json.dumps({
         "model": body.model, "mode": body.mode, "instruction": body.instruction,

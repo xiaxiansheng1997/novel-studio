@@ -1224,7 +1224,7 @@ export const useStudioStore = defineStore('studio', () => {
    * 逐节生成。用 fetch 读流（EventSource 不支持 POST），
    * 每节完成就刷一次树，用户能看到进度而不是干等。
    */
-  async function runPipeline({ only_empty = true, limit = 0, instruction = '', model = genModel.value } = {}) {
+  async function runPipeline({ only_empty = true, limit = 0, instruction = '', model = genModel.value, ignore_budget = false } = {}) {
     if (!work.value || pipeline.value.running) return null
     pipeline.value = {
       running: true, total: 0, index: 0, title: '', chars: 0,
@@ -1235,7 +1235,7 @@ export const useStudioStore = defineStore('studio', () => {
       const resp = await apiFetch(`/studio/works/${work.value.id}/pipeline`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ only_empty, limit, instruction, model }),
+        body: JSON.stringify({ only_empty, limit, instruction, model, ignore_budget }),
       })
       if (!resp.ok) {
         let msg = `HTTP ${resp.status}`
@@ -1384,6 +1384,18 @@ export const useStudioStore = defineStore('studio', () => {
     } finally {
       assembling.value = false
     }
+  }
+
+  /** 整本阅读模式的数据：按全序的节列表；显式传 id，阅读页可以直接从 URL 进入 */
+  async function fetchReading(id) {
+    const wid = id || work.value?.id
+    if (!wid) return null
+    const r = await apiFetch(`/studio/works/${wid}/reading`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '阅读数据读取失败')
+      return null
+    }
+    return await r.json()
   }
 
   /**
@@ -1846,6 +1858,7 @@ export const useStudioStore = defineStore('studio', () => {
   async function enqueueBatch({
     taskType = 'draft', onlyEmpty = true, limit = 0, nodeIds = [],
     instruction = '', priority = 9, triageEvery = 0, model = genModel.value,
+    ignoreBudget = false,
   } = {}) {
     if (!work.value || queueBusy.value) return null
     queueBusy.value = true
@@ -1856,6 +1869,7 @@ export const useStudioStore = defineStore('studio', () => {
         body: JSON.stringify({
           task_type: taskType, only_empty: onlyEmpty, limit,
           node_ids: nodeIds, instruction, priority, triage_every: triageEvery, model,
+          ignore_budget: ignoreBudget,
         }),
       })
       if (!r.ok) {
@@ -1876,6 +1890,46 @@ export const useStudioStore = defineStore('studio', () => {
     if (q.paused || q.triage?.due) return true
     return Boolean(q.current) || (q.counts?.queued || 0) > 0
   })
+
+  // ==================== 批量前成本预估（迭代 C） ====================
+
+  /** 开跑前看一眼要花多少：与 pipeline 同一套选节口径，纯读不开跑。 */
+  async function estimatePipeline({ only_empty = true, limit = 0, model = genModel.value } = {}) {
+    if (!work.value) return null
+    try {
+      const r = await apiFetch(`/studio/works/${work.value.id}/pipeline/estimate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ only_empty, limit, model }),
+      })
+      if (!r.ok) return null
+      return await r.json()
+    } catch {
+      return null
+    }
+  }
+
+  async function getBudget() {
+    try {
+      const r = await apiFetch('/studio/budget')
+      return r.ok ? (await r.json()).limit : 0
+    } catch {
+      return 0
+    }
+  }
+
+  async function setBudget(limit) {
+    try {
+      const r = await apiFetch('/studio/budget', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: Number(limit) || 0 }),
+      })
+      return r.ok
+    } catch {
+      return false
+    }
+  }
 
   return {
     works, work, tree, node, stats, templates, sources, facts, terms, issues,
@@ -1907,7 +1961,7 @@ export const useStudioStore = defineStore('studio', () => {
     setDefaultTemplate, pinTemplate, templateFromWork, exportTemplate, importTemplate,
     outlineBusy, generateOutline,
     pipeline, runPipeline,
-    assembling, assembleDoc, downloadExport, exportBundle, exportLibrary, importBundle,
+    assembling, assembleDoc, fetchReading, downloadExport, exportBundle, exportLibrary, importBundle,
     exportHtml, publishCheck, writeDigest,
     // 公众号第二轮：文风 / 设置 / 标题 / 转发语
     voice, settings,
@@ -1922,5 +1976,7 @@ export const useStudioStore = defineStore('studio', () => {
     // M4 任务队列：写作台只靠这三个画一行进度；明细与控制走控制台的接口
     queue, queueBusy, queueActive,
     loadQueue, enqueueBatch,
+    // 迭代 C：批量前的成本预估与预算上限
+    estimatePipeline, getBudget, setBudget,
   }
 })

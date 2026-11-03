@@ -3687,6 +3687,31 @@ class StudioStore:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def run_baselines(
+        self, work_id: str, task_type: str = "article_draft", sample: int = 200
+    ) -> dict[str, Any]:
+        """这部作品历史成功 run 的字数中位数：批量前成本预估的依据。
+
+        只算 status='ok'：失败 run 的输出常是半截或废稿，拿它们拉中位数会低估。
+        prompt_chars 是开跑前就能定下来的量，预估吃这个最稳。
+        """
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT prompt_chars, output_chars FROM runs "
+                "WHERE work_id = ? AND task_type = ? AND status = 'ok' "
+                "ORDER BY started_at DESC LIMIT ?",
+                (work_id, task_type, max(1, min(sample, _MAX_LIMIT))),
+            )
+            rows = await cur.fetchall()
+        from app.studio.cost import median
+
+        return {
+            "count": len(rows),
+            "prompt_median": median([int(r[0] or 0) for r in rows]),
+            "output_median": median([int(r[1] or 0) for r in rows]),
+        }
+
     # ==================== 整本搬迁（作品包导出 / 导入） ====================
 
     async def export_work(self, work_id: str) -> Optional[dict[str, Any]]:

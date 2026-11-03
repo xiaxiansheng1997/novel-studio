@@ -109,6 +109,18 @@ class ProviderConfig(BaseModel):
     #   site   = 复用站点自己的会话（默认，最省 token，依赖站点上下文）
     #   prompt = 每轮把 system+历史拼成一段 prompt 发送，每次请求都新开会话（不依赖站点记忆）
     history_mode: str = "site"
+    # ---- OpenAI 兼容直连通道（非反代：官方 API / Ollama 等本地服务）----
+    # compat=true 时 registry 用 OpenAICompatAdapter，不碰浏览器也不读 ui/modes 那套
+    compat: bool = False
+    # 兼容端点根地址，如 https://api.openai.com/v1 或 http://localhost:11434/v1
+    base_url: str = ""
+    # API key 只放 .env/环境变量，config.yaml 里只写变量名；空串 = 无需鉴权（Ollama）
+    api_key_env: str = ""
+    # 请求上游时剥掉「{key}-」前缀：ollama-qwen2.5 → qwen2.5；官方 API 的 id 本身就是请求名则 false
+    strip_prefix: bool = False
+    # 每千 token 单价（元或美元与计费口径一致即可，界面只报相对数）：成本预估用，0 = 不计钱
+    price_in_per_1k_tokens: float = 0.0
+    price_out_per_1k_tokens: float = 0.0
 
     def model_ids(self) -> list[str]:
         return [m.id for m in self.models]

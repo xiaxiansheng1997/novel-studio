@@ -95,3 +95,36 @@ providers:
     history_mode: site
     # DeepSeek 会话直链：切回旧会话时直接导航（页面改版导致 404 会自动退化为新开会话）
     chat_url: "https://chat.deepseek.com/a/chat/s/{id}"
+
+  # ---- OpenAI 兼容直连通道（迭代 C：反代降为 fallback，批量优先走这里）----
+  # 两条示范默认关着： enabled: true 才注册；key 只写环境变量名，值放 .env
+  openai:
+    compat: true
+    enabled: false
+    display_name: "OpenAI 官方"
+    base_url: "https://api.openai.com/v1"
+    api_key_env: "OPENAI_API_KEY"
+    # 对外模型 id 的前缀；路由按前缀命中，请求名就是 id 本身（strip_prefix: false）
+    model_prefix: "gpt-"
+    strip_prefix: false
+    models:
+      - {id: gpt-4o-mini}
+      - {id: gpt-4o}
+    # 每千 token 单价（美元）：批量前的成本预估用；改价这里改一处即可
+    price_in_per_1k_tokens: 0.00015
+    price_out_per_1k_tokens: 0.0006
+
+  ollama:
+    compat: true
+    enabled: false
+    display_name: "本地 Ollama"
+    base_url: "http://localhost:11434/v1"
+    api_key_env: ""          # 本地服务无需鉴权
+    model_prefix: "ollama-"
+    # 请求上游时剥掉「ollama-」前缀：ollama-qwen2.5:14b → qwen2.5:14b
+    strip_prefix: true
+    models:
+      - {id: "ollama-qwen2.5:14b"}
+      - {id: "ollama-deepseek-r1:14b"}
+    price_in_per_1k_tokens: 0.0   # 自家显卡不计钱
+    price_out_per_1k_tokens: 0.0

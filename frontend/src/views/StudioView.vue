@@ -121,6 +121,9 @@
                       title="排进队列，关页面也会继续跑" @click="doEnqueue">
                 <AppIcon name="activity" :size="13" /> 排队
               </button>
+              <button class="btn btn-sm" title="整本连着读：阅读模式带目录与排版偏好" @click="openReader">
+                <AppIcon name="book" :size="13" /> 通读
+              </button>
               <button class="btn btn-sm" title="选择格式导出成稿（md / txt / docx / epub）" @click="exportOpen = true">
                 <AppIcon name="download" :size="13" /> 导出
               </button>
@@ -269,10 +272,39 @@
                 class="ed-prog"
                 :title="`本节目标 ${nodeTarget} 字`"
               ><i :style="{ width: Math.min(100, (wordCount / nodeTarget) * 100) + '%' }"></i></span>
+              <!-- 单篇才给预览：小说正文里的井号是要读的字，不是标记 -->
+              <button
+                v-if="isArticleWork"
+                class="mini md-toggle"
+                :class="{ 'is-on': mdPreview }"
+                :title="mdPreview ? '回到编辑（Ctrl+M）' : '按 Markdown 渲染预览（Ctrl+M）'"
+                @click="mdPreview = !mdPreview"
+              >{{ mdPreview ? '编辑' : '预览' }}</button>
+            </div>
+
+            <!-- 章内查找：只在 ed-head 下面多出一行条，不弹窗、不遮正文 -->
+            <div v-if="findOpen" class="find-bar">
+              <input
+                ref="findEl"
+                v-model="findQuery"
+                class="field find-input"
+                placeholder="在本节里找…"
+                @keydown.enter.exact.prevent="stepFind(1)"
+                @keydown.shift.enter.prevent="stepFind(-1)"
+              />
+              <span class="find-count">
+                {{ findHits.length ? `${findIdx + 1} / ${findHits.length}` : (findQuery ? '无匹配' : '') }}
+              </span>
+              <button class="mini" title="上一处（Shift+Enter）" @click="stepFind(-1)">↑</button>
+              <button class="mini" title="下一处（Enter）" @click="stepFind(1)">↓</button>
+              <button class="mini" title="关闭（Esc）" @click="closeFind">
+                <AppIcon name="x" :size="12" />
+              </button>
             </div>
 
             <div class="ed-body">
               <textarea
+                v-show="!mdPreview"
                 ref="editorEl"
                 v-model="contentDraft"
                 class="ed-textarea"
@@ -280,6 +312,11 @@
                 placeholder="在这里写，或点下方「生成」让 AI 出草稿…"
                 @input="onInput"
               />
+              <div
+                v-if="mdPreview"
+                class="md-preview"
+                v-html="renderedDraft"
+              ></div>
             </div>
 
             <!-- 生成预览：先看，点采用才写回 -->
@@ -297,7 +334,7 @@
                 引用素材：{{ store.genMeta.used_sources.map((s) => s.title).join('、') }}
               </p>
               <!-- 逐段勾选：一千五百字里只想要三段时，不必先整段采用再手删 -->
-              <div v-if="store.genText" class="gen-text">
+              <div v-if="store.genText" ref="genBoxEl" class="gen-text" @scroll="onGenScroll">
                 <label
                   v-for="(p, i) in genParas"
                   :key="i"
@@ -314,6 +351,12 @@
                   <span class="gen-para-text">{{ p }}</span>
                 </label>
               </div>
+              <!-- 打字机滚动断了（人往上翻前文）：给一个一键回到最新的出口 -->
+              <button
+                v-if="store.generating && !genStick"
+                class="btn btn-sm gen-follow"
+                @click="followGenTail(true)"
+              >跟随到最新</button>
               <p v-if="store.genError" class="gen-err">{{ store.genError }}</p>
               <!-- 停止后别把半截稿当失败：已经出来的部分可以照常采用 -->
               <p v-if="store.genStopped" class="gen-stop">
@@ -431,6 +474,11 @@
 
     <WechatDialog v-model:open="wechatOpen" @goto="gotoIssue" />
     <ExportDialog v-model:open="exportOpen" />
+    <BatchEstimateDialog
+      v-model:open="batchEstOpen"
+      :mode="batchEstMode"
+      @confirm="onBatchEstConfirm"
+    />
     <GlobalSearch v-model:open="searchOpen" :initial="searchSeed" @goto="gotoSearchHit" />
     <ImportDocDialog
       v-model:open="importOpen"
@@ -477,11 +525,14 @@ import AskPanel from '../components/AskPanel.vue'
 import TransformDialog from '../components/TransformDialog.vue'
 import WechatDialog from '../components/WechatDialog.vue'
 import ExportDialog from '../components/ExportDialog.vue'
+import BatchEstimateDialog from '../components/BatchEstimateDialog.vue'
 import GlobalSearch from '../components/GlobalSearch.vue'
 import ImportDocDialog from '../components/ImportDocDialog.vue'
 import ReplaceDialog from '../components/ReplaceDialog.vue'
+import { marked } from 'marked'
 import { useStudioStore } from '../stores/studio'
 import { apiFetch } from '../utils/api'
+import { collectHits, stepIndex } from '../utils/find'
 import {
   FONT_PRESETS,
   FONT_SIZES,
@@ -517,9 +568,20 @@ const contentDraft = ref('')
 const saveState = ref('saved') // saved | saving | dirty | error
 const taskType = ref('article_draft')
 const instruction = ref('')
+// 单篇的 Markdown 渲染预览：只切显示，草稿还是同一份源文，一个字都不动
+const mdPreview = ref(false)
 const editorEl = ref(null)
 const instrEl = ref(null)
 const panelRef = ref(null)
+// 章内查找（Ctrl+F）：命中用 textarea 选区定位，与 locateEvidence 同一条路
+const findOpen = ref(false)
+const findQuery = ref('')
+const findHits = ref([])   // [[start, end], ...]
+const findIdx = ref(0)
+const findEl = ref(null)
+// 打字机滚动：流式生成时预览贴尾走，人往上翻就停住
+const genBoxEl = ref(null)
+const genStick = ref(true)
 
 // 类型下拉来自 /studio/content-types（content-types.yaml），新增文种只改 YAML
 const kinds = computed(() =>
@@ -548,6 +610,9 @@ const digestBusy = ref(false)
 const wechatOpen = ref(false)
 // 导出成稿弹层：格式与署名在这里选，下载动作在弹层里自己收口
 const exportOpen = ref(false)
+// 批量前预估弹层（迭代 C）：两个批量入口共用，mode 区分 SSE 逐节与落库队列
+const batchEstOpen = ref(false)
+const batchEstMode = ref('pipeline')
 
 // 全库搜索弹层：书架与工作台共用（Ctrl+K，或书架上的「搜正文」）
 const searchOpen = ref(false)
@@ -656,6 +721,14 @@ const wordCount = computed(() => {
   return cjk + words
 })
 
+// Markdown 预览只给文档类作品：小说正文里的井号是要读的字，不是标记
+const isArticleWork = computed(() => (store.work?.kind || 'article') === 'article')
+// 渲染只在预览开着时做：源文始终是 contentDraft 那一份，切回编辑不丢字
+const renderedDraft = computed(() => (
+  mdPreview.value && contentDraft.value
+    ? marked(contentDraft.value, { breaks: true, gfm: true }) : ''
+))
+
 /** 本节目标字数：只在大纲生成过的那一节有（存在 meta_json.outline 里） */
 const nodeTarget = computed(() => {
   try {
@@ -739,6 +812,78 @@ function locateEvidence(text) {
   return false
 }
 
+// ---- 章内查找（Ctrl+F）----
+// 只管这一节里跳来跳去：全库有 Ctrl+K，跨节替换有 Ctrl+H，三条各管一段
+function openFind() {
+  mdPreview.value = false // 查找作用于源文：预览态下 textarea 被藏着，没处圖选
+  findOpen.value = true
+  nextTick(() => findEl.value?.select())
+}
+
+function closeFind() {
+  findOpen.value = false
+  findQuery.value = ''
+  findHits.value = []
+  findIdx.value = 0
+}
+
+/** 重扫一遍命中：正文可能刚被改过（手打或生成回填），位置不能留旧的 */
+function collectFindHits() {
+  findHits.value = collectHits(contentDraft.value, findQuery.value)
+  return findHits.value
+}
+
+function gotoFindHit(i) {
+  const hits = findHits.value
+  if (!hits.length) return
+  findIdx.value = stepIndex(i, 0, hits.length)
+  const [start, end] = hits[findIdx.value]
+  const el = editorEl.value
+  if (!el) return
+  el.focus()
+  el.setSelectionRange(start, end)
+  // 与 locateEvidence 同一个坑：浏览器常只滚到边上「差一点点」，手工再校准
+  const full = contentDraft.value || ''
+  const ratio = start / Math.max(full.length, 1)
+  el.scrollTop = Math.max(0, ratio * el.scrollHeight - el.clientHeight / 3)
+}
+
+function stepFind(delta) {
+  const hits = collectFindHits()
+  if (!hits.length) return
+  gotoFindHit(stepIndex(findIdx.value, delta, hits.length))
+}
+
+watch(findQuery, () => {
+  const hits = collectFindHits()
+  findIdx.value = 0
+  if (hits.length) gotoFindHit(0)
+})
+
+// ---- 打字机滚动：流式生成时预览跟着尾巴走 ----
+// 往上翻说明在看前文，就此停住；翻回贴着底部（或点「跟随到最新」）再继续跟
+function onGenScroll() {
+  const el = genBoxEl.value
+  if (!el) return
+  genStick.value = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+}
+
+function followGenTail(take = false) {
+  const el = genBoxEl.value
+  if (!el) return
+  if (take) genStick.value = true
+  el.scrollTop = el.scrollHeight
+}
+
+watch(() => store.genText, () => {
+  if (genStick.value) followGenTail()
+})
+
+// 每轮开始先贴底：不然上一轮停在哪就跟到哪
+watch(() => store.generating, (on) => {
+  if (on) nextTick(() => followGenTail(true))
+})
+
 onMounted(async () => {
   // 模型目录拉不到只影响下拉框选项，不能把整个写作台卡住，所以单独吞掉错误
   await Promise.all([
@@ -781,6 +926,8 @@ watch(() => store.work?.id, (id) => {
   workEditOpen.value = false
   typeOpen.value = false
   replaceOpen.value = false
+  // 换作品回到编辑态：小说没有预览，留着标记会让 textarea 被 v-show 藏没
+  mdPreview.value = false
   // 书架「新建作品」时 createWork 内部已经 selectWork，书架随即卸载，
   // @open 未必赶得上；以「work 已落、路由还没跟上」为准补一段收尾（不重复拉树）。
   if (id && route.params.id !== id) enterWork(id)
@@ -790,6 +937,8 @@ watch(() => store.node?.id, () => {
   titleDraft.value = store.node?.title || ''
   contentDraft.value = store.node?.content || ''
   saveState.value = 'saved'
+  // 换节收起查找条：上一节的命中位置在这一节里没有意义
+  closeFind()
 })
 
 // 专注模式：左树与右栏收起，只留正文与生成条。状态只属于这一屏，不写 localStorage
@@ -797,15 +946,19 @@ const focus = ref(false)
 function toggleFocus() {
   focus.value = !focus.value
 }
-// Esc 优先给弹层：排版、替换、公众号、加工、搜索、导入、先聊聊、作品信息、导出都算弹层
+// Esc 优先给弹层：排版、替换、公众号、加工、搜索、导入、先聊聊、作品信息、导出、批量预估都算弹层
 const dialogOpen = computed(() => (
   typeOpen.value || replaceOpen.value || wechatOpen.value || transformOpen.value
   || searchOpen.value || importOpen.value || askOpen.value || workEditOpen.value
-  || exportOpen.value
+  || exportOpen.value || batchEstOpen.value
 ))
 
-// 键盘可达：Ctrl+S 立即存，Ctrl+Enter 生成（见 design-system MASTER.md）
+// 键盘可达：Ctrl+S 立即存，Ctrl+Enter 生成，Ctrl+F 章内查找（见 design-system MASTER.md）
 function onKeydown(e) {
+  if (e.key === 'Escape' && findOpen.value) {
+    closeFind()
+    return
+  }
   if (e.key === 'Escape' && typeOpen.value) {
     typeOpen.value = false
     return
@@ -829,6 +982,18 @@ function onKeydown(e) {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
     e.preventDefault()
     openReplace()
+    return
+  }
+  // Ctrl+M 单篇 Markdown 预览开关（M=Markdown）；小说没这功能，按了不响
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'm') {
+    e.preventDefault()
+    if (isArticleWork.value) mdPreview.value = !mdPreview.value
+    return
+  }
+  // Ctrl+F 章内查找；Ctrl+Shift+F（专注模式）的分支排在更前面，不会被这里吞
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    e.preventDefault()
+    openFind()
     return
   }
   if (!(e.ctrlKey || e.metaKey)) return
@@ -1463,9 +1628,33 @@ async function doOutline() {
 
 async function doPipeline() {
   if (store.pipeline.running || !store.work) return
+  // 不直接开跑：先弹预估——预算超限在 SSE 里才看见就晚了，字已经一个一个烧掉了
+  batchEstMode.value = 'pipeline'
+  batchEstOpen.value = true
+}
+
+async function doEnqueue() {
+  if (!store.work) return
+  batchEstMode.value = 'batch'
+  batchEstOpen.value = true
+}
+
+/** 预估弹层确认后真正的开跑：两条批量路各走各的收尾 */
+async function onBatchEstConfirm({ ignoreBudget = false } = {}) {
+  if (batchEstMode.value === 'batch') {
+    await flushSave()
+    const j = await store.enqueueBatch({ instruction: instruction.value, ignoreBudget })
+    if (!j) {
+      showNotice(store.error || '入队失败（可能是超预算被拦）', true)
+      return
+    }
+    startQueuePoll()
+    if (store.node) await store.selectNode(store.node.id)
+    return
+  }
   await flushSave()
   resetPipeline()
-  await store.runPipeline({ instruction: instruction.value })
+  await store.runPipeline({ instruction: instruction.value, ignore_budget: ignoreBudget })
 }
 
 // ---- 队列（M4） ----
@@ -1506,17 +1695,13 @@ function applyRemoteContent(node) {
   saveState.value = 'saved'
 }
 
-async function doEnqueue() {
-  if (!store.work) return
-  await flushSave()
-  const j = await store.enqueueBatch({ instruction: instruction.value })
-  if (!j) return
-  startQueuePoll()
-  if (store.node) await store.selectNode(store.node.id)
-}
-
 function gotoConsole() {
   router.push({ path: '/admin', query: { tab: 'tasks' } })
+}
+
+/** 整本通读：跳独立阅读页，目录、排版偏好与「回写作台」都在那边 */
+function openReader() {
+  if (store.work) router.push(`/studio/${store.work.id}/read`)
 }
 
 function resetPipeline() {
@@ -2000,6 +2185,32 @@ async function applyTitle(text, target) {
   height: 100%;
   background: var(--run);
 }
+/* ---------- 章内查找条：贴着 ed-head 下面的一行，宽度跟着正文走 ---------- */
+.find-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: min(var(--w-measure, 646px), calc(100% - 64px));
+  margin: 0 auto;
+  padding-bottom: 8px;
+}
+.find-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  font-size: 12px;
+}
+.find-count {
+  font-family: theme('fontFamily.mono');
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.find-bar .mini {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .ed-body {
   flex: 1;
   min-height: 0;
@@ -2030,6 +2241,64 @@ async function applyTitle(text, target) {
   font-family: theme('fontFamily.sans');
   font-size: 13.5px;
   line-height: 1.7;
+}
+
+/* ---------- Markdown 预览（单篇）：版式吃同一组 --w-* 变量，与编辑态一处调 ---------- */
+.md-preview {
+  width: min(var(--w-measure, 646px), 100%);
+  height: 100%;
+  overflow-y: auto;
+  padding: 8px 0 30px;
+  font-family: var(--w-font, var(--w-serif));
+  font-size: var(--w-size, 18px);
+  line-height: var(--w-height, 1.9);
+  letter-spacing: 0.01em;
+  color: var(--text);
+}
+.md-preview :deep(h1),
+.md-preview :deep(h2),
+.md-preview :deep(h3),
+.md-preview :deep(h4) {
+  margin: 1.2em 0 0.6em;
+  font-family: theme('fontFamily.serif');
+  font-weight: 600;
+  line-height: 1.5;
+}
+.md-preview :deep(h1) { font-size: 1.35em; }
+.md-preview :deep(h2) { font-size: 1.2em; }
+.md-preview :deep(h3) { font-size: 1.08em; }
+.md-preview :deep(ul),
+.md-preview :deep(ol) {
+  margin: 0 0 1em;
+  padding-left: 1.6em;
+}
+.md-preview :deep(li) { margin: 0.2em 0; }
+.md-preview :deep(blockquote) {
+  margin: 0 0 1em;
+  padding: 2px 14px;
+  border-left: 3px solid var(--line);
+  color: var(--text-muted);
+}
+.md-preview :deep(pre) {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(var(--over), 0.05);
+  font-family: theme('fontFamily.mono');
+  font-size: 0.85em;
+  line-height: 1.6;
+}
+.md-preview :deep(code) {
+  font-family: theme('fontFamily.mono');
+  font-size: 0.85em;
+}
+.md-preview :deep(hr) {
+  margin: 1.6em 0;
+  border: none;
+  border-top: 1px solid var(--line);
+}
+.md-preview :deep(img) {
+  max-width: 100%;
 }
 
 /* ---------- 操作结果提示（浮在内容外角，不插进布局，不然行高会跳） ---------- */
@@ -2164,6 +2433,10 @@ async function applyTitle(text, target) {
   font-size: 11px;
   color: var(--text-faint);
 }
+.gen-follow {
+  align-self: flex-start;
+  margin-top: 6px;
+}
 
 /* ---------- 整篇流水线进度 ---------- */
 .pipe {
@@ -2256,6 +2529,10 @@ async function applyTitle(text, target) {
 .mini:hover {
   color: var(--text);
   border-color: var(--line-strong);
+}
+.md-toggle.is-on {
+  border-color: rgba(var(--run-rgb), 0.45);
+  color: var(--run-fg);
 }
 
 /* ---------- 生成工具条 ---------- */
