@@ -1,0 +1,63 @@
+frontend/src/components/ImportDocDialog.vue
+  s_c7df7c295a4159::t_db5248789e31b8 15,21-22,68,173-191,193
+app/studio/store.py
+  s_c7df7c295a4159::t_1cecd14c50c820 1017-1050,1155-1158,1160-1163,1165-1166,1181-1197,1212-1216,1221-1230,1233-1238,1240,1244,1250-1292,1303,1309-1372,1377,1379-1380,1384,1386-1389,1434-1466,1478,1512,1521-1524,1526-1587,1595,1609,1620-1622
+  s_c7df7c295a4159::t_56a43c52c7cc17 1373-1375
+  s_c7df7c295a4159::t_66aa91229e0882 1385,1390-1411,1413-1422,1424-1433,1468-1477,1479-1504,1507-1511,1513-1520,1588-1594,1596-1608,1610-1619
+  s_c7df7c295a4159::t_9f03d8b0345b08 1376,1467,1525
+  s_c7df7c295a4159::t_8463f1ce0dd6fa 1378,1381-1383,1412,1423
+  s_c7df7c295a4159::t_5b2c614ab04413 1505-1506
+app/studio/docx_import.py
+  s_c7df7c295a4159::t_42199f19b5e559 1-111
+frontend/src/stores/studio.js
+  s_c7df7c295a4159::t_74330f15fe5c32 1890-1891
+  s_c7df7c295a4159::t_dbba92dc58beb7 645-662,1889
+  s_c7df7c295a4159::t_c734fa61c55658 741-745
+  s_c7df7c295a4159::t_3977cd4278166d 704-705,712,716,731-740,746-804,1389-1400,1402-1403,1406
+tests/test_docx_import.py
+  s_c7df7c295a4159::t_e3c0f11d147373 53,76
+  s_c7df7c295a4159::t_88c834f308a751 1-52,54-75,77-142
+app/api/studio_routes.py
+  s_c7df7c295a4159::t_b96ab7b36f7f25 44,1126-1147
+  s_c7df7c295a4159::t_b57f5b269435a3 30,156-169,964,966,971-972,980-1032,1148-1149,2044-2047,2053,2059-2083
+frontend/src/views/StudioView.vue
+  s_c7df7c295a4159::t_c5bd7229b4f7b8 124,433,479,549-550,800,804,1000,1006,1008-1016,1021-1024,1215-1216
+  s_c7df7c295a4159::t_40ad63c9cd5a16 1073
+  s_c7df7c295a4159::t_c269606b463ff9 31-32,39-44,1029-1072,1074-1214
+frontend/src/components/StudioTree.vue
+  s_c7df7c295a4159::t_5ca5971100c1b1 157-160,162-163,357-458
+  s_c7df7c295a4159::t_4fbd46fcc95d0a 27,29-31,36-39,97-115,120-140,165,167,179,182-186,188-204,207,213-220,224-225,227-228,230-233,337,341-342,459,560,564,568-584,779
+  s_c7df7c295a4159::t_3a57baaf98e843 555-559,695-778
+tests/test_studio_structure_ops.py
+  s_c7df7c295a4159::t_cad2ee374316db 125-128
+  s_c7df7c295a4159::t_d436381d3b491e 1-94,96-124,129-216,218-332,334-335,337-343
+  s_c7df7c295a4159::t_d326375dbd9edf 95,344-346
+  s_c7df7c295a4159::t_851cdfb19d69ee 217
+  s_c7df7c295a4159::t_99ac531fcf2825 333,336
+tests/test_studio_reparent.py
+  s_85cd431edb9d78::t_506a405a598969 13-14,210-292,333-366
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5e773c2f0ef183e46458d13e33e92d5982abde4b",
+  "prompts": {},
+  "sessions": {
+    "s_85cd431edb9d78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3c26e2c-3325-4f56-a0e5-7186c7b56860",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
