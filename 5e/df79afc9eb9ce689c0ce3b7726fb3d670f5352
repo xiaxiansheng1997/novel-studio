@@ -1,0 +1,70 @@
+scripts/check.ps1
+  s_c7df7c295a4159::t_1aded41e9c5bd7 5,40-41,43-48
+app/core/base.py
+  s_c7df7c295a4159::t_4a88dd42df4a45 48-55
+  s_c7df7c295a4159::t_136719f8780d56 47
+frontend/tests/BatchEstimateDialog.spec.js
+  s_c7df7c295a4159::t_b034f3a994c83d 44-45,93-112
+scripts/smoke_frontend.py
+  s_c7df7c295a4159::t_6fb3e6687d0b68 7-11,15,24,32-33,56,63,66-70,97,119-137
+  s_c7df7c295a4159::t_2ca995763dc73e 138
+app/providers/openai_compat.py
+  s_c7df7c295a4159::t_ccb78cbe6f5eee 139-142,144-152
+  s_c7df7c295a4159::t_cd927cb75dca8a 65-76,82-86,89-91,132-136,143,153-155
+app/llm/gateway.py
+  s_c7df7c295a4159::t_346ef7037098af 123-124,128-134
+app/core/cut.py
+  s_c7df7c295a4159::t_ce5ccc7cc911b7 14-18,32
+frontend/src/utils/writer.js
+  s_c7df7c295a4159::t_d91c1cf3b015ac 7-9,11
+  s_c7df7c295a4159::t_b72f422b39f51d 10
+app/api/studio_routes.py
+  s_c7df7c295a4159::t_16a0be22786bd3 3124,3174-3177,3182,3185
+  s_c7df7c295a4159::t_e7ae695d52bba9 1845-1846,1851-1876,1921-1922,1925
+frontend/src/views/StudioView.vue
+  s_c7df7c295a4159::t_0f496af08dfcf8 1644-1645,1654,1669,1680
+  s_c7df7c295a4159::t_f75fd39608f958 480,617-619,1646-1649,1661
+  s_c7df7c295a4159::t_cbcb3182afabe2 822,847-849,861-862,865-866,868,945-950
+app/studio/cost.py
+  s_c7df7c295a4159::t_07e0e230587123 19-21
+  s_c7df7c295a4159::t_ccaf175498656c 79,81-86,130-135
+tests/test_pipeline_estimate.py
+  s_c7df7c295a4159::t_b55db3466523ce 266-302,305-306,308-309,314,316-320,323,331-337,340-341,345,347-356,359-360,363,366-368,371
+  s_c7df7c295a4159::t_770cea9c059ca9 198-199,201-204,207-210,312
+  s_c7df7c295a4159::t_be0900cda64925 307,313,315,321,325-330,361-362,364-365,369-370
+  s_c7df7c295a4159::t_ad833ab9026bb0 303-304,310-311,322,324,339,342-344,346
+  s_c7df7c295a4159::t_7b1c6fa3b5cece 358
+  s_c7df7c295a4159::t_1f41563a12731f 181,186,188-193,197,200,205-206,338
+  s_c7df7c295a4159::t_c63ef2100e29f8 211-214,357
+  s_c7df7c295a4159::t_9ab75bb84d4e1b 372
+tests/test_openai_compat.py
+  s_c7df7c295a4159::t_5d2a62766d1f34 173-183,185-229,304-324,339-342,345-349,351-355,361
+  s_c7df7c295a4159::t_42bc82673fb83f 343-344,350,360
+  s_c7df7c295a4159::t_4304eecc0607bf 18,356-359
+  s_c7df7c295a4159::t_319ee099d32e53 184
+frontend/src/components/BatchEstimateDialog.vue
+  s_c7df7c295a4159::t_9e9182b9535d52 57,92-94,113,126-127,132-134,137,140,148-153
+  s_c7df7c295a4159::t_ad50b32c73e864 128-131
+  s_c7df7c295a4159::t_3a637c263560b2 154-155
+app/studio/store.py
+  s_c7df7c295a4159::t_28ff47e30da18f 832-834,3693,3699-3702,3705-3710,3714,3716
+  s_c7df7c295a4159::t_c4d1a79d91781a 3727-3743
+frontend/src/views/ReadView.vue
+  s_c7df7c295a4159::t_d850fd994859ba 57,59,190-196,348-351,357-362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5edf79afc9eb9ce689c0ce3b7726fb3d670f5352",
+  "prompts": {},
+  "sessions": {
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
