@@ -34,6 +34,7 @@ from app.studio import (
     replace,
     retrieval,
     summarizer,
+    tasks,
     tokenize,
     voice,
     wechat,
@@ -131,6 +132,9 @@ class NodeUpdate(BaseModel):
     content: Optional[str] = None
     status: Optional[str] = None
     summary: Optional[str] = None
+    # 本节计划：prompt / target_words / pov / time / place。
+    # 传对象而不是 JSON 字符串，前端少一次 stringify，后端统一落成 JSON 文本。
+    plan_json: Optional[dict[str, Any]] = None
     # 前端点「保存」时传 true，才把当前正文留一份版本；自动保存不传
     snapshot: bool = False
     # 只有「采用 AI 结果」那一条会显式传；手改不传，由路由落成 human
@@ -205,6 +209,12 @@ class GenerateRequest(BaseModel):
     save: bool = False
     # 多候选时标记这是第几个（0 起），写入 runs.variant 方便事后比较
     variant: int = 0
+
+
+class BeatsRequest(BaseModel):
+    # 用当前还没保存的计划要点重抽也行：传了就以它为准
+    focus: str = ""
+    model: str = ""
 
 
 # ==================== 模板 ====================
@@ -835,6 +845,7 @@ async def get_node(node_id: str, request: Request):
 
 @router.patch("/studio/nodes/{node_id}", dependencies=[Depends(verify_key)])
 async def update_node(node_id: str, body: NodeUpdate, request: Request):
+    store = _store(request)
     payload = body.model_dump(exclude_none=True)
     snapshot = bool(payload.pop("snapshot", False))
     source = payload.pop("snapshot_source", None)
@@ -844,22 +855,69 @@ async def update_node(node_id: str, body: NodeUpdate, request: Request):
             status_code=400,
             detail=f"版本来源不认: {source}（只能是 {'/'.join(sorted(_VERSION_SOURCES))}）",
         )
+    plan = payload.get("plan_json")
+    clean_plan = _clean_plan(plan) if plan is not None else None
+    if clean_plan is not None:
+        payload["plan_json"] = json.dumps(clean_plan, ensure_ascii=False)
+    node = await store.get_node(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="节点不存在")
     # 定稿闸门：只拦「硬告警」（severity=error），提醒与提示不挡路。
     # 这里不写库、不改状态——前端拿到 409 里那几条，弹一句确认再带 force 重试；
     # 告警本身不会随定稿自动消掉，人在「告警」里点「已处理」才消。
     if payload.get("status") == "final" and not force:
-        node = await _store(request).get_node(node_id)
-        if not node:
-            raise HTTPException(status_code=404, detail="节点不存在")
-        gate = await _final_gate(_store(request), node)
+        gate = await _final_gate(store, node)
         if gate["open_errors"]:
             raise HTTPException(status_code=409, detail=gate)
-    ok = await _store(request).update_node(
+    ok = await store.update_node(
         node_id, snapshot=snapshot, snapshot_source=source or "human", **payload
     )
     if not ok:
         raise HTTPException(status_code=404, detail="节点不存在或无更新")
-    return await _store(request).get_node(node_id)
+    # 计划改了要顺手同步旧的 works.meta_json.outline：导出包、打分与旧代码
+    # 还在读那一份，两边不一致时「计划页改了、生成没变」会很难查。
+    if plan is not None:
+        work = await store.get_work(node["work_id"])
+        if work:
+            meta = _work_meta(work)
+            meta.setdefault("outline", {})[node_id] = {
+                "prompt": (clean_plan or {}).get("prompt", ""),
+                "target_words": (clean_plan or {}).get("target_words", 0),
+            }
+            await store.update_work(work["id"], meta_json=json.dumps(meta, ensure_ascii=False))
+    return await store.get_node(node_id)
+
+
+@router.post("/studio/nodes/{node_id}/beats", dependencies=[Depends(verify_key)])
+async def regenerate_beats(node_id: str, body: BeatsRequest, request: Request):
+    """给这一节重抽节拍卡（章纲），并直接写回 `nodes.summary`。
+
+    与队列里的 `beats` 任务共用同一套 prompt 与清洗逻辑：交互式重抽
+    不该产出另一种格式，否则「计划页写的」和「排队写的」会打架。
+    """
+    store = _store(request)
+    node = await store.get_node(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    work = await store.get_work(node["work_id"])
+    if not work:
+        raise HTTPException(status_code=404, detail="作品不存在")
+    if (work.get("kind") or "") != "novel":
+        raise HTTPException(status_code=400, detail="节拍卡只用于小说")
+    meta = _work_meta(work)
+    focus = (body.focus or "").strip() or prompting.node_outline(node, meta).get("prompt", "")
+    prev = await tasks._prev_summary(store, work["id"], int(node.get("ordinal") or 0))
+    known = [e["name"] for e in await store.list_entities(work["id"])]
+    system, user = prompting.beats_prompt(
+        work, node, prev_hint=prev, focus=focus, known_names=known)
+    model = pick_model(request.app.state.registry, body.model or None)
+    res = await _gateway(request).complete(
+        model=model, system=system, prompt=user, mode="quick")
+    beats = prompting.parse_beats(res.text or "")
+    if not beats:
+        raise HTTPException(status_code=502, detail="节拍卡为空：换个模型再试，或手写")
+    await store.update_node(node_id, summary=beats)
+    return {"beats": beats, "chars": len(beats)}
 
 
 @router.get("/studio/nodes/{node_id}/final-gate", dependencies=[Depends(verify_key)])
@@ -1418,6 +1476,27 @@ def _work_meta(work: dict) -> dict[str, Any]:
         return {}
 
 
+def _clean_plan(plan: Any) -> dict[str, Any]:
+    """把前端提交的计划收成稳定形状：四个字符串 + 一个非负整数。
+
+    多出来的键丢掉——`plan_json` 会被拼进 prompt，不能让前端顺手塞别的字段。
+    """
+    if not isinstance(plan, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in ("prompt", "pov", "time", "place"):
+        val = plan.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val.strip()[:2000]
+    try:
+        target = int(plan.get("target_words") or 0)
+    except (TypeError, ValueError):
+        target = 0
+    if target > 0:
+        out["target_words"] = min(target, 100000)
+    return out
+
+
 def _instruction_for(task_type: str, node: Optional[dict], work: dict, extra: str) -> str:
     """起草类任务的指令口径：大纲 / 整篇 / 队列都过 node_instruction，交互式以前是裸传的。
 
@@ -1634,6 +1713,11 @@ async def generate_outline(work_id: str, body: OutlineRequest, request: Request)
     meta = _work_meta(work)
     meta.setdefault("outline", {}).update(outline_meta)
     await store.update_work(work_id, meta_json=json.dumps(meta, ensure_ascii=False))
+    # 新计划字段也写一份：右栏「计划」页读的是 nodes.plan_json，
+    # 老代码与导出包继续读上面的 meta_json.outline。
+    for node_id, info in outline_meta.items():
+        await store.update_node(
+            node_id, plan_json=json.dumps(_clean_plan(info), ensure_ascii=False))
 
     elapsed = int((time.perf_counter() - started) * 1000)
     return {
@@ -2476,6 +2560,25 @@ class CardCreate(BaseModel):
     pinned: bool = True
 
 
+class ForeshadowUpdate(BaseModel):
+    status: Literal["open", "resolved", "abandoned"] = "resolved"
+    # 回收发生在第几节；不传就用它当初埋下的节号
+    ordinal: int = 0
+
+
+class EntityUpdate(BaseModel):
+    name: Optional[str] = None
+    kind: Optional[str] = None
+    aliases: Optional[list[str]] = None
+    status: Optional[str] = None
+    status_ordinal: Optional[int] = None
+
+
+class IssueResolve(BaseModel):
+    # 为什么忽略：同一条告警下次再出现时，人不用从头想一遍
+    note: str = ""
+
+
 class CheckRequest(BaseModel):
     node_id: str = ""
     all: bool = True
@@ -2689,6 +2792,54 @@ async def delete_card(card_id: str, request: Request):
     return {"ok": True}
 
 
+@router.patch("/studio/foreshadows/{foreshadow_id}", dependencies=[Depends(verify_key)])
+async def update_foreshadow(
+    foreshadow_id: str, body: ForeshadowUpdate, request: Request,
+):
+    """作者手动回收 / 弃用伏笔：抽出来的不一定都算数。"""
+    store = _store(request)
+    existing = await store.get_foreshadow(foreshadow_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="伏笔不存在")
+    ordinal = int(body.ordinal or existing.get("planted_ordinal") or 0)
+    try:
+        row = await store.update_foreshadow(
+            foreshadow_id, status=body.status, ordinal=ordinal)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    graph.invalidate(existing["work_id"])
+    return row
+
+
+@router.patch("/studio/entities/{entity_id}", dependencies=[Depends(verify_key)])
+async def update_entity(entity_id: str, body: EntityUpdate, request: Request):
+    """作者直接改图谱实体：改名 / 补别名 / 改类型 / 改状态。
+
+    抽取器只做保守对齐，作者知道「阿昭就是林昭」；不给这条路，
+    每次重抽都会把同一个人再拆一个节点出来。
+    """
+    store = _store(request)
+    existing = await store.get_entity(entity_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="实体不存在")
+    kind = body.kind
+    if kind is not None and kind not in graph.ENTITY_KINDS:
+        raise HTTPException(status_code=400, detail=f"实体类型不认：{kind}")
+    status = body.status
+    if status is not None and status not in graph.STATUSES:
+        raise HTTPException(status_code=400, detail=f"实体状态不认：{status}")
+    canonical = graph.canon(body.name) if body.name else None
+    try:
+        row = await store.update_entity(
+            entity_id, name=body.name, kind=kind, canonical=canonical,
+            aliases=body.aliases, status=status, status_ordinal=body.status_ordinal,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    graph.invalidate(existing["work_id"])
+    return row
+
+
 @router.post("/studio/works/{work_id}/check", dependencies=[Depends(verify_key)])
 async def run_check(work_id: str, body: CheckRequest, request: Request):
     """跑一致性检查。全部是本地结构化比对，不调模型。"""
@@ -2723,11 +2874,12 @@ async def run_check(work_id: str, body: CheckRequest, request: Request):
 
 
 @router.post("/studio/issues/{issue_id}/resolve", dependencies=[Depends(verify_key)])
-async def resolve_issue(issue_id: str, request: Request):
-    ok = await _store(request).resolve_issue(issue_id)
+async def resolve_issue(issue_id: str, request: Request, body: IssueResolve | None = None):
+    note = (body.note if body else "").strip()[:500]
+    ok = await _store(request).resolve_issue(issue_id, note)
     if not ok:
         raise HTTPException(status_code=404, detail="告警不存在")
-    return {"ok": True}
+    return {"ok": True, "note": note}
 
 
 @router.get("/studio/works/{work_id}/issues/summary", dependencies=[Depends(verify_key)])

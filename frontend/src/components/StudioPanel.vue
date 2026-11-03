@@ -8,7 +8,7 @@
         :class="{ 'is-active': tab === t.id }"
         role="tab"
         :aria-selected="tab === t.id"
-        @click="tab = t.id"
+        @click="pickTab(t.id)"
       >
         {{ t.label }}
         <span v-if="t.count" class="tab-count">{{ t.count }}</span>
@@ -16,8 +16,65 @@
     </div>
 
     <div class="panel-body" :class="{ 'is-ask': tab === 'ask' }">
+      <!-- 计划：作者对每一节的意图。写正文前先看这里，生成指令也从这里取。 -->
+      <section v-if="tab === 'plan'" class="section">
+        <div class="ctx-head">
+          <span class="hint inline">
+            {{ store.node ? (store.node.title || '当前节') : '未选中节点' }}
+            <template v-if="planDirty"> · 未保存</template>
+          </span>
+          <span v-if="store.node?.ordinal" class="item-meta">第 {{ store.node.ordinal }} 节</span>
+        </div>
+        <p v-if="!store.node" class="empty">先在左边选中一节。</p>
+        <template v-else>
+          <div class="fl">
+            <span>本节要点</span>
+            <textarea
+              v-model="planDraft.prompt"
+              class="field"
+              rows="5"
+              placeholder="这一节要推进什么：谁做了什么、信息怎么变、结尾停在哪"
+            ></textarea>
+          </div>
+          <div class="fl">
+            <span>目标字数</span>
+            <input v-model.number="planDraft.target_words" class="field" type="number" min="0" step="100" />
+          </div>
+          <div class="fl">
+            <span>叙事视角（可选）</span>
+            <input v-model="planDraft.pov" class="field" placeholder="如：第三人称限知，跟林昭" />
+          </div>
+          <div class="fl">
+            <span>故事内时间 / 地点（可选）</span>
+            <input v-model="planDraft.time" class="field" placeholder="如：入冬后第三天" />
+            <input v-model="planDraft.place" class="field" placeholder="如：青云宗后山" />
+          </div>
+          <div class="fl">
+            <span>节拍卡</span>
+            <textarea
+              v-model="beatsDraft"
+              class="field"
+              rows="6"
+              placeholder="出场 / 地点 / 事件 / 变化 / 钩子；按顺序推进"
+            ></textarea>
+          </div>
+          <div class="row-act">
+            <button class="btn btn-sm" :disabled="planBusy" @click="savePlan">
+              {{ planBusy ? '保存中…' : '保存计划' }}
+            </button>
+            <button class="btn btn-sm" :disabled="beatsBusy" @click="regenBeats">
+              {{ beatsBusy ? '重抽中…' : '重抽节拍' }}
+            </button>
+          </div>
+          <p class="hint">
+            计划会进入本节的生成指令；节拍卡按顺序推进，重抽会覆盖当前节拍。
+            老作品的大纲要点会在第一次保存时落到本节。
+          </p>
+        </template>
+      </section>
+
       <!-- 素材 -->
-      <section v-if="tab === 'sources'" class="section">
+      <section v-else-if="tab === 'sources'" class="section">
         <div class="src-top">
           <p class="hint inline">生成时按本节标题与提示词检索素材，命中不了才退回最近导入的；素材桶总预算约 4500 字。</p>
           <button class="btn btn-sm" @click="srcAdding = !srcAdding">
@@ -536,6 +593,10 @@
             <div v-for="f in graphForeshadows" :key="f.id" class="g-fs">
               <span class="g-fs-ord">第{{ f.planted_ordinal }}节</span>
               <span>{{ f.content }}</span>
+              <div class="row-act">
+                <button class="btn btn-sm" @click="resolveForeshadow(f, 'resolved')">回收</button>
+                <button class="btn btn-sm" @click="resolveForeshadow(f, 'abandoned')">弃用</button>
+              </div>
             </div>
           </template>
         </template>
@@ -549,7 +610,10 @@
               <span class="item-meta">{{ KIND_LABEL[c.kind] || c.kind }}</span>
             </div>
             <p v-if="c.summary" class="hint">{{ c.summary }}</p>
-            <button class="btn btn-sm" @click="store.deleteCard(c.id)">删</button>
+            <div class="row-act">
+              <button class="btn btn-sm" @click="editCard(c)">编辑</button>
+              <button class="btn btn-sm" @click="store.deleteCard(c.id)">删</button>
+            </div>
           </div>
           <div class="fl">
             <select v-model="cardForm.kind" class="field">
@@ -563,7 +627,12 @@
               <option value="destroyed">已毁</option>
               <option value="missing">下落不明</option>
             </select>
-            <button class="btn btn-sm" @click="submitCard">加卡</button>
+            <div class="row-act">
+              <button class="btn btn-sm" @click="submitCard">
+                {{ cardForm.id ? '保存卡' : '加卡' }}
+              </button>
+              <button v-if="cardForm.id" class="btn btn-sm" @click="cancelCard">取消</button>
+            </div>
           </div>
           <p class="hint">
             设定卡是权威：抽取时会作为硬约束注入，状态从「第 N 节」起生效。
@@ -626,7 +695,7 @@
           <p v-if="i.evidence" class="issue-ev">{{ i.evidence }}</p>
           <div class="issue-act">
             <button v-if="i.evidence" class="btn btn-sm" @click="emit('locate', i.evidence)">定位</button>
-            <button class="btn btn-sm" @click="store.resolveIssue(i.id)">忽略</button>
+            <button class="btn btn-sm" @click="ignoreIssue(i)">忽略</button>
           </div>
         </div>
 
@@ -641,7 +710,7 @@
             <p v-if="i.evidence" class="issue-ev">{{ i.evidence }}</p>
             <div class="issue-act">
               <button v-if="i.evidence" class="btn btn-sm" @click="emit('locate', i.evidence)">定位</button>
-              <button class="btn btn-sm" @click="store.resolveIssue(i.id)">就是这样</button>
+              <button class="btn btn-sm" @click="ignoreIssue(i, '就是这样')">就是这样</button>
             </div>
           </div>
         </template>
@@ -669,6 +738,7 @@
       :work-id="store.work?.id || ''"
       @locate="(t) => emit('locate', t)"
       @goto-node="(id) => emit('goto-node', id)"
+      @update-entity="saveEntity"
     />
 
     <VersionDiff
@@ -966,8 +1036,95 @@ const graphForeshadows = computed(() =>
   (store.graphData?.foreshadows || []).filter((f) => f.status === 'open')
 )
 const graphCards = computed(() => store.graphData?.cards || [])
-const cardForm = ref({ kind: 'character', name: '', summary: '', status: '' })
+const cardForm = ref({ id: '', kind: 'character', name: '', summary: '', status: '', data: {} })
 const graphOpen = ref(false)
+
+// ---- 计划：作者对每一节的意图 ----
+const planDraft = ref({ prompt: '', target_words: 0, pov: '', time: '', place: '' })
+const beatsDraft = ref('')
+const planBusy = ref(false)
+const beatsBusy = ref(false)
+
+function parsePlan(node) {
+  try {
+    const got = JSON.parse(node?.plan_json || '{}')
+    return got && typeof got === 'object' ? got : {}
+  } catch {
+    return {}
+  }
+}
+
+function legacyPlan(nodeId) {
+  try {
+    const meta = JSON.parse(store.work?.meta_json || '{}')
+    const got = meta?.outline?.[nodeId]
+    return got && typeof got === 'object' ? got : {}
+  } catch {
+    return {}
+  }
+}
+
+function cleanPlan(plan) {
+  const out = {}
+  for (const key of ['prompt', 'pov', 'time', 'place']) {
+    const val = String(plan?.[key] || '').trim()
+    if (val) out[key] = val
+  }
+  const target = Number(plan?.target_words || 0)
+  if (target > 0) out.target_words = Math.round(target)
+  return out
+}
+
+function syncPlanDraft() {
+  const node = store.node
+  if (!node) {
+    planDraft.value = { prompt: '', target_words: 0, pov: '', time: '', place: '' }
+    beatsDraft.value = ''
+    return
+  }
+  const plan = parsePlan(node)
+  const legacy = legacyPlan(node.id)
+  planDraft.value = {
+    prompt: plan.prompt || legacy.prompt || '',
+    target_words: Number(plan.target_words || legacy.target_words || 0),
+    pov: plan.pov || '',
+    time: plan.time || '',
+    place: plan.place || '',
+  }
+  beatsDraft.value = node.summary || ''
+}
+
+const planDirty = computed(() => {
+  if (!store.node) return false
+  const saved = cleanPlan(parsePlan(store.node))
+  const now = cleanPlan(planDraft.value)
+  return JSON.stringify(saved) !== JSON.stringify(now)
+    || (beatsDraft.value || '').trim() !== (store.node.summary || '').trim()
+})
+
+async function savePlan() {
+  if (!store.node || planBusy.value) return
+  planBusy.value = true
+  try {
+    await store.saveNode({
+      plan_json: cleanPlan(planDraft.value),
+      summary: beatsDraft.value,
+    })
+  } finally {
+    planBusy.value = false
+  }
+}
+
+async function regenBeats() {
+  if (!store.node || beatsBusy.value) return
+  beatsBusy.value = true
+  try {
+    const got = await store.generateBeats({ focus: planDraft.value.prompt })
+    if (got?.beats) beatsDraft.value = got.beats
+  } finally {
+    beatsBusy.value = false
+  }
+}
 
 // 缩略图不跑力导向：那要量尺寸、还会抽帧抖一阵；环形定死位置就够看出密度和孤岛。
 // 两个上限（44 点 / 140 线）是为了不让 300px 宽的图变成一团黑。
@@ -1054,14 +1211,60 @@ async function doExtract({ all = false, force = false } = {}) {
 
 async function submitCard() {
   if (!cardForm.value.name.trim()) return
-  const data = cardForm.value.status ? { status: cardForm.value.status } : {}
+  const data = { ...(cardForm.value.data || {}) }
+  if (cardForm.value.status) data.status = cardForm.value.status
+  else delete data.status
   const ok = await store.addCard({
+    id: cardForm.value.id,
     kind: cardForm.value.kind,
     name: cardForm.value.name.trim(),
     summary: cardForm.value.summary.trim(),
     dataJson: JSON.stringify(data),
   })
-  if (ok) cardForm.value = { kind: 'character', name: '', summary: '', status: '' }
+  if (ok) cardForm.value = { id: '', kind: 'character', name: '', summary: '', status: '', data: {} }
+}
+
+function editCard(card) {
+  let data = {}
+  try {
+    const got = JSON.parse(card.data_json || '{}')
+    if (got && typeof got === 'object') data = got
+  } catch {
+    data = {}
+  }
+  cardForm.value = {
+    id: card.id,
+    kind: card.kind,
+    name: card.name,
+    summary: card.summary || '',
+    status: String(data.status || ''),
+    data,
+  }
+}
+
+function cancelCard() {
+  cardForm.value = { id: '', kind: 'character', name: '', summary: '', status: '', data: {} }
+}
+
+async function resolveForeshadow(f, status) {
+  const ordinal = status === 'resolved' ? Number(store.node?.ordinal || 0) : 0
+  await store.resolveForeshadow(f.id, status, ordinal)
+}
+
+async function ignoreIssue(issue, label = '忽略') {
+  const note = window.prompt(`${label}的原因（可留空，之后还能在库里查到）`, '')
+  if (note === null) return
+  await store.resolveIssue(issue.id, note)
+}
+
+async function saveEntity(patch, done) {
+  let ok = false
+  try {
+    ok = await store.updateEntity(patch.id, patch)
+  } finally {
+    // 网络异常也要把表单解锁，否则「保存中…」会一直挂着
+    if (typeof done === 'function') done(ok)
+  }
 }
 
 async function doCheck(whole) {
@@ -1071,6 +1274,8 @@ async function doCheck(whole) {
 
 const tabs = computed(() => {
   const all = [
+    // 计划排第一：写小说时最常改的是「这一节要发生什么」，不是素材列表
+    { id: 'plan', label: '计划', count: 0, novelOnly: true },
     { id: 'sources', label: '素材', count: store.sources.length },
     { id: 'facts', label: '事实', count: store.facts.length },
     { id: 'terms', label: '术语', count: store.terms.length },
@@ -1087,11 +1292,20 @@ const tabs = computed(() => {
   return all.filter((t) => !t.novelOnly || store.isNovel)
 })
 
+const tabTouched = ref(false)
+function pickTab(id) {
+  tab.value = id
+  tabTouched.value = true
+}
+
 // 写作台 URL 的 ?panel=ask 直达：放在 tabs 定义之后，immediate 时才不会碰到 TDZ
 watch(
   () => props.initialTab,
   (v) => {
-    if (v && tabs.value.some((t) => t.id === v)) tab.value = v
+    if (v && tabs.value.some((t) => t.id === v)) {
+      tab.value = v
+      tabTouched.value = true
+    }
   },
   { immediate: true },
 )
@@ -1109,10 +1323,24 @@ async function loadAll() {
   ])
   loadStyle()
   loadTemplatePanel()
+  // 计划是小说写作的主入口：第一次打开自动落在这一页；
+  // 用户点过别的 tab 之后就不再抢。
+  if (!tabs.value.some((t) => t.id === tab.value)) {
+    tab.value = tabs.value[0]?.id || 'sources'
+  } else if (store.isNovel && !tabTouched.value) {
+    tab.value = 'plan'
+  }
+  syncPlanDraft()
 }
 
 // 画像变了就刷新编辑框（重新统计、加/删样本都会走到这里）
 watch(() => store.voice.profile, (v) => { profileDraft.value = v || '' }, { immediate: true })
+// 计划草稿跟节点走；保存后 node 会换成新对象，这里也会重新对齐
+watch(() => store.node?.id, syncPlanDraft, { immediate: true })
+watch(
+  [() => store.node?.plan_json, () => store.node?.summary],
+  syncPlanDraft,
+)
 onMounted(loadAll)
 watch(() => store.activeWorkId, loadAll)
 

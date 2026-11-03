@@ -1620,13 +1620,13 @@ export const useStudioStore = defineStore('studio', () => {
     return true
   }
 
-  async function addCard({ kind, name, summary, dataJson = '{}', aliases = [] }) {
+  async function addCard({ id = '', kind, name, summary, dataJson = '{}', aliases = [] }) {
     if (!work.value) return false
     const r = await apiFetch(`/studio/works/${work.value.id}/cards`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        kind, name, summary, data_json: dataJson, aliases, pinned: true,
+        id, kind, name, summary, data_json: dataJson, aliases, pinned: true,
       }),
     })
     if (!r.ok) {
@@ -1640,6 +1640,54 @@ export const useStudioStore = defineStore('studio', () => {
   async function deleteCard(id) {
     await apiFetch(`/studio/cards/${id}`, { method: 'DELETE' })
     await loadGraph({ refresh: true })
+  }
+
+  /** 作者改实体：改名 / 补别名 / 改类型 / 改状态。图谱缓存由后端失效。 */
+  async function updateEntity(id, patch) {
+    const r = await apiFetch(`/studio/entities/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (!r.ok) {
+      graphNote.value = `改实体失败：HTTP ${r.status} ${(await r.text()).slice(0, 160)}`
+      return false
+    }
+    await loadGraph({ refresh: true })
+    return true
+  }
+
+  /** 手动回收 / 弃用伏笔；ordinal 不传时后端用它当初埋下的节号。 */
+  async function resolveForeshadow(id, status = 'resolved', ordinal = 0) {
+    const r = await apiFetch(`/studio/foreshadows/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, ordinal }),
+    })
+    if (!r.ok) {
+      graphNote.value = `伏笔更新失败：HTTP ${r.status} ${(await r.text()).slice(0, 160)}`
+      return false
+    }
+    await loadGraph({ refresh: true })
+    return true
+  }
+
+  /** 重抽本节节拍卡（章纲）。返回 beats 文本，同时把本地 node.summary 同步过去。 */
+  async function generateBeats({ focus = '', model = genModel.value } = {}) {
+    if (!node.value) return null
+    const nodeId = node.value.id
+    const r = await apiFetch(`/studio/nodes/${nodeId}/beats`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ focus, model }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '重抽节拍失败')
+      return null
+    }
+    const j = await r.json()
+    if (node.value?.id === nodeId) node.value = { ...node.value, summary: j.beats }
+    return j
   }
 
   /** 一致性检查：纯本地结构化比对，点一下就能跑。 */
@@ -1665,8 +1713,12 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function resolveIssue(id) {
-    const r = await apiFetch(`/studio/issues/${id}/resolve`, { method: 'POST' })
+  async function resolveIssue(id, note = '') {
+    const r = await apiFetch(`/studio/issues/${id}/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    })
     if (!r.ok) return false
     issues.value = issues.value.filter((i) => i.id !== id)
     await loadIssueSummary()
@@ -1764,6 +1816,7 @@ export const useStudioStore = defineStore('studio', () => {
     // M3 图谱与一致性
     graphData, graphBusy, graphNote, checking, issueSummary, isNovel,
     loadGraph, extractGraph, clearGraph, addCard, deleteCard,
+    updateEntity, resolveForeshadow, generateBeats,
     runCheck, resolveIssue, loadIssueSummary,
     // M4 任务队列：写作台只靠这三个画一行进度；明细与控制走控制台的接口
     queue, queueBusy, queueActive,

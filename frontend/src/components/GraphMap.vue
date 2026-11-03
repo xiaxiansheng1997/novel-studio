@@ -119,6 +119,37 @@
             <p v-if="cardOf(selected)" class="d-card">{{ cardOf(selected).summary }}</p>
             <p v-else-if="selected.card_id" class="d-card faint">有设定卡但没写摘要</p>
 
+            <div class="entity-edit">
+              <button v-if="!entityEdit" class="btn btn-sm" @click="startEntityEdit">编辑实体</button>
+              <template v-else>
+                <input v-model="entityDraft.name" class="field" placeholder="名字（与正文一致）" />
+                <input v-model="entityDraft.aliases" class="field" placeholder="别名，用顿号或逗号分隔" />
+                <select v-model="entityDraft.kind" class="field">
+                  <option v-for="k in KIND_ORDER" :key="k" :value="k">{{ KIND_LABEL[k] }}</option>
+                </select>
+                <select v-model="entityDraft.status" class="field">
+                  <option value="alive">存活</option>
+                  <option value="dead">已死亡</option>
+                  <option value="destroyed">已毁</option>
+                  <option value="missing">下落不明</option>
+                </select>
+                <input
+                  v-model.number="entityDraft.status_ordinal"
+                  class="field"
+                  type="number"
+                  min="0"
+                  placeholder="状态从第几节起（0 = 一开始）"
+                />
+                <div class="entity-acts">
+                  <button class="btn btn-sm" :disabled="entitySaving" @click="submitEntityEdit">
+                    {{ entitySaving ? '保存中…' : '保存' }}
+                  </button>
+                  <button class="btn btn-sm" @click="cancelEntityEdit">取消</button>
+                </div>
+                <p v-if="entityError" class="entity-error">{{ entityError }}</p>
+              </template>
+            </div>
+
             <ul class="d-rels">
               <li v-for="r in relsOf(selected.id)" :key="r.id">
                 <span class="r-other">{{ otherName(r, selected.id) }}</span>
@@ -227,7 +258,7 @@ const props = defineProps({
   // 时间轴自己去接口拿：只在打开这一页时才用得到，不必往 store 里常驻一份
   workId: { type: String, default: '' },
 })
-const emit = defineEmits(['update:open', 'locate', 'goto-node'])
+const emit = defineEmits(['update:open', 'locate', 'goto-node', 'update-entity'])
 
 // ==================== 关系 / 时间轴 ====================
 //
@@ -311,11 +342,13 @@ watch([() => props.open, viewMode], ([open, mode]) => {
 watch(() => props.workId, () => {
   timeline.value = { sections: [], events: [], states: [] }
 })
+watch(selectedId, () => { entityEdit.value = false })
 
 const KIND_LABEL = {
   character: '人物', location: '地点', item: '物品',
   faction: '势力', rule: '规则', event: '事件', foreshadow: '伏笔',
 }
+const KIND_ORDER = ['character', 'location', 'item', 'faction', 'rule']
 const STATUS_LABEL = { dead: '已死亡', destroyed: '已毁', missing: '下落不明' }
 // 类别色一律引用主题 token，不再自带十六进制：换主题时图的图例跟着变。
 // 注意这些值是 CSS 变量，只能进 style（SVG 的 fill 属性不认 var()）。
@@ -466,6 +499,61 @@ function aliasesOf(n) {
 }
 function degreeOf(id) {
   return degree.value[id] || 0
+}
+
+// ---- 实体编辑：作者知道「阿昭就是林昭」，抽取器只做保守对齐 ----
+const entityEdit = ref(false)
+const entitySaving = ref(false)
+const entityError = ref('')
+const entityDraft = ref({
+  name: '', aliases: '', kind: 'character', status: 'alive', status_ordinal: 0,
+})
+
+function startEntityEdit() {
+  if (!selected.value) return
+  entityDraft.value = {
+    name: selected.value.name || '',
+    aliases: aliasesOf(selected.value).join('、'),
+    kind: selected.value.kind || 'character',
+    status: selected.value.status || 'alive',
+    status_ordinal: Number(selected.value.status_ordinal || 0),
+  }
+  entityError.value = ''
+  entityEdit.value = true
+}
+
+function cancelEntityEdit() {
+  entityEdit.value = false
+  entitySaving.value = false
+  entityError.value = ''
+}
+
+function submitEntityEdit() {
+  if (!selected.value || entitySaving.value || !entityDraft.value.name.trim()) return
+  const aliases = entityDraft.value.aliases
+    .split(/[、,，\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  entitySaving.value = true
+  entityError.value = ''
+  // 保存失败（重名 / 网络）时把表单留在原地，否则人改了半天，一按保存
+  // 面板关掉、名字没变，只能重新点开再猜哪里错了。
+  emit('update-entity', {
+    id: selected.value.id,
+    name: entityDraft.value.name.trim(),
+    kind: entityDraft.value.kind,
+    aliases,
+    status: entityDraft.value.status || 'alive',
+    status_ordinal: Number(entityDraft.value.status_ordinal || 0),
+  }, (ok) => {
+    entitySaving.value = false
+    if (ok) {
+      entityEdit.value = false
+      entityError.value = ''
+    } else {
+      entityError.value = '保存失败：名字可能和已有实体重复，或网络异常'
+    }
+  })
 }
 function cardOf(n) {
   return cardList.value.find((c) => c.id === n.card_id || c.name === n.name) || null
@@ -1082,6 +1170,22 @@ onUnmounted(() => {
 .d-tip.faint,
 .d-card.faint {
   color: var(--text-faint);
+}
+.entity-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+.entity-acts {
+  display: flex;
+  gap: 6px;
+}
+.entity-error {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--danger);
 }
 .legend {
   margin: 0;

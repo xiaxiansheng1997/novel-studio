@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     word_count INTEGER DEFAULT 0,
     content_hash TEXT DEFAULT '',
     summary TEXT DEFAULT '',
+    plan_json TEXT DEFAULT '{}',      -- 本节计划：prompt / target_words / pov / time / place
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -137,6 +138,7 @@ CREATE TABLE IF NOT EXISTS issues (
     evidence TEXT DEFAULT '',
     location TEXT DEFAULT '',
     resolved INTEGER DEFAULT 0,
+    resolution_note TEXT DEFAULT '',  -- 人为什么忽略它；下次看见同一条能少纠结一次
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_issues_node ON issues(node_id, resolved);

@@ -291,6 +291,50 @@ class StudioStore:
             await self._db.commit()
             logger.info(f"[studio] templates 已补 {len(missing)} 列（渠道/收藏/默认等）")
 
+        cur = await self._db.execute("PRAGMA table_info(nodes)")
+        ncols = {r[1] for r in await cur.fetchall()}
+        if "plan_json" not in ncols:
+            await self._db.execute("ALTER TABLE nodes ADD COLUMN plan_json TEXT DEFAULT '{}'")
+            # 老库里「本节计划」只活在 works.meta_json.outline。把它搬进节点，
+            # 右栏「计划」页打开时才有内容；搬不动的（没有 prompt/target）就留空。
+            cur = await self._db.execute("SELECT id, meta_json FROM works")
+            works = await cur.fetchall()
+            for work in works:
+                try:
+                    meta = json.loads(work["meta_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                outline = meta.get("outline") if isinstance(meta, dict) else None
+                if not isinstance(outline, dict):
+                    continue
+                for node_id, info in outline.items():
+                    if not isinstance(info, dict):
+                        continue
+                    try:
+                        target = int(info.get("target_words") or 0)
+                    except (TypeError, ValueError):
+                        target = 0
+                    plan = {
+                        "prompt": str(info.get("prompt") or ""),
+                        "target_words": target,
+                    }
+                    if not plan["prompt"] and not plan["target_words"]:
+                        continue
+                    await self._db.execute(
+                        "UPDATE nodes SET plan_json = ? WHERE id = ? AND work_id = ?",
+                        (json.dumps(plan, ensure_ascii=False), node_id, work["id"]),
+                    )
+            await self._db.commit()
+            logger.info("[studio] nodes 已补 plan_json 列，并从 meta_json.outline 回填")
+
+        cur = await self._db.execute("PRAGMA table_info(issues)")
+        icols = {r[1] for r in await cur.fetchall()}
+        if "resolution_note" not in icols:
+            await self._db.execute(
+                "ALTER TABLE issues ADD COLUMN resolution_note TEXT DEFAULT ''")
+            await self._db.commit()
+            logger.info("[studio] issues 已补 resolution_note 列（忽略原因）")
+
     async def close(self) -> None:
         if self._db is not None:
             await self._db.close()
@@ -810,7 +854,7 @@ class StudioStore:
         版本表里存的是**改后**的正文，所以最新版本与当前正文内容相同——
         回滚时靠这一点判断「当下这份要不要先补一版」，见 `restore_version`。
         """
-        allowed = {"title", "content", "status", "summary"}
+        allowed = {"title", "content", "status", "summary", "plan_json"}
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return False
@@ -2181,10 +2225,13 @@ class StudioStore:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
-    async def resolve_issue(self, issue_id: str) -> bool:
+    async def resolve_issue(self, issue_id: str, note: str = "") -> bool:
         assert self._db is not None
         async with self._lock:
-            cur = await self._db.execute("UPDATE issues SET resolved = 1 WHERE id = ?", (issue_id,))
+            cur = await self._db.execute(
+                "UPDATE issues SET resolved = 1, resolution_note = ? WHERE id = ?",
+                (note or "", issue_id),
+            )
             await self._db.commit()
         return (cur.rowcount or 0) > 0
 
@@ -2622,6 +2669,63 @@ class StudioStore:
             )
             await self._db.commit()
 
+    async def update_entity(
+        self, entity_id: str, *, name: Optional[str] = None, kind: Optional[str] = None,
+        canonical: Optional[str] = None, aliases: Optional[list[str]] = None,
+        status: Optional[str] = None, status_ordinal: Optional[int] = None,
+    ) -> Optional[dict[str, Any]]:
+        """作者直接改图谱里的实体：改名、改类型、补别名、改状态。
+
+        抽取器只按 canonical 保守对齐，作者却知道「阿昭就是林昭」——不改的话
+        每次抽取都会把同一个人再拆一个节点出来。canonical 冲突时抛 ValueError，
+        由路由落成 400，不静默合并两个实体。
+        """
+        assert self._db is not None
+        existing = await self.get_entity(entity_id)
+        if not existing:
+            return None
+        updates: dict[str, Any] = {}
+        if name is not None and name.strip():
+            updates["name"] = name.strip()
+        if kind is not None:
+            updates["kind"] = kind
+        if canonical is not None and canonical.strip():
+            updates["canonical"] = canonical.strip()
+        if aliases is not None:
+            updates["aliases"] = json.dumps(
+                [a.strip() for a in aliases if a and a.strip()], ensure_ascii=False)
+        if status is not None:
+            updates["status"] = status
+            updates["status_ordinal"] = int(status_ordinal or 0)
+        elif status_ordinal is not None:
+            updates["status_ordinal"] = int(status_ordinal)
+        if not updates:
+            return existing
+
+        async with self._lock:
+            new_canonical = updates.get("canonical")
+            if new_canonical and new_canonical != existing.get("canonical"):
+                cur = await self._db.execute(
+                    "SELECT id FROM entities WHERE work_id = ? AND canonical = ? AND id <> ?",
+                    (existing["work_id"], new_canonical, entity_id),
+                )
+                if await cur.fetchone():
+                    raise ValueError(f"已经有同名实体：{new_canonical}")
+            sets = ", ".join(f"{k} = ?" for k in updates)
+            await self._db.execute(
+                f"UPDATE entities SET {sets} WHERE id = ?",
+                list(updates.values()) + [entity_id],
+            )
+            # 实体挂着作者手写的设定卡时，改名要跟着改卡名：卡是抽取时的
+            # 权威提示，两边名字不一致，下一次抽取会把旧名再当成一个人。
+            if "name" in updates and existing.get("card_id"):
+                await self._db.execute(
+                    "UPDATE cards SET name = ?, updated_at = ? WHERE id = ?",
+                    (updates["name"], _now(), existing["card_id"]),
+                )
+            await self._db.commit()
+        return await self.get_entity(entity_id)
+
     async def list_relations(self, work_id: str) -> list[dict[str, Any]]:
         assert self._db is not None
         async with self._lock:
@@ -2777,6 +2881,42 @@ class StudioStore:
             )
             await self._db.commit()
         return (cur.rowcount or 0) > 0
+
+    async def get_foreshadow(self, foreshadow_id: str) -> Optional[dict[str, Any]]:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT * FROM foreshadows WHERE id = ?", (foreshadow_id,))
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def update_foreshadow(
+        self, foreshadow_id: str, *, status: str, ordinal: int = 0,
+    ) -> Optional[dict[str, Any]]:
+        """作者手动回收 / 弃用伏笔：抽出来的伏笔不一定都算数。"""
+        if status not in ("open", "resolved", "abandoned"):
+            raise ValueError(f"伏笔状态不认：{status}")
+        assert self._db is not None
+        async with self._lock:
+            if status == "resolved":
+                cur = await self._db.execute(
+                    "UPDATE foreshadows SET status = ?, resolved_ordinal = ? WHERE id = ?",
+                    (status, int(ordinal), foreshadow_id),
+                )
+            elif status == "open":
+                cur = await self._db.execute(
+                    "UPDATE foreshadows SET status = 'open', resolved_ordinal = NULL WHERE id = ?",
+                    (foreshadow_id,),
+                )
+            else:
+                cur = await self._db.execute(
+                    "UPDATE foreshadows SET status = ?, resolved_ordinal = NULL WHERE id = ?",
+                    (status, foreshadow_id),
+                )
+            await self._db.commit()
+        if not (cur.rowcount or 0):
+            return None
+        return await self.get_foreshadow(foreshadow_id)
 
     async def issue_exists(self, work_id: str, node_id: Optional[str], rule: str,
                            message: str) -> bool:
@@ -3160,7 +3300,7 @@ class StudioStore:
                 return None
             nodes = await rows(
                 "SELECT id, parent_id, path, depth, ordinal, kind, title, content, status, "
-                "word_count, content_hash, summary, created_at, updated_at "
+                "word_count, content_hash, summary, plan_json, created_at, updated_at "
                 "FROM nodes WHERE work_id = ? ORDER BY path", (work_id,),
             )
             versions = await rows(
@@ -3330,17 +3470,27 @@ class StudioStore:
                     ordinal = n.get("ordinal")
                     created = _bundle_float(n.get("created_at"), now) or now
                     updated = _bundle_float(n.get("updated_at"), created) or created
+                    # 计划字段可能是旧包里的空串或坏 JSON；坏掉就退化成空计划，
+                    # 不能因为一条节点计划把整本书导不进来。
+                    try:
+                        plan = json.loads(_bundle_text(n.get("plan_json")) or "{}")
+                    except json.JSONDecodeError:
+                        plan = {}
+                    if not isinstance(plan, dict):
+                        plan = {}
                     await self._db.execute(
                         "INSERT INTO nodes(id, work_id, parent_id, path, depth, ordinal, kind, title, "
-                        "content, status, word_count, content_hash, summary, created_at, updated_at) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "content, status, word_count, content_hash, summary, plan_json, "
+                        "created_at, updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (node_map[old], wid, node_map.get(_bundle_text(n.get("parent_id"))),
                          node_paths[old], _bundle_int(n.get("depth")),
                          None if ordinal is None else _bundle_int(ordinal), kind_n,
                          _bundle_text(n.get("title"))[:120], content,
                          _bundle_text(n.get("status")) or "draft",
                          _count_words(content), _hash(content) if content else "",
-                         _bundle_text(n.get("summary")), created, updated),
+                         _bundle_text(n.get("summary")),
+                         json.dumps(plan, ensure_ascii=False), created, updated),
                     )
                     counts["nodes"] += 1
 
