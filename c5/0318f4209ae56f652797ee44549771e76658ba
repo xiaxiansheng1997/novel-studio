@@ -1,0 +1,66 @@
+app/api/admin_routes.py
+  s_c7df7c295a4159::t_8cfaf40a65c169 5-8,14-15,17,19,316-317,320
+  s_c7df7c295a4159::t_1501012ffc9db8 22,75-79,87-90,96-272,274-275,277-279,282-289,291-315
+  s_c7df7c295a4159::t_595f2d97d0d0f4 318-319,321-322,344-352
+  s_c7df7c295a4159::t_551a340b01fcae 338-343
+  s_c7df7c295a4159::t_4846deb6af7fbd 276,280-281,290
+app/config.py
+  s_c7df7c295a4159::t_acb422e71d22b9 119-121,181-185
+tests/test_pipeline_estimate.py
+  s_c7df7c295a4159::t_680c0c93a72e31 64-67,69
+app/core/base.py
+  s_c7df7c295a4159::t_415b547bbbe892 46-49,52-53,55
+app/core/provider_store.py
+  s_c7df7c295a4159::t_28aab5298589c4 1-184
+app/providers/openai_compat.py
+  s_c7df7c295a4159::t_015face8f1ffc8 40-42,52,56-57
+frontend/tests/compatDialog.spec.js
+  s_c7df7c295a4159::t_6aac5606a7c4fd 1-6,8-37,47,49-60,63-75,78-113,115-125,138-159
+  s_c7df7c295a4159::t_0c1b77350871f5 7,38-42,44-46,48
+  s_c7df7c295a4159::t_35e1f6bcad6ce8 43
+  s_c7df7c295a4159::t_63b8767f898679 61-62
+  s_c7df7c295a4159::t_e27dd0bab2c175 76-77,114,126-137
+tests/test_transform_context_models.py
+  s_c7df7c295a4159::t_e57b63c3634317 41-44,46
+app/core/store.py
+  s_c7df7c295a4159::t_e258c4b85c8e89 19-20,50
+  s_c7df7c295a4159::t_26b379e20ef797 7
+frontend/src/components/CompatDialog.vue
+  s_c7df7c295a4159::t_36bc4a5ed867d9 130-137
+  s_c7df7c295a4159::t_bf6ccd115d34cf 1-127,138-155,159-161,163-164,166-184,188-347
+  s_c7df7c295a4159::t_bbeea52565f8cc 128-129,156-158,162,165,185-187
+frontend/src/views/ConsoleView.vue
+  s_c7df7c295a4159::t_10b0d55a0a9282 69,75-104,150,160-165,1134
+  s_c7df7c295a4159::t_33f55d0f6178bc 965,1078,1081-1113,1117-1133
+  s_c7df7c295a4159::t_498d8b5b300529 2221-2242,2246-2261
+  s_c7df7c295a4159::t_4a1681e78e6865 1114-1116
+  s_c7df7c295a4159::t_8524af5774e502 2220,2243-2245
+tests/test_compat_admin.py
+  s_c7df7c295a4159::t_e4c696a966d002 27-34
+  s_c7df7c295a4159::t_b6496abb7947b0 267-269
+  s_c7df7c295a4159::t_fc47b005b6ae29 218-235
+  s_c7df7c295a4159::t_9dbf3dcf8bc201 55-56
+  s_c7df7c295a4159::t_95a59b2295cbe5 1-26,35-54,57-69,86-122,124-129,131-134,137-201,216-217,236-255,259,261-266,270-274
+  s_c7df7c295a4159::t_39c506caf25a3d 70-85,202-215
+  s_c7df7c295a4159::t_7586f83d8a1ecd 123
+  s_c7df7c295a4159::t_43835f10bca5d7 130,135-136,257,260
+  s_c7df7c295a4159::t_69af0b4388142b 256,258
+app/core/registry.py
+  s_c7df7c295a4159::t_b524d4e3dc4b25 52-57,59-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c50318f4209ae56f652797ee44549771e76658ba",
+  "prompts": {},
+  "sessions": {
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
