@@ -1,0 +1,42 @@
+app/studio/proofread.py
+  s_c7df7c295a4159::t_611a9398e639ca 19
+  s_c7df7c295a4159::t_6773ed6e8b5e8c 127,131,135,137,141-142,157,160,163-164,250
+  s_c7df7c295a4159::t_60c2252bf1980d 1-18,20-126,128-130,132-134,136,138-140,143-156,158-159,161-162,165-176,179-249,251-263
+  s_c7df7c295a4159::t_1b79ba53b15cac 177-178
+frontend/src/components/StudioPanel.vue
+  s_c7df7c295a4159::t_3835a63cea7d91 1195-1198
+tests/test_proofread.py
+  s_c7df7c295a4159::t_9a5468342e85f5 39,62,151-154
+  s_c7df7c295a4159::t_4886839a134302 1-15,17-38,40-55,58-61,63-150,155-181
+  s_c7df7c295a4159::t_394e39725328d5 16
+  s_c7df7c295a4159::t_20db1901a61e9c 56-57
+app/studio/consistency.py
+  s_c7df7c295a4159::t_37b7974e4675b5 1
+  s_c7df7c295a4159::t_59260c416e87ff 20,373-374
+scripts/check.ps1
+  s_37ad9d757f0687::t_b1a66113fcb088 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "50d3d948931f629b5ea2e951bac41d359be6c93e",
+  "prompts": {},
+  "sessions": {
+    "s_37ad9d757f0687": {
+      "agent_id": {
+        "tool": "mock_ai",
+        "id": "ai-thread-1793754698817732100",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    },
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
