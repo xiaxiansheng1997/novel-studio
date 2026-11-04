@@ -316,6 +316,14 @@
                 :title="mdPreview ? '回到编辑（Ctrl+M）' : '按 Markdown 渲染预览（Ctrl+M）'"
                 @click="mdPreview = !mdPreview"
               >{{ mdPreview ? '编辑' : '预览' }}</button>
+              <!-- 段落导航：两三段的短节不值得开列表，多于一段才出现 -->
+              <button
+                v-if="navParas.length > 1"
+                class="mini para-toggle"
+                :class="{ 'is-on': paraOpen }"
+                title="本节段落列表（Ctrl+G）：点段首行跳过去"
+                @click="paraOpen = !paraOpen"
+              >¶</button>
             </div>
 
             <!-- 章内查找：只在 ed-head 下面多出一行条，不弹窗、不遮正文 -->
@@ -339,6 +347,21 @@
             </div>
 
             <div class="ed-body">
+              <!-- 浮层锚在正文右上：只认段首行，不复制全文——长节几十段时重绘成本高 -->
+              <div v-if="paraOpen" class="para-pop">
+                <header class="para-pop-head">段落列表 · {{ navParas.length }} 段</header>
+                <button
+                  v-for="p in navParas"
+                  :key="p.i"
+                  class="para-item"
+                  :class="{ on: p.i === activeParaIdx }"
+                  @click="gotoPara(p)"
+                >
+                  <span class="para-no">{{ p.i + 1 }}</span>
+                  <span class="para-snip">{{ p.text.trim().slice(0, 26) }}</span>
+                  <span class="para-len">{{ p.text.length }}</span>
+                </button>
+              </div>
               <WriterEditor
                 v-show="!mdPreview"
                 ref="editorEl"
@@ -573,6 +596,7 @@ import { marked } from 'marked'
 import { useStudioStore } from '../stores/studio'
 import { apiFetch } from '../utils/api'
 import { collectHits, stepIndex } from '../utils/find'
+import { splitWithOffsets } from '../utils/paras'
 import {
   FONT_PRESETS,
   FONT_SIZES,
@@ -624,6 +648,27 @@ const findEl = ref(null)
 // 打字机滚动：流式生成时预览贴尾走，人往上翻就停住
 const genBoxEl = ref(null)
 const genStick = ref(true)
+
+// 节内段落导航（Ctrl+G）：长节没有目录，靠段首行认路——衬底架构把段表
+// 算好了（paras.js），这里只把「第几段开头在第几行」变成可点的列表
+const paraOpen = ref(false)
+const navParas = computed(() =>
+  splitWithOffsets(contentDraft.value)
+    .map((p, i) => ({ i, text: p.text, start: p.start }))
+    .filter((p) => p.text.trim()),
+)
+// 当前段跟编辑器里那个走（衬底自己的对表结果），不在这里重算一遍
+const activeParaIdx = computed(() => editorEl.value?.activeIndex ?? -1)
+
+function gotoPara(p) {
+  const el = editorEl.value
+  if (!el) return
+  paraOpen.value = false
+  el.focus()
+  // 光标落段首、不整段选中：目录跳转选中整段的话，接下来敲的第一个字就把整段换了
+  el.setSelectionRange(p.start, p.start)
+  el.scrollToOffset(p.start)
+}
 
 // 类型下拉来自 /studio/content-types（content-types.yaml），新增文种只改 YAML
 const kinds = computed(() =>
@@ -978,6 +1023,8 @@ watch(() => store.work?.id, (id) => {
   workEditOpen.value = false
   typeOpen.value = false
   replaceOpen.value = false
+  paraOpen.value = false
+  scrollMemo.clear()
   // 换作品回到编辑态：小说没有预览，留着标记会让 textarea 被 v-show 藏没
   mdPreview.value = false
   // 书架「新建作品」时 createWork 内部已经 selectWork，书架随即卸载，
@@ -991,12 +1038,27 @@ watch(() => store.work?.kind, () => {
   mdPreview.value = false
 })
 
-watch(() => store.node?.id, () => {
+// 切节滚动位置记忆：去别的节查一眼回来，不该再用滚轮找位。
+// Map 放内存不落 localStorage：「看到哪一行」是正在写这本书的状态，
+// 刷新后上下文已经没了，恢复上次的「位置」反而更意外
+const scrollMemo = new Map()
+
+watch(() => store.node?.id, (id, prev) => {
+  // 这个回调跑在内容灌入之前：此刻编辑器里还是上一节，它的 scrollTop 就是旧节的位置
+  if (prev && editorEl.value) scrollMemo.set(prev, editorEl.value.scrollTop)
   titleDraft.value = store.node?.title || ''
   contentDraft.value = store.node?.content || ''
   saveState.value = 'saved'
   // 换节收起查找条：上一节的命中位置在这一节里没有意义
   closeFind()
+  paraOpen.value = false
+  // textarea 被灌新值时浏览器会把 scrollTop 打回 0：等 DOM 落定再放回去
+  const y = id ? scrollMemo.get(id) : 0
+  if (y && editorEl.value) {
+    nextTick(() => {
+      if (store.node?.id === id) editorEl.value.scrollTop = y
+    })
+  }
 })
 
 // 专注模式：左树与右栏收起，只留正文与生成条。状态只属于这一屏，不写 localStorage
@@ -1008,13 +1070,17 @@ function toggleFocus() {
 const dialogOpen = computed(() => (
   typeOpen.value || replaceOpen.value || wechatOpen.value || transformOpen.value
   || searchOpen.value || importOpen.value || askOpen.value || workEditOpen.value
-  || exportOpen.value || batchEstOpen.value
+  || exportOpen.value || batchEstOpen.value || paraOpen.value
 ))
 
 // 键盘可达：Ctrl+S 立即存，Ctrl+Enter 生成，Ctrl+F 章内查找（见 design-system MASTER.md）
 function onKeydown(e) {
   if (e.key === 'Escape' && findOpen.value) {
     closeFind()
+    return
+  }
+  if (e.key === 'Escape' && paraOpen.value) {
+    paraOpen.value = false
     return
   }
   if (e.key === 'Escape' && typeOpen.value) {
@@ -1040,6 +1106,13 @@ function onKeydown(e) {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
     e.preventDefault()
     openReplace()
+    return
+  }
+  // Ctrl+G 节内段落列表（G=goto）。浏览器默认的 Ctrl+G「查找下一个」
+  // 在写作场景几乎没人用，抢得过；没选中节点时按了不响
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'g') {
+    e.preventDefault()
+    if (store.node) paraOpen.value = !paraOpen.value
     return
   }
   // Ctrl+M 单篇 Markdown 预览开关（M=Markdown）；小说没这功能，按了不响
@@ -2291,8 +2364,73 @@ async function applyTitle(text, target) {
   display: flex;
   justify-content: center;
   padding: 0 32px;
+  /* 段落导航浮层锚在这一层 */
+  position: relative;
   /* 护眼档：关的时候是 transparent，开了压一层本主题的暗色分量（--shade-rgb） */
   background: var(--w-tint-bg, transparent);
+}
+/* 节内段落导航（Ctrl+G） */
+.para-pop {
+  position: absolute;
+  top: 10px;
+  right: 36px;
+  z-index: 30;
+  width: 268px;
+  max-height: 62%;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 14px 36px -18px rgba(var(--shade-rgb), 0.6);
+}
+.para-pop-head {
+  padding: 2px 8px 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.para-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.para-item:hover {
+  background: rgba(var(--over), 0.05);
+}
+.para-item.on {
+  color: var(--text);
+}
+.para-no {
+  flex-shrink: 0;
+  width: 24px;
+  text-align: right;
+  font-family: theme('fontFamily.mono');
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.para-snip {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.para-len {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.para-toggle.is-on {
+  color: var(--run);
 }
 /* 编辑器本体换成了 WriterEditor 组件（衬底/淡化的样式在它自己里），
    这里只剩窄屏时把它的根节点放宽——组件根带着 ed-editor 类落在这层 DOM 上 */

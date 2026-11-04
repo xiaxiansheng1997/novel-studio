@@ -37,6 +37,20 @@
       @compositionstart="composing = true"
       @compositionend="onCompositionEnd"
     />
+
+    <!--
+      离屏测量层：回答「正文里第 pos 个字符落在第几行」——段导航要跳到
+      没在屏幕上的位置，衬底又未必开着，只能拿一份隐藏的同构布局量。
+      与衬底共用同一组度量（CSS 选择器组），宽度同 clientW；
+      内容命令式塞入，不进 Vue 渲染。真实浏览器里同步读 offsetTop 会强制
+      layout，量一次几毫秒；happy-dom 里永远是 0，测行为不测像素。
+    -->
+    <div
+      ref="measureEl"
+      class="ue-measure"
+      :style="{ width: clientW ? clientW + 'px' : '' }"
+      aria-hidden="true"
+    ></div>
   </div>
 </template>
 
@@ -58,6 +72,7 @@ const emit = defineEmits(['update:modelValue', 'input'])
 const taEl = ref(null)
 const underEl = ref(null)
 const markEl = ref(null)
+const measureEl = ref(null)
 const composing = ref(false)
 const scrollY = ref(0)
 const clientW = ref(0)
@@ -114,6 +129,29 @@ function followLine() {
     ta.scrollTop = want
     scrollY.value = want // 程序赋值也会触发 scroll，但这里直接同步，省一帧衬底漂移
   }
+}
+
+/**
+ * 把正文偏移 pos 处滚到视口上三分之一：段导航的跳转落点。
+ * 在测量层里重现「pos 之前的字」的排布，末尾补一个零宽点读它的
+ * offsetTop——两侧 padding-top 都是 8px，与 ta 的滚动内容同坐标系。
+ * 落点取三分之一而不是贴顶：跳过去还要看见上一段的尾巴才知道自己在哪。
+ */
+function scrollToOffset(pos) {
+  const ta = taEl.value
+  const el = measureEl.value
+  if (!ta || !el) return
+  const text = props.modelValue || ''
+  el.textContent = text.slice(0, Math.max(0, Math.min(pos, text.length)))
+  const dot = document.createElement('span')
+  // 命令式创建的元素拿不到 scoped 属性，零宽样式只能直接写
+  dot.style.cssText = 'display:inline-block;width:0;height:0'
+  el.appendChild(dot)
+  const y = dot.offsetTop
+  el.textContent = ''
+  ta.scrollTop = Math.max(0, y - ta.clientHeight * 0.34)
+  // 程序赋值不保证走 scroll 事件（已贴顶时为 0），衬底直接跟到位
+  scrollY.value = ta.scrollTop
 }
 
 function onInput() {
@@ -174,6 +212,8 @@ defineExpose({
   get scrollHeight() { return taEl.value?.scrollHeight ?? 0 },
   get clientHeight() { return taEl.value?.clientHeight ?? 0 },
   get scrollTop() { return taEl.value?.scrollTop ?? 0 },
+  // 当前段下标：段导航浮层靠它标出「你在哪一段」
+  get activeIndex() { return activeIdx.value },
   set scrollTop(v) {
     if (taEl.value) { taEl.value.scrollTop = v; scrollY.value = v }
   },
@@ -181,6 +221,7 @@ defineExpose({
     taEl.value?.setSelectionRange(a, b)
     syncActive()
   },
+  scrollToOffset,
   focus(opts) { taEl.value?.focus(opts) },
 })
 </script>
@@ -191,9 +232,11 @@ defineExpose({
   width: min(var(--w-measure, 646px), 100%);
   height: 100%;
 }
-/* textarea 与衬底共用一整组度量：任何一个属性走偏都会变成「字糊成重影」 */
+/* textarea 与两层纸共用一整组度量：任何一个属性走偏都会变成「字糊成重影」；
+   测量层不叫 ue-under：测试与调试都在找「衬底开没开」，两层得分得开 */
 .ue-ta,
-.ue-under {
+.ue-under,
+.ue-measure {
   font-family: var(--w-font, var(--w-serif));
   font-size: var(--w-size, 18px);
   line-height: var(--w-height, 1.9);
@@ -216,13 +259,16 @@ defineExpose({
   /* 永远预留滚动条：衬底的宽度拿的是 clientWidth，忽现忽隐会让折行宽度跳变 */
   overflow-y: scroll;
 }
-.ue-under {
+.ue-under,
+.ue-measure {
   position: absolute;
   top: 0;
   left: 0;
   overflow: hidden;
   color: var(--text);
   pointer-events: none;
+}
+.ue-under {
   will-change: transform;
 }
 /* 衬底开着：字在这层，textarea 只留光标与选区 */
@@ -250,6 +296,11 @@ defineExpose({
   display: inline-block;
   width: 0;
   height: 0;
+}
+.ue-measure {
+  /* 量完即清空：它常驻 DOM，但不能挡住或抢走任何交互 */
+  visibility: hidden;
+  z-index: -1;
 }
 @media (prefers-reduced-motion: reduce) {
   .ue-p { transition: none; }

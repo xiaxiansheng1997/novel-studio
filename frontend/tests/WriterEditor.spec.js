@@ -120,3 +120,20 @@ it('expose 就是 textarea 的替身：消费面不用认识组件', async () =>
   expect(vm.scrollTop).toBe(42)
   expect(typeof vm.scrollHeight).toBe('number')
 })
+
+it('activeIndex 跟着选区走：段导航浮层靠它标出当前段', async () => {
+  const w = await mountEditor()
+  expect(w.vm.activeIndex).toBe(2)      // happy-dom 里 cursor 默认停文末：站在最后一段
+  w.vm.setSelectionRange(1, 1)
+  await nextTick()
+  expect(w.vm.activeIndex).toBe(0)
+})
+
+it('scrollToOffset 量完就清空测量层，不会把正文留两份', async () => {
+  const w = await mountEditor()
+  w.vm.scrollToOffset(4)
+  const measure = w.find('.ue-measure').element
+  expect(measure.textContent).toBe('')  // 量完即收：衬底关着时它是唯一碰正文的地方
+  // happy-dom 没有布局，offsetTop 恒为 0：这里只验「不报错也不滚出负数」
+  expect(w.find('textarea').element.scrollTop).toBeGreaterThanOrEqual(0)
+})
