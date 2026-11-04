@@ -1192,6 +1192,10 @@ const RULE_LABEL = {
   address_drift: '称呼待确认', setting_conflict: '设定待确认',
   absolute_claim: '绝对化表述', number_unsourced: '数字无出处',
   phrase_repeat: '自我重复',
+  // 审校（proofread）：warn 四条进硬告警栏但不拦定稿，info 三条进待确认
+  halfwidth_punct: '半角标点', punct_unbalanced: '符号不配对', punct_cluster: '标点连用',
+  char_repeat: '叠字残留', long_sentence: '超长单句', de_density: '的字堆叠',
+  long_paragraph: '超长段落',
 }
 const hardIssues = computed(() => store.issues.filter((i) => i.severity !== 'info'))
 const softIssues = computed(() => store.issues.filter((i) => i.severity === 'info'))

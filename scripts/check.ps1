@@ -1,4 +1,4 @@
-<#
+﻿<#
 一键检查：ruff（app + tests + desktop）→ pytest → 前端单测（Vitest）→ 前端构建 → 浏览器冒烟。
 用法（在项目根目录）：
     powershell -ExecutionPolicy Bypass -File scripts/check.ps1
