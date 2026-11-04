@@ -61,8 +61,12 @@ class OpenAICompatShim:
         self.cfg = cfg
         self.key = cfg.key
 
+    def matches_exact(self, model: str) -> bool:
+        # 与基类同语义：route 三段式先问显式声明，鸭子替身不能少这个口子
+        return model == self.key or any(m.id == model for m in self.cfg.models)
+
     def matches(self, model: str) -> bool:
-        return model.startswith(self.cfg.model_prefix) or model == self.key
+        return self.matches_exact(model) or model.startswith(self.cfg.model_prefix)
 
 
 # ==================== 纯函数与 store 基线 ====================

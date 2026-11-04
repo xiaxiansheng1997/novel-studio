@@ -49,8 +49,22 @@ class Registry:
             )
 
     def route(self, model: str) -> ProviderAdapter:
+        # 三段式：直连显式声明 > 反代显式声明 > 前缀猜测。
+        # 不能单遍「谁先 matches 谁赢」：反代的宽前缀（deepseek-）会把直连
+        # 通道显式声明的模型 id（deepseek-flash）拦路劫走——本该走 API 的
+        # 请求去拉了浏览器（真机实测栽过）。同名 id 两边都声明时直连赢，
+        # 合「直连优先、反代兜底」的产品口径。
+        rp_exact: Optional[ProviderAdapter] = None
         for adapter in self.adapters.values():
-            if adapter.matches(model):
+            if not adapter.matches_exact(model):
+                continue
+            if getattr(adapter.cfg, "compat", False):
+                return adapter
+            rp_exact = rp_exact or adapter
+        if rp_exact is not None:
+            return rp_exact
+        for adapter in self.adapters.values():
+            if adapter.cfg.model_prefix and model.startswith(adapter.cfg.model_prefix):
                 return adapter
         raise ModelNotFound(model)
 

@@ -37,7 +37,9 @@ class OpenAICompatAdapter(ProviderAdapter):
         return httpx.AsyncClient(timeout=_TIMEOUT)
 
     def _api_key(self) -> str:
-        return os.environ.get(self.cfg.api_key_env or "", "").strip()
+        # 库里的配置（控制台页面填的，经 provider_compat 注入 cfg.api_key）优先，
+        # 环境变量兜底：页面方案不该被旧 .env 里的值悄悄盖住
+        return (self.cfg.api_key or os.environ.get(self.cfg.api_key_env or "", "")).strip()
 
     def upstream_model(self, model: str) -> str:
         """请求体里发给上游的模型名：ollama-qwen2.5:14b → qwen2.5:14b。"""
@@ -47,11 +49,12 @@ class OpenAICompatAdapter(ProviderAdapter):
         return model
 
     async def ensure_session(self) -> None:
-        """没有登录态概念；只有「声明了 key 变量却读不到值」算没就绪。"""
+        """没有登录态概念；只有「声明了要 key 却拿不到值」算没就绪。"""
         if self.cfg.api_key_env and not self._api_key():
             raise ProviderError(
                 self.key,
-                f"没有配 API key：在 .env 里设 {self.cfg.api_key_env}=sk-... 后重启服务",
+                f"没有配 API key：控制台→状态→这张卡的「配置」里填（存库不进 git）；"
+                f"也可以在 .env 设 {self.cfg.api_key_env}=sk-... 后重启服务",
                 status=401,
             )
 

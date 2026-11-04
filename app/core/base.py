@@ -43,16 +43,16 @@ class ProviderAdapter(abc.ABC):
     def key(self) -> str:
         return self.cfg.key
 
+    def matches_exact(self, model: str) -> bool:
+        """显式声明的命中：自家 key，或 config 里写过的模型 id——不靠前缀猜。"""
+        return model == self.cfg.key or any(m.id == model for m in self.cfg.models)
+
     def matches(self, model: str) -> bool:
         # 空前缀不能让 startswith("") 恒真：那等于新加的 compat 条目忘配
-        # model_prefix 就劫持全部模型路由（审查 m9）。没前缀时只认两样东西：
-        # 自家 key，和自己在 config 里声明过的模型 id——id 是显式清单，
-        # 不存在「碰巧接住别人的模型」；compat 条目常常不给 id 加前缀。
-        if model == self.cfg.key:
+        # model_prefix 就劫持全部模型路由（审查 m9）。
+        if self.matches_exact(model):
             return True
-        if self.cfg.model_prefix and model.startswith(self.cfg.model_prefix):
-            return True
-        return any(m.id == model for m in self.cfg.models)
+        return bool(self.cfg.model_prefix) and model.startswith(self.cfg.model_prefix)
 
     def default_models(self) -> list[ModelInfo]:
         return [ModelInfo(id=m.id, owned_by=self.cfg.display_name or self.key) for m in self.cfg.models]

@@ -116,6 +116,9 @@ class ProviderConfig(BaseModel):
     base_url: str = ""
     # API key 只放 .env/环境变量，config.yaml 里只写变量名；空串 = 无需鉴权（Ollama）
     api_key_env: str = ""
+    # 运行期覆盖的 key 本体：只由 provider_compat 表（控制台页面配置）注入，
+    # 永不写回 config.yaml，也永不出现在任何 GET 响应里（只回掩码）
+    api_key: str = ""
     # 请求上游时剥掉「{key}-」前缀：ollama-qwen2.5 → qwen2.5；官方 API 的 id 本身就是请求名则 false
     strip_prefix: bool = False
     # 每千 token 单价（元或美元与计费口径一致即可，界面只报相对数）：成本预估用，0 = 不计钱
@@ -175,4 +178,9 @@ def get_config() -> AppConfig:
     from app.core.ui_bindings import bindings_path, load as load_bindings, merge as merge_bindings
 
     raw = merge_bindings(raw, load_bindings(bindings_path(get_settings())))
+    # 直连通道覆盖层：控制台页面配的 base_url/key/模型存在 sessions.sqlite（不进 git），
+    # 与 ui-bindings 同一套路：yaml 是出厂值，库里行是运行期真值。
+    from app.core.provider_store import load_overrides, merge_into_raw
+
+    raw = merge_into_raw(raw, load_overrides(get_settings().resolved_storage_dir()))
     return AppConfig.from_raw(raw)

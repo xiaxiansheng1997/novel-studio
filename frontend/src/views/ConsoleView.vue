@@ -66,11 +66,42 @@
             <span class="card-title">Provider 状态</span>
             <span class="card-sub">{{ readyCount }}/{{ providers.length }} 就绪</span>
             <span class="head-spacer"></span>
+            <button class="btn btn-sm" @click="openCompatDialog(null)">新增通道</button>
             <button class="btn btn-sm" @click="openLive()">打开内置浏览器</button>
           </div>
           <div class="card-body">
             <div class="provider-cards">
               <article v-for="p in providers" :key="p.provider" class="provider-card">
+                <!-- 直连通道：没有登录态/profile/浏览器可谈，卡片只报
+                     地址、key 状态、模型与就绪——拿反代那三个点画它全是误导 -->
+                <template v-if="p.compat">
+                  <div class="pc-head">
+                    <div class="pc-name-wrap">
+                      <span class="pc-name">{{ p.display_name || p.provider }}</span>
+                      <span class="pc-key">{{ p.provider }}</span>
+                    </div>
+                    <span class="pill pill--info">直连通道</span>
+                    <span class="pill" :class="p.enabled === false ? 'pill--off' : (p.ready ? 'pill--on' : 'pill--warn')">
+                      {{ p.enabled === false ? '已停用' : (p.ready ? '就绪' : '未就绪') }}
+                    </span>
+                  </div>
+                  <p class="pc-base mono" :title="p.base_url || ''">{{ p.base_url || '没填 base_url' }}</p>
+                  <p class="pc-keyline" :class="{ 'is-bad': p.key_source === 'none' }">{{ keyLine(p) }}</p>
+                  <div class="pc-models">
+                    <span v-for="m in (p.models || [])" :key="m" class="tag mono" :title="m">{{ m }}</span>
+                    <span v-if="!(p.models || []).length" class="pc-no-model">暂无模型</span>
+                  </div>
+                  <div class="pc-actions">
+                    <button class="pc-link" type="button" @click="openCompatDialog(p)">配置</button>
+                    <button class="pc-link" type="button" :disabled="testingProvider === p.provider" @click="testCompat(p)">
+                      {{ testingProvider === p.provider ? '测试中…' : '测试' }}
+                    </button>
+                    <span v-if="compatTestText[p.provider]" class="pc-test-note" :class="{ 'is-bad': compatTestBad[p.provider] }">
+                      {{ compatTestText[p.provider] }}
+                    </span>
+                  </div>
+                </template>
+                <template v-else>
                 <div class="pc-head">
                   <div class="pc-name-wrap">
                     <span class="pc-name">{{ p.display_name || p.provider }}</span>
@@ -116,6 +147,7 @@
                   打开 {{ p.provider }} 浏览器
                   <AppIcon name="chevronRight" :size="13" />
                 </button>
+                </template>
               </article>
               <div v-if="!providers.length" class="empty-block">
                 <AppIcon name="cpu" :size="18" />
@@ -124,6 +156,12 @@
             </div>
           </div>
         </section>
+
+        <CompatDialog
+          v-model:open="compatOpen"
+          :entry="compatEntry"
+          @saved="onCompatSaved"
+        />
 
         <section class="card">
           <div class="card-head">
@@ -924,6 +962,7 @@ import { apiFetch } from '../utils/api'
 import { decodeTemplate, outlineToText, textToOutline } from '../utils/template'
 import AppNav from '../components/AppNav.vue'
 import AppIcon from '../components/AppIcon.vue'
+import CompatDialog from '../components/CompatDialog.vue'
 import LiveConsole from '../components/LiveConsole.vue'
 
 const TABS = [
@@ -1036,8 +1075,62 @@ const tplForm = ref({
 // 骨架文本实时解析成本数：编辑时看不见「现在几节」，改着改着就删没了
 const tplFormSections = computed(() => textToOutline(tplForm.value.outlineText))
 
-const readyCount = computed(() => providers.value.filter(p => p.has_profile).length)
+const readyCount = computed(() => providers.value.filter(p => (p.compat ? p.ready : p.has_profile)).length)
 const totalModels = computed(() => providers.value.reduce((n, p) => n + (p.models?.length || 0), 0))
+
+// ---- 直连通道（compat）：卡片展示与配置弹窗 ----
+const compatOpen = ref(false)
+const compatEntry = ref(null)
+const testingProvider = ref('')
+const compatTestText = ref({})
+const compatTestBad = ref({})
+
+// key 状态四档与后端 _compat_brief 的 key_source 对齐；只报掩码与变量名，明文不出后端
+function keyLine(p) {
+  if (p.key_source === 'db') return `key 已配置 ${p.key_masked || ''}`
+  if (p.key_source === 'env') return `环境变量 ${p.key_env} 已设置`
+  if (p.key_source === 'none') return `环境变量 ${p.key_env} 未设置`
+  return '无需 key'
+}
+
+function openCompatDialog(p) {
+  // p 为 null = 新增；卡片来自 /admin/status，字段够弹窗初始化（models 是 id 数组）
+  compatEntry.value = p ? { ...p } : null
+  compatOpen.value = true
+}
+
+async function onCompatSaved() {
+  compatOpen.value = false
+  // 保存即生效（后端已重载配置）：重拉状态与模型列表，对话下拉立刻能看到新模型
+  await Promise.allSettled([loadStatus(), providerStore.fetchModels()])
+  reloadMsg.value = '直连通道已保存并生效'
+  setTimeout(() => (reloadMsg.value = ''), 3000)
+}
+
+async function testCompat(p) {
+  testingProvider.value = p.provider
+  try {
+    const r = await apiFetch('/admin/compat/' + encodeURIComponent(p.provider) + '/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    const j = await r.json().catch(() => null)
+    if (j && j.ok) {
+      compatTestBad.value = { ...compatTestBad.value, [p.provider]: false }
+      compatTestText.value = { ...compatTestText.value, [p.provider]: `通了 · ${j.latency_ms} ms` }
+    } else {
+      const text = j && typeof j.detail === 'string' ? j.detail : 'HTTP ' + r.status
+      compatTestBad.value = { ...compatTestBad.value, [p.provider]: true }
+      compatTestText.value = { ...compatTestText.value, [p.provider]: text }
+    }
+  } catch (e) {
+    compatTestBad.value = { ...compatTestBad.value, [p.provider]: true }
+    compatTestText.value = { ...compatTestText.value, [p.provider]: e.message }
+  } finally {
+    testingProvider.value = ''
+  }
+}
 
 watch(tab, (v) => {
   if (v === 'live') liveOpened.value = true
@@ -2123,6 +2216,48 @@ function alignClass(p) {
 }
 .pc-link:hover {
   color: var(--run-fg);
+}
+/* 直连通道卡片：地址、key 状态、操作行——都是信息行不是链接，字号对齐既有 pc-* 惯例 */
+.pc-base {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-keyline {
+  margin: 0 0 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.pc-keyline.is-bad {
+  color: var(--danger-fg);
+}
+.pc-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: auto;
+}
+.pc-actions .pc-link {
+  margin-top: 0;
+}
+.pc-link:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.pc-test-note {
+  font-size: 11px;
+  color: var(--run-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.pc-test-note.is-bad {
+  color: var(--danger-fg);
 }
 
 /* 快捷操作 */

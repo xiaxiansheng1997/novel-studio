@@ -4,6 +4,7 @@
 - conversations: 对话元信息（标题、模型、provider、系统提示词）
 - messages: 每条消息（role、content、reasoning_content）
 - sessions: provider 内部 id 映射（兼容旧逻辑）
+- provider_compat: 直连通道的页面配置（见 app.core.provider_store）
 """
 from __future__ import annotations
 
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import aiosqlite
+
+from app.core.provider_store import PROVIDER_COMPAT_DDL
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -44,7 +47,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
-"""
+""" + PROVIDER_COMPAT_DDL
 
 
 class ConversationStore:
