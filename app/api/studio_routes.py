@@ -142,6 +142,9 @@ class NodeUpdate(BaseModel):
     snapshot: bool = False
     # 只有「采用 AI 结果」那一条会显式传；手改不传，由路由落成 human
     snapshot_source: Optional[str] = None
+    # 采用归因：前端把生成 SSE meta 里的 run_id 带回来，版本行认这根线，
+    # 反馈统计才知道哪次生成真的进了正文
+    run_id: Optional[str] = None
     # 定稿闸门：这一节有未处理的硬告警时，要人看过并明确「就这样定」才放行
     force: bool = False
 
@@ -867,6 +870,8 @@ async def update_node(node_id: str, body: NodeUpdate, request: Request):
     snapshot = bool(payload.pop("snapshot", False))
     source = payload.pop("snapshot_source", None)
     force = bool(payload.pop("force", False))
+    # nodes 表没有 run_id 列，必须自己 pop 掉——留在 payload 里会随 **fields 进 UPDATE
+    run_id = payload.pop("run_id", None)
     if source and source not in _VERSION_SOURCES:
         raise HTTPException(
             status_code=400,
@@ -887,7 +892,8 @@ async def update_node(node_id: str, body: NodeUpdate, request: Request):
         if gate["open_errors"]:
             raise HTTPException(status_code=409, detail=gate)
     ok = await store.update_node(
-        node_id, snapshot=snapshot, snapshot_source=source or "human", **payload
+        node_id, snapshot=snapshot, snapshot_source=source or "human",
+        run_id=run_id, **payload
     )
     if not ok:
         raise HTTPException(status_code=404, detail="节点不存在或无更新")
@@ -3340,4 +3346,15 @@ async def list_scores(work_id: str, request: Request, limit: int = 60):
         out[nid] = {"node_id": nid, "score": r.get("score"), "task_type": r["task_type"],
                     "at": r["started_at"], "chars": r.get("output_chars")}
     return list(out.values())
+
+
+@router.get("/studio/feedback", dependencies=[Depends(verify_key)])
+async def quality_feedback(request: Request, sample: int = 300):
+    """质量反馈环：AI 生成的采纳率与采用后的存活率（全局，含所有作品）。
+
+    只读聚合，直接从 runs / node_versions 现算，不新增表；口径细节与
+    排除项都写在 store.feedback 的文档里。控制台「数据」页一次刷新打一趟，
+    sample 限制存活率逐条比对的成本上限。
+    """
+    return await _store(request).feedback(sample=sample)
 

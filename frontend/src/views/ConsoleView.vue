@@ -467,6 +467,45 @@
           </div>
         </section>
 
+        <!-- 质量反馈环：只讲已经落库的行为——AI 生成被采纳了多少，采纳后活下来多少 -->
+        <section class="card">
+          <div class="card-head">
+            <span class="card-title">质量信号</span>
+            <span class="card-sub">runs + 版本历史现算：采纳率＝生成被点进正文的比例；存活率＝采纳的 AI 版本没被人重写的比例</span>
+          </div>
+          <div class="card-body">
+            <div class="q-stats">
+              <span class="q-stat">
+                采纳率 <b>{{ fmtPct(fbAdopt.rate) }}</b>
+                （{{ fbAdopt.adopted || 0 }}/{{ fbAdopt.total || 0 }} 次）
+              </span>
+              <span class="q-stat">
+                存活率 <b>{{ fmtPct(fbSurvive.rate) }}</b>
+                （{{ fbSurvive.untouched || 0 }}/{{ fbSurvive.checked || 0 }} 版原样）
+              </span>
+            </div>
+            <!-- 分组行多于一种才有意义：只有一个模型时上面的总数就是它的全部 -->
+            <div v-if="fbByModel.length > 1" class="q-triage-list">
+              <span v-for="m in fbByModel" :key="m.model" class="q-triage-item">
+                {{ m.model }} 采纳 <b>{{ fmtPct(m.rate) }}</b> · {{ m.adopted }}/{{ m.total }} 次
+              </span>
+            </div>
+            <div v-if="fbByTask.length > 1" class="q-triage-list">
+              <span v-for="t in fbByTask" :key="t.task_type" class="q-triage-item">
+                {{ t.task_type }} 采纳 <b>{{ fmtPct(t.rate) }}</b> · {{ t.adopted }}/{{ t.total }} 次
+              </span>
+            </div>
+            <p v-if="!fbAdopt.total" class="hint-line">
+              还没有可归因的生成：跑一次再点「采用」，这里就会出信号。
+            </p>
+            <p v-else class="hint-line">
+              大纲与改写候选的采用路径不写版本行，已从分母剔除（{{ feedback.excluded_runs || 0 }} 次）；
+              存活率比对最近 {{ fbSurvive.checked || 0 }} 条 AI 版本与其后第一条手改版，只挪空白算原样。
+              <template v-if="feedback.window_capped">采纳率只统计最近 {{ feedback.window_runs }} 次成功生成。</template>
+            </p>
+          </div>
+        </section>
+
         <section class="card">
           <div class="card-head">
             <span class="card-title">发布台账</span>
@@ -904,6 +943,8 @@ let tasksTimer = 0
 const works = ref([])
 // 生成成本：整块从 /studio/stats/cost-quality 来，不在前端另算一遍
 const costQuality = ref(null)
+// 质量反馈环：采纳率与存活率从 /studio/feedback 现算，跟成本同一条刷新链
+const feedback = ref(null)
 const pubSummary = ref([])
 const worksError = ref('')
 const pubWork = ref('')
@@ -1268,6 +1309,10 @@ const cqOverall = computed(() => costQuality.value?.overall || {})
 const cqWorks = computed(() => costQuality.value?.works || [])
 const cqNodes = computed(() => costQuality.value?.nodes || [])
 const cqByTask = computed(() => costQuality.value?.by_task || [])
+const fbAdopt = computed(() => feedback.value?.adopt || {})
+const fbSurvive = computed(() => feedback.value?.survive || {})
+const fbByModel = computed(() => feedback.value?.by_model || [])
+const fbByTask = computed(() => feedback.value?.by_task || [])
 
 function workName(id) {
   if (!id) return '—'
@@ -1278,7 +1323,7 @@ async function refreshData() {
   dataBusy.value = true
   dataError.value = ''
   try {
-    await Promise.all([loadWorks(), loadPubSummary(), loadBackups(), loadCostQuality()])
+    await Promise.all([loadWorks(), loadPubSummary(), loadBackups(), loadCostQuality(), loadFeedback()])
     // 选着的作品被删了：别把一个过期 id 带到下面的接口里去
     if (pubWork.value && !works.value.some(w => w.id === pubWork.value)) {
       pubWork.value = ''
@@ -1323,6 +1368,18 @@ async function loadCostQuality() {
     // 拿不到就清空：宁可显示「还没有生成记录」，也不摆一份过期账
     costQuality.value = null
     dataError.value = '生成成本不可用：' + e.message
+  }
+}
+
+async function loadFeedback() {
+  try {
+    const r = await apiFetch('/studio/feedback')
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    feedback.value = await r.json()
+  } catch (e) {
+    // 与成本一样：拉不到就清空，不留一份看着真、实则过期的信号
+    feedback.value = null
+    dataError.value = '质量信号不可用：' + e.message
   }
 }
 
@@ -1703,6 +1760,12 @@ function fmtChars(n) {
 
 function fmtScore(v) {
   return v == null ? '—' : Number(v).toFixed(1)
+}
+
+// 采纳率/存活率都是 0~1 的小数，折成百分比看；空值显「—」不当 0% 骗人
+function fmtPct(v) {
+  if (v == null) return '—'
+  return Math.round(Number(v) * 100) + '%'
 }
 
 function fmtTime(ts) {

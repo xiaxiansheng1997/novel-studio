@@ -525,13 +525,15 @@ export const useStudioStore = defineStore('studio', () => {
    * 写回一节。返回是否真的落库——自动保存靠这个返回值决定显示「已保存」还是
    * 「保存失败」。以前失败就地吞掉，界面照样写「已保存」，关掉页面那段字就没了。
    */
-  async function saveNode(patch, { snapshot = false, source = '', force = false } = {}) {
+  async function saveNode(patch, { snapshot = false, source = '', force = false, runId = '' } = {}) {
     if (!node.value) return false
     saving.value = true
     // 只有「采用 AI 结果」才带来源：历史页要分得清哪一版是模型写的，
     // 手改那一侧不传，由后端落成 human
     const body = { ...patch, snapshot }
     if (snapshot && source) body.snapshot_source = source
+    // 采用归因：把那次生成的 run_id 带到版本行上，反馈统计的采纳率认这根线
+    if (snapshot && runId) body.run_id = runId
     // 定稿闸门：看过告警仍要定稿时传 force，后端才会放行
     if (force) body.force = true
     try {
@@ -1088,7 +1090,8 @@ export const useStudioStore = defineStore('studio', () => {
       ? (node.value.content ? node.value.content.replace(/\s+$/, '') + '\n\n' + body : body)
       : body
     // 写库失败就留着预览：清掉的话这段生成结果连重试的机会都没有
-    if (!(await saveNode({ content: next }, { snapshot: true, source }))) return false
+    // run_id 从 SSE meta 里取：逐段部分采用也归因到同一次生成，采纳率不漏点按钮这条路
+    if (!(await saveNode({ content: next }, { snapshot: true, source, runId: genMeta.value?.run_id || '' }))) return false
     genText.value = ''
     genMeta.value = null
     return true

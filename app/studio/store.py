@@ -157,6 +157,36 @@ def _count_words(text: str) -> int:
     return cjk + rest
 
 
+# AI 版本与后续正文的相似度到这一步就算「原样采用」：留一点余量，
+# 采用后只改了一个标点不该把这条记成「被重写」。
+_SURVIVE_THRESHOLD = 0.995
+
+
+def _dice_bigrams(a: str, b: str) -> float:
+    """字符二元组的 Dice 相似度，0 到 1：判「这段 AI 稿后来被人改了没」用的。
+
+    先把空白全去掉——人改段落时常顺手把空行换掉，那不该算改正文；
+    纯 stdlib Counter，线性时间，几万字的章节逐条比对也不心疼，
+    不用为这个统计引第二套分词管线。两段完全相同 = 1.0，毫不相干 ≈ 0。
+    """
+    from collections import Counter
+
+    def norm(s: str) -> str:
+        return "".join((s or "").split())
+
+    ta, tb = norm(a), norm(b)
+    if ta == tb:
+        return 1.0
+    if len(ta) < 2 or len(tb) < 2:
+        return 0.0
+    ca = Counter(ta[i:i + 2] for i in range(len(ta) - 1))
+    cb = Counter(tb[i:i + 2] for i in range(len(tb) - 1))
+    total = sum(ca.values()) + sum(cb.values())
+    if not total:
+        return 0.0
+    return 2.0 * sum((ca & cb).values()) / total
+
+
 # ==================== 作品包（整本导出 / 导入） ====================
 # 包是给人拷走、几周后再导回来的，所以格式与版本都写进文件；
 # 版本对不上就拒绝，不做「尽力而为」的兼容——半懂不懂地导入比拒绝更危险。
@@ -3740,6 +3770,96 @@ class StudioStore:
             )
             row = await cur.fetchone()
         return int(row[0] or 0)
+
+    async def feedback(self, *, sample: int = 300) -> dict[str, Any]:
+        """质量反馈环：哪类模型/任务的 AI 稿能一次通过，通过后活下来多少。
+
+        采纳率：status='ok' 的生成里，run_id 出现在 node_versions 的比例——
+        版本行就是「这段文字真的进了正文」的铁证：前端点采用、后端 save=true
+        直存、批量管线都带 run_id 落版本。transform 候选与大纲的采用路径
+        不写版本行（写回走自动保存），纳不进这个口径，剔出分母而不是假报 0%。
+
+        存活率：每个带 run_id 的 AI 版本，和它节内后面第一条 human 版本比
+        （没有就比节点当前正文）；Dice 相似度 ≥ _SURVIVE_THRESHOLD 算原样采用。
+        只看最近 sample 条，逐条查比对都在线性时间内。
+
+        只算最近 _MAX_LIMIT 条 ok run：个人库这个窗口够用，扫描不随年数无限长。
+        """
+        assert self._db is not None
+        sample = max(1, min(sample, _MAX_LIMIT))
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT id, work_id, task_type, model FROM runs "
+                "WHERE status = 'ok' ORDER BY started_at DESC LIMIT ?", (_MAX_LIMIT,),
+            )
+            run_rows = [dict(r) for r in await cur.fetchall()]
+            cur = await self._db.execute(
+                "SELECT DISTINCT run_id FROM node_versions "
+                "WHERE run_id IS NOT NULL AND run_id <> ''")
+            adopted_ids = {r[0] for r in await cur.fetchall()}
+            cur = await self._db.execute("SELECT id, title FROM works")
+            titles = {r[0]: (r[1] or "") for r in await cur.fetchall()}
+
+        # 采用不写版本的任务：分母里留着它们，统计就成了假故事
+        runs = [r for r in run_rows
+                if r["task_type"] != "outline" and not str(r["task_type"]).startswith("transform:")]
+        excluded = len(run_rows) - len(runs)
+
+        def _group(key: str, with_title: bool = False) -> list[dict[str, Any]]:
+            groups: dict[str, dict[str, Any]] = {}
+            for r in runs:
+                g = groups.setdefault(r[key] or "", {
+                    key: r[key] or "", "total": 0, "adopted": 0,
+                    **({"title": titles.get(r[key], "")} if with_title else {}),
+                })
+                g["total"] += 1
+                if r["id"] in adopted_ids:
+                    g["adopted"] += 1
+            out = sorted(groups.values(), key=lambda g: -g["total"])
+            for g in out:
+                g["rate"] = round(g["adopted"] / g["total"], 4) if g["total"] else 0.0
+            return out
+
+        total = len(runs)
+        adopted = sum(1 for r in runs if r["id"] in adopted_ids)
+
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT v.node_id, v.version_no, v.content, n.content "
+                "FROM node_versions v JOIN nodes n ON n.id = v.node_id "
+                "WHERE v.run_id IS NOT NULL AND v.run_id <> '' "
+                "AND v.source IN ('ai_draft', 'ai_polish') "
+                "ORDER BY v.created_at DESC LIMIT ?", (sample,),
+            )
+            ai_rows = [tuple(r) for r in await cur.fetchall()]
+        checked = untouched = 0
+        for node_id, version_no, ai_content, current in ai_rows:
+            async with self._lock:
+                # 采用后第一条人写的版本就是「人接下来怎么对待这段」的答案；
+                # 一直没有手改，就拿当前正文比——AI 那版还原样躺在节里
+                cur = await self._db.execute(
+                    "SELECT content FROM node_versions "
+                    "WHERE node_id = ? AND version_no > ? AND source = 'human' "
+                    "ORDER BY version_no LIMIT 1", (node_id, version_no))
+                nxt = await cur.fetchone()
+            after = nxt[0] if nxt else (current or "")
+            checked += 1
+            if _dice_bigrams(ai_content or "", after) >= _SURVIVE_THRESHOLD:
+                untouched += 1
+
+        return {
+            "window_runs": _MAX_LIMIT,
+            "window_capped": len(run_rows) >= _MAX_LIMIT,
+            "excluded_runs": excluded,
+            "adopt": {"total": total, "adopted": adopted,
+                      "rate": round(adopted / total, 4) if total else 0.0},
+            "by_model": _group("model"),
+            "by_task": _group("task_type"),
+            "by_work": _group("work_id", with_title=True),
+            "survive": {"checked": checked, "untouched": untouched,
+                        "rate": round(untouched / checked, 4) if checked else 0.0,
+                        "threshold": _SURVIVE_THRESHOLD},
+        }
 
     # ==================== 整本搬迁（作品包导出 / 导入） ====================
 
