@@ -1,0 +1,31 @@
+frontend/src/stores/studio.js
+  s_c7df7c295a4159::t_c31c85ef9d9710 528,535-536,1093-1094
+frontend/src/views/ConsoleView.vue
+  s_c7df7c295a4159::t_d06077cdba5c26 470-508
+  s_c7df7c295a4159::t_3c0bd2a9d5b425 946-947,1312-1315,1326,1374-1385,1765-1770
+app/api/studio_routes.py
+  s_c7df7c295a4159::t_23056953ed00d5 145-147,873-874,895-896,3350-3360
+frontend/tests/studioFeedback.spec.js
+  s_c7df7c295a4159::t_06d9776943677a 1-78
+tests/test_studio_feedback.py
+  s_c7df7c295a4159::t_81846d0f9961f6 1-97,99-116,119-123,125,128,130-186
+  s_c7df7c295a4159::t_4fcb000927e321 98,117-118,124,126-127,129
+app/studio/store.py
+  s_c7df7c295a4159::t_cbb82a27b759d3 160-189,3774-3863
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "553c00a11f00fe522fedbd24e21a1b01e8a5b71d",
+  "prompts": {},
+  "sessions": {
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
