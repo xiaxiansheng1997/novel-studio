@@ -1,0 +1,56 @@
+app/studio/jobs.py
+  s_c7df7c295a4159::t_6c3c248575f038 37-40
+tests/test_craft.py
+  s_c7df7c295a4159::t_cec4f889228b0a 169,171-178,183-185
+  s_c7df7c295a4159::t_e13db0b92905e3 1-4,6-12,14-21,24-95,97-104,106-115,117-131,133-153,155-159,161-168,170,179-182,186-191,207-209,212-222,224-225,227-236,257,277-278,282-283
+  s_c7df7c295a4159::t_ad1e1f02331005 286-332,334-338
+  s_c7df7c295a4159::t_fe431ed55de917 5,13,22-23,96,105,116,132,154,160,210-211,223,226,237-256,258-276,279-281,284-285,333,339-418
+  s_c7df7c295a4159::t_3c19f67fa8632c 192-206
+frontend/src/components/StudioPanel.vue
+  s_c7df7c295a4159::t_b7438b9eaa4696 430-434,762,1294-1295
+app/api/studio_routes.py
+  s_c7df7c295a4159::t_0f949e8f378b02 31,3417-3426,3430-3448,3452-3462,3477-3478,3482-3483,3486-3487,3489-3522,3529-3533,3535-3538,3540-3620,3622-3652
+  s_c7df7c295a4159::t_8d696c227fd6e2 3449-3451,3463-3476,3479-3481,3484-3485,3488
+  s_c7df7c295a4159::t_d1e4f4bb2f1486 3523-3528,3534
+  s_c7df7c295a4159::t_98c8174f1b25fc 3427-3429
+  s_c7df7c295a4159::t_2a6ca97b950818 3539,3621
+frontend/src/components/CraftPanel.vue
+  s_c7df7c295a4159::t_ea28fc84984af6 198-199,223-235,336,451,453-458,472
+  s_c7df7c295a4159::t_13c67ce9122ad3 34
+  s_c7df7c295a4159::t_72eaf750b26b6a 32-33,35-46,49-54
+  s_c7df7c295a4159::t_b5727ffc005441 452
+  s_c7df7c295a4159::t_5e2d9d6a93941b 134-142
+  s_c7df7c295a4159::t_31d653de9876cc 1-31,47-48,55-133,143-197,200-222,236-335,337-450,459-471,473-663
+app/studio/schema.py
+  s_c7df7c295a4159::t_6935267cc221a9 317-343
+app/studio/store.py
+  s_c7df7c295a4159::t_095b6de090420b 3623-3626
+  s_c7df7c295a4159::t_5cf1d0b7493a7f 3570-3622,3627-3640
+app/studio/tasks.py
+  s_c7df7c295a4159::t_d15ac869b86473 24,289-290
+app/studio/craft.py
+  s_c7df7c295a4159::t_a6c99ea8d79685 216-221
+  s_c7df7c295a4159::t_4a7a20ee01bc41 1-215,222-354
+frontend/tests/decomposePanel.spec.js
+  s_c7df7c295a4159::t_8e0344a27d2087 19-25,145-171
+  s_c7df7c295a4159::t_c82aa6f43f4c88 1-18,26-124,126-144,172-253
+  s_c7df7c295a4159::t_cc27481192a7e1 125
+content-types.yaml
+  s_c7df7c295a4159::t_9e68842b518153 90-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d9ed78e77592199995069c9801f77a0f4672042d",
+  "prompts": {},
+  "sessions": {
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
