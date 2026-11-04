@@ -54,6 +54,9 @@ export const useStudioStore = defineStore('studio', () => {
   // 选题池是全局的；写作统计只有一份（按天净增字数，从版本表现算）
   const ideas = ref([])
   const dailyWrites = ref({ days: [], today: 0, saves_today: 0, streak: 0, total: 0 })
+  // 连载节奏（存稿还能日更几天）：和 dailyWrites 同屏展示但分开拉，接口轻、失败不拖累日历。
+  // 名字带 Stats 收尾：`pipeline` 已经被批量生成跑批的状态占了（L1251）
+  const pipelineStats = ref(null)
 
   const loading = ref(false)
   const saving = ref(false)
@@ -410,6 +413,11 @@ export const useStudioStore = defineStore('studio', () => {
   async function loadDailyWrites(days = 30) {
     const r = await apiFetch(`/studio/stats/daily?days=${days}`)
     if (r.ok) dailyWrites.value = await r.json()
+  }
+
+  async function loadPipeline() {
+    const r = await apiFetch('/studio/stats/pipeline')
+    if (r.ok) pipelineStats.value = await r.json()
   }
 
   async function createWork(payload) {
@@ -1968,7 +1976,7 @@ export const useStudioStore = defineStore('studio', () => {
     genModel, genModelLabel, modelGroups, allGenModels, setGenModel, loadGenModels,
     activeWorkId, activeNodeId, template,
     loadTemplates, fetchWorks, createWork, updateWork, setWorkStatus, globalSearch,
-    ideas, dailyWrites, loadIdeas, addIdea, useIdea, deleteIdea, loadDailyWrites,
+    ideas, dailyWrites, pipelineStats, loadIdeas, addIdea, useIdea, deleteIdea, loadDailyWrites, loadPipeline,
     selectWork, selectNode, deleteWork,
     saveNode, finalGate, createNode, importNodes, docxToText, deleteNode, moveNode, reparentNode, replaceText,
     // 迭代 B：结构操作与统一收尾（批量操作也走 afterStructureChange 重拉树）

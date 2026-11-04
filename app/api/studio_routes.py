@@ -833,6 +833,42 @@ async def daily_writes(request: Request, days: int = 30):
     }
 
 
+@router.get("/studio/stats/pipeline", dependencies=[Depends(verify_key)])
+async def pipeline_stats(request: Request, days: int = 14):
+    """连载节奏：定稿存稿还能日更几天。
+
+    日更速度的口径按用户定的：优先近 N 个**日历天**的实际日均（含今天，
+    没写的那天算 0 天，不把自己休息日藏掉）；窗口内一笔没写退回
+    每日目标；两个都没有就不编数——days_left 给 null 比编一个假天数诚实。
+    """
+    days = max(3, min(int(days or 14), 60))
+    store = _store(request)
+    since = (date.today() - timedelta(days=days - 1)).isoformat()
+    got = await store.pipeline_window(since)
+    window_chars = sum(int(r["chars"] or 0) for r in got["recent"])
+    raw = await store.get_setting("daily_target_words")
+    try:
+        target = max(0, int(float(raw or 0)))
+    except ValueError:
+        target = 0
+    if window_chars > 0:
+        pace, source = window_chars / days, "history"
+    elif target > 0:
+        pace, source = float(target), "target"
+    else:
+        pace, source = 0.0, None
+    return {
+        "days": days,
+        "stock_words": got["stock_words"],
+        "stock_nodes": got["stock_nodes"],
+        "window_chars": window_chars,
+        "pace": round(pace),
+        "pace_source": source,
+        "target": target,
+        "days_left": int(got["stock_words"] // pace) if pace > 0 else None,
+    }
+
+
 @router.get("/studio/stats/cost-quality", dependencies=[Depends(verify_key)])
 async def cost_quality(request: Request, works: int = 50, nodes: int = 50):
     """生成成本与质量：runs 的耗时/字数按作品与按节汇总，附未处理硬告警。
@@ -2298,7 +2334,9 @@ async def make_digest(work_id: str, body: DigestRequest, request: Request):
 # ==================== 公众号：文风 / 设置 / 标题 / 转发语 / 台账 ====================
 
 # 设置项白名单：settings 是全局的，写坏一个 key 会静默影响所有作品
-_SETTING_KEYS = {"theme", "footer_text", "footer_archive", "voice_profile"}
+# daily_target_words 是作者级日更目标：存稿预警在没历史节奏时拿它当分母
+_SETTING_KEYS = {"theme", "footer_text", "footer_archive", "voice_profile",
+                 "daily_target_words"}
 # 标题上限与公众号后台一致；超过的候选直接丢，别让人点了一个存不进去的标题
 _TITLE_CAP = 64
 _LINE_NOISE = re.compile(r"^\s*(?:[-*·•]|\d+\s*[.、)）]|[（(]\s*\d+\s*[)）])\s*")
@@ -2549,6 +2587,12 @@ async def update_publication(pub_id: str, body: PublicationUpdate, request: Requ
         raise HTTPException(status_code=404, detail="发布记录不存在")
     await store.update_publication(pub_id, **body.model_dump(exclude_none=True))
     return await store.get_publication(pub_id)
+
+
+@router.get("/studio/publications/insight", dependencies=[Depends(verify_key)])
+async def publications_insight(request: Request):
+    """发表回流：在手填台账上聚合。阅读数靠人补记，可能不全——这话界面得说。"""
+    return await _store(request).publication_insight()
 
 
 @router.delete("/studio/publications/{pub_id}", dependencies=[Depends(verify_key)])

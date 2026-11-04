@@ -57,6 +57,20 @@
     <section class="write-log" aria-label="写作统计">
       <span class="wl-item"><strong>{{ fmt(store.dailyWrites.today) }}</strong> 今天字数</span>
       <span class="wl-item"><strong>{{ store.dailyWrites.streak }}</strong> 连续天</span>
+      <!-- 今日目标：作者自己定的数，写够就点亮；它还是没写过字时「可更天数」的兜底分母 -->
+      <label class="wl-goal" :title="goalTitle">
+        今日目标
+        <input
+          class="wl-goal-input" :class="{ 'is-met': goalMet }" type="number"
+          min="0" step="100" :value="goalValue" placeholder="未设"
+          aria-label="每日目标字数" @change="onGoalChange"
+        />
+      </label>
+      <span v-if="store.pipelineStats" class="wl-item wl-stock" :class="{ 'is-low': stockWarn }" :title="stockTitle">
+        <strong>{{ fmt(store.pipelineStats.stock_words) }}</strong> 存稿
+        <template v-if="store.pipelineStats.days_left != null">· <strong>{{ store.pipelineStats.days_left }}</strong> 天可更</template>
+        <template v-else>· 节奏待定</template>
+      </span>
       <span class="wl-days" :title="last14.map((d) => `${d.day} ${d.chars} 字`).join(' / ')">
         <span
           v-for="d in last14"
@@ -482,6 +496,50 @@ function barHeight(chars) {
   if (!chars) return '3px'
   return Math.max(6, Math.round((chars / dailyMax.value) * 24)) + 'px'
 }
+
+// ---- 连载节奏（缺口 6）：今日目标与存稿余量 ----
+const goalValue = computed(() => store.pipelineStats?.target || '')
+
+const goalMet = computed(() => {
+  const g = store.pipelineStats?.target || 0
+  return g > 0 && (store.dailyWrites.today || 0) >= g
+})
+
+const goalTitle = computed(() => {
+  const g = store.pipelineStats?.target || 0
+  if (!g) return '每日目标：定一个每天写多少字，今天写够就点亮；没写过字的时候「可更天数」也按它估算'
+  return goalMet.value
+    ? `今日目标 ${g} 字已达成（写了 ${store.dailyWrites.today} 字）`
+    : `今天写了 ${store.dailyWrites.today} / 目标 ${g} 字`
+})
+
+async function onGoalChange(e) {
+  const n = Number(e.target.value)
+  // 非数与负数归零（零=清空目标）；上限十万里在前端挡：日更超十万多半是手滑
+  const v = Number.isFinite(n) && n > 0 ? Math.min(100000, Math.round(n)) : 0
+  e.target.value = v ? String(v) : ''
+  if (!(await store.saveSetting('daily_target_words', String(v)))) {
+    emit('notice', store.error || '目标保存失败', true)
+    return
+  }
+  await store.loadPipeline().catch(() => {})
+  emit('notice', v ? `每日目标已设为 ${v} 字` : '已清空每日目标')
+}
+
+const stockWarn = computed(() => {
+  const d = store.pipelineStats?.days_left
+  return d != null && d <= 3
+})
+
+const stockTitle = computed(() => {
+  const p = store.pipelineStats
+  if (!p) return ''
+  const bits = [`存稿 = 未归档作品的定稿字数合计（${p.stock_nodes} 节）；库里没有逐节已发布的标记，按粗口径估`]
+  if (p.pace_source === 'history') bits.push(`按近 ${p.days} 天实际日均 ${p.pace} 字估算可更天数`)
+  else if (p.pace_source === 'target') bits.push(`近 ${p.days} 天没写过，按每日目标 ${p.target} 字估算`)
+  else bits.push('既没写过也没设目标，不换算天数——左边定一个就能看')
+  return bits.join('；')
+})
 </script>
 
 <style scoped>
@@ -612,6 +670,34 @@ function barHeight(chars) {
 }
 .wl-bar.is-on {
   background: rgba(var(--run-rgb), 0.65);
+}
+.wl-goal {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.wl-goal-input {
+  width: 64px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: transparent;
+  font-family: theme('fontFamily.mono');
+  font-size: 12px;
+  color: var(--text);
+}
+.wl-goal-input:focus {
+  outline: none;
+  border-color: rgba(var(--run-rgb), 0.45);
+}
+.wl-goal-input.is-met {
+  border-color: rgba(var(--run-rgb), 0.45);
+  color: var(--run-fg);
+}
+/* 可更天数剩得少要一眼看到红；小字号走文字档 --danger-fg */
+.wl-stock.is-low strong {
+  color: var(--danger-fg);
 }
 .ideas {
   margin-bottom: 18px;

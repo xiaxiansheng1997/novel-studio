@@ -549,6 +549,48 @@
           </div>
         </section>
 
+        <section v-if="pubInsight" class="card">
+          <div class="card-head">
+            <span class="card-title">发表效果</span>
+            <span class="card-sub">
+              {{ pubInsight.pubs }} 条记录·阅读靠手填，可能不全
+            </span>
+          </div>
+          <div class="card-body">
+            <p v-if="!pubInsight.pubs" class="hint-line">
+              还没记过发布台账。发完一篇回来补一条阅读/在看，这里才看得出效果。
+            </p>
+            <template v-else>
+              <p class="ins-sum">
+                共 {{ pubInsight.works }} 篇作品 · {{ pubInsight.pubs }} 次发布 · 平均阅读
+                <strong>{{ pubInsight.reads_avg }}</strong> · 平均在看 <strong>{{ pubInsight.likes_avg }}</strong>
+              </p>
+              <p v-if="pubInsight.trend" class="hint-line">{{ trendLine }}。</p>
+              <div v-if="pubInsight.by_subtype.length > 1" class="table-wrap">
+                <table class="req-table">
+                  <thead>
+                    <tr>
+                      <th>文体</th>
+                      <th>篇数</th>
+                      <th>平均阅读</th>
+                      <th>平均在看</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="t in pubInsight.by_subtype" :key="t.subtype">
+                      <td class="path-cell">{{ t.subtype }}</td>
+                      <td class="mono">{{ t.pubs }}</td>
+                      <td class="mono">{{ t.reads_avg }}</td>
+                      <td class="mono">{{ t.likes_avg }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <p class="hint-line">哪类文体读者买账，看平均阅读那一列（样本少时参考就好）。</p>
+              </div>
+            </template>
+          </div>
+        </section>
+
         <section class="card">
           <div class="card-head">
             <span class="card-title">单篇发布记录</span>
@@ -946,6 +988,8 @@ const costQuality = ref(null)
 // 质量反馈环：采纳率与存活率从 /studio/feedback 现算，跟成本同一条刷新链
 const feedback = ref(null)
 const pubSummary = ref([])
+// 发表效果：同一本台账的聚合视角，与台账同一条刷新链；拉不到就整卡收起
+const pubInsight = ref(null)
 const worksError = ref('')
 const pubWork = ref('')
 const pubs = ref([])
@@ -1323,7 +1367,7 @@ async function refreshData() {
   dataBusy.value = true
   dataError.value = ''
   try {
-    await Promise.all([loadWorks(), loadPubSummary(), loadBackups(), loadCostQuality(), loadFeedback()])
+    await Promise.all([loadWorks(), loadPubSummary(), loadInsight(), loadBackups(), loadCostQuality(), loadFeedback()])
     // 选着的作品被删了：别把一个过期 id 带到下面的接口里去
     if (pubWork.value && !works.value.some(w => w.id === pubWork.value)) {
       pubWork.value = ''
@@ -1358,6 +1402,25 @@ async function loadPubSummary() {
     dataError.value = '发布台账不可用：' + e.message
   }
 }
+
+async function loadInsight() {
+  try {
+    const r = await apiFetch('/studio/publications/insight')
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    pubInsight.value = await r.json()
+  } catch (e) {
+    // 与分析同源的是手填台账：拉不到就只收这一张卡，不挡发布台账主表
+    pubInsight.value = null
+  }
+}
+
+const trendLine = computed(() => {
+  const t = pubInsight.value?.trend
+  if (!t) return ''
+  if (t.prev_avg <= 0) return `最近 5 篇均读 ${t.recent_avg}（此前均读为零，百分比不计）`
+  const pct = Math.round(((t.recent_avg - t.prev_avg) / t.prev_avg) * 100)
+  return `最近 5 篇均读 ${t.recent_avg}，比前 5 篇的 ${t.prev_avg} ${pct >= 0 ? '涨' : '跌'} ${Math.abs(pct)}%`
+})
 
 async function loadCostQuality() {
   try {
@@ -1450,7 +1513,7 @@ async function savePub() {
     }
     pubDraft.value = { published_at: '', url: '', reads: 0, likes: 0 }
     dataError.value = ''
-    await Promise.all([loadPubs(), loadPubSummary()])
+    await Promise.all([loadPubs(), loadPubSummary(), loadInsight()])
   } finally {
     pubBusy.value = false
   }
@@ -1463,7 +1526,7 @@ async function removePub(p) {
     dataError.value = await errLine(r, '删除失败')
     return
   }
-  await Promise.all([loadPubs(), loadPubSummary()])
+  await Promise.all([loadPubs(), loadPubSummary(), loadInsight()])
 }
 
 async function runPublishCheck() {
@@ -2478,6 +2541,15 @@ function alignClass(p) {
   gap: 12px;
   font-size: 12px;
   color: var(--text-muted);
+}
+.ins-sum {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.ins-sum strong {
+  font-family: theme('fontFamily.mono');
+  color: var(--text);
 }
 .pub-line-date {
   min-width: 92px;

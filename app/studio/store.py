@@ -2525,6 +2525,51 @@ class StudioStore:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def publication_insight(self) -> dict[str, Any]:
+        """发表回流：在**手填**台账上做的小聚合。
+
+        公众号没有开放接口，阅读/点赞只能人发完回来补记（schema 里注释过）；
+        这一层不再新增任何录入负担，只是把已有的数用起来：总量、按文体、
+        最近五篇对比前五篇。台账本身可能不全，展示方要带上这句实话。
+        """
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT p.work_id, w.subtype AS subtype, p.reads AS reads, "
+                "p.likes AS likes FROM publications p JOIN works w ON w.id = p.work_id "
+                "ORDER BY p.published_at DESC, p.created_at DESC"
+            )
+            rows = [dict(r) for r in await cur.fetchall()]
+        n = len(rows)
+        if not n:
+            return {"pubs": 0, "works": 0, "reads_total": 0, "reads_avg": 0.0,
+                    "likes_avg": 0.0, "by_subtype": [], "trend": None}
+        reads = [int(r["reads"] or 0) for r in rows]
+        likes = [int(r["likes"] or 0) for r in rows]
+        groups: dict[str, list[int]] = {}
+        for r in rows:
+            key = (r["subtype"] or "").strip() or "（未填文体）"
+            g = groups.setdefault(key, [0, 0, 0])
+            g[0] += 1
+            g[1] += int(r["reads"] or 0)
+            g[2] += int(r["likes"] or 0)
+        by_subtype = sorted(
+            ({"subtype": k, "pubs": v[0],
+              "reads_avg": round(v[1] / v[0], 1), "likes_avg": round(v[2] / v[0], 1)}
+             for k, v in groups.items()),
+            key=lambda x: x["reads_avg"], reverse=True,
+        )
+        # 趋势只在凑足两拨时给：三篇发布的对比“前五 vs 再前五”没有意义
+        trend = None
+        if n >= 10:
+            recent, prev = reads[:5], reads[5:10]
+            trend = {"recent_avg": round(sum(recent) / len(recent), 1),
+                     "prev_avg": round(sum(prev) / len(prev), 1)}
+        return {"pubs": n, "works": len({r["work_id"] for r in rows}),
+                "reads_total": sum(reads), "reads_avg": round(sum(reads) / n, 1),
+                "likes_avg": round(sum(likes) / n, 1),
+                "by_subtype": by_subtype, "trend": trend}
+
     async def archive_links(
         self, *, subtype: str = "", exclude_work_id: str = "", limit: int = 5,
     ) -> list[dict[str, Any]]:
@@ -2615,6 +2660,31 @@ class StudioStore:
             "saves = saves + 1, updated_at = excluded.updated_at",
             (day, max(0, int(chars)), now),
         )
+
+    async def pipeline_window(self, since_day: str) -> dict[str, Any]:
+        """连载节奏的两块料：定稿存稿总量 + since_day 起的手写按天记录。
+
+        存稿取 `final` 的章节：库里「写完可发」唯一的硬标记就是定稿状态，
+        没有逐节已发布位——所以这是「定稿总量」口径，不是精确的未发存量，
+        展示文案要诚实。归档作品的稿不算存货：那本书都不更了。
+        """
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT COALESCE(SUM(n.word_count),0) AS words, COUNT(*) AS nodes "
+                "FROM nodes n JOIN works w ON w.id = n.work_id "
+                "WHERE n.status = 'final' AND n.ordinal IS NOT NULL "
+                "AND w.status <> 'archived'"
+            )
+            stock = dict(await cur.fetchone())
+            cur = await self._db.execute(
+                "SELECT day, chars FROM write_days WHERE day >= ? ORDER BY day DESC",
+                (since_day,),
+            )
+            rows = await cur.fetchall()
+        return {"stock_words": int(stock["words"] or 0),
+                "stock_nodes": int(stock["nodes"] or 0),
+                "recent": [dict(r) for r in rows]}
 
     async def daily_writes(self, *, days: int = 30) -> list[dict[str, Any]]:
         """按天的手写净增字数（`update_node` 实时累加，不在查询时扫版本表）。

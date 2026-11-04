@@ -1002,6 +1002,7 @@ onMounted(async () => {
     store.loadGenModels().catch(() => {}),
     store.loadIdeas().catch(() => {}),
     store.loadDailyWrites().catch(() => {}),
+    store.loadPipeline().catch(() => {}),
   ])
   const id = route.params.id
   if (id) await openWork(id)
@@ -1246,8 +1247,9 @@ async function backToShelf() {
   if (!ok && !window.confirm('这一节还没存上，回书架会丢掉这段改动。仍要离开吗？')) return
   focus.value = false
   stopMetaWatch()
-  // 刚写完的字要立刻反映到书架上的「今天字数 / 连续天」
+  // 刚写完的字要立刻反映到书架上的「今天字数 / 连续天 / 存稿」
   store.loadDailyWrites().catch(() => {})
+  store.loadPipeline().catch(() => {})
   router.replace('/studio')
   store.work = null
   store.tree = []
