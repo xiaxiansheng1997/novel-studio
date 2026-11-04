@@ -57,8 +57,10 @@ async def test_stock_and_history_pace(studio) -> None:
     assert j["stock_words"] > 0
     assert j["window_chars"] > 0
     assert j["pace_source"] == "history"
-    pace = j["window_chars"] / j["days"]
-    assert j["days_left"] == int(j["stock_words"] // pace)
+    # 展示与换算用的是同一个整数节奏：不足 1 字/天按 1 兜底，不会出现
+    # 「pace=0 但仍给出天数」的自相矛盾
+    assert j["pace"] == max(1, round(j["window_chars"] / j["days"]))
+    assert j["days_left"] == j["stock_words"] // j["pace"]
 
 
 async def test_pace_falls_back_to_target(studio) -> None:
@@ -144,3 +146,14 @@ async def test_target_setting_key_whitelisted(studio) -> None:
     assert r.status_code == 200
     r = await client.put("/studio/settings/evil_key", json={"value": "x"})
     assert r.status_code == 400
+
+
+async def test_dirty_target_value_does_not_500(studio) -> None:
+    """设置项原样存字符串，直接打 API 能写进 "inf"：节奏端点得当没设而不是 500。"""
+    client, store = studio
+    await make_final_node(store, title="甲", content="一段定稿正文。")
+    await store.set_setting("daily_target_words", "inf")
+    j = (await client.get("/studio/stats/pipeline")).json()
+    assert j["target"] == 0
+    assert j["pace_source"] is None
+    assert j["days_left"] is None

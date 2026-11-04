@@ -849,7 +849,9 @@ async def pipeline_stats(request: Request, days: int = 14):
     raw = await store.get_setting("daily_target_words")
     try:
         target = max(0, int(float(raw or 0)))
-    except ValueError:
+    except (ValueError, OverflowError):
+        # 设置项是原样存的字符串，直接打 API 能写进 "inf"——int(float("inf"))
+        # 抛的是 OverflowError，漏捕了这里就 500。认不出就当没设。
         target = 0
     if window_chars > 0:
         pace, source = window_chars / days, "history"
@@ -857,15 +859,19 @@ async def pipeline_stats(request: Request, days: int = 14):
         pace, source = float(target), "target"
     else:
         pace, source = 0.0, None
+    # 天数按展示的那个整数节奏除：窗口内只写过几字时 pace 会四舍五入到 0，
+    # 若仍拿未取整的浮点去除，界面就摆出「0 字/天 · 几千天可更」的自相矛盾。
+    # 不足 1 字/天按 1 兜底——展示与换算从此是同一个数。
+    pace_disp = max(1, round(pace)) if pace > 0 else 0
     return {
         "days": days,
         "stock_words": got["stock_words"],
         "stock_nodes": got["stock_nodes"],
         "window_chars": window_chars,
-        "pace": round(pace),
+        "pace": pace_disp,
         "pace_source": source,
         "target": target,
-        "days_left": int(got["stock_words"] // pace) if pace > 0 else None,
+        "days_left": int(got["stock_words"] // pace_disp) if pace_disp > 0 else None,
     }
 
 
