@@ -216,6 +216,42 @@
                       >降亮</button>
                     </div>
                   </div>
+                  <div class="type-row">
+                    <span class="type-label">专注</span>
+                    <div class="type-seg" role="group" aria-label="段落聚焦淡化">
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': !writer.focusDim }"
+                        @click="setFocusDim(false)"
+                      >关</button>
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': writer.focusDim }"
+                        title="只亮在写的那一段，其余淡成底纹；字还在，不是折叠"
+                        @click="setFocusDim(true)"
+                      >淡化</button>
+                    </div>
+                  </div>
+                  <div class="type-row">
+                    <span class="type-label">打字机</span>
+                    <div class="type-seg" role="group" aria-label="打字机滚动">
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': !writer.typewriter }"
+                        @click="setTypewriter(false)"
+                      >关</button>
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': writer.typewriter }"
+                        title="在写的那一行停在纸面偏上处，往下写时文字向上走"
+                        @click="setTypewriter(true)"
+                      >跟随</button>
+                    </div>
+                  </div>
                   <div class="type-foot">
                     <button type="button" class="type-reset" @click="resetWriter">还原默认</button>
                     <span class="type-keys">
@@ -303,12 +339,13 @@
             </div>
 
             <div class="ed-body">
-              <textarea
+              <WriterEditor
                 v-show="!mdPreview"
                 ref="editorEl"
+                class="ed-editor"
                 v-model="contentDraft"
-                class="ed-textarea"
-                spellcheck="false"
+                :focus-dim="writer.focusDim"
+                :typewriter="writer.typewriter"
                 placeholder="在这里写，或点下方「生成」让 AI 出草稿…"
                 @input="onInput"
               />
@@ -531,6 +568,7 @@ import BatchEstimateDialog from '../components/BatchEstimateDialog.vue'
 import GlobalSearch from '../components/GlobalSearch.vue'
 import ImportDocDialog from '../components/ImportDocDialog.vue'
 import ReplaceDialog from '../components/ReplaceDialog.vue'
+import WriterEditor from '../components/WriterEditor.vue'
 import { marked } from 'marked'
 import { useStudioStore } from '../stores/studio'
 import { apiFetch } from '../utils/api'
@@ -548,6 +586,8 @@ import {
   setMeasure,
   setFont,
   setTint,
+  setFocusDim,
+  setTypewriter,
   fontName,
   writer,
   writerVars,
@@ -2254,27 +2294,8 @@ async function applyTitle(text, target) {
   /* 护眼档：关的时候是 transparent，开了压一层本主题的暗色分量（--shade-rgb） */
   background: var(--w-tint-bg, transparent);
 }
-.ed-textarea {
-  width: min(var(--w-measure, 646px), 100%);
-  height: 100%;
-  resize: none;
-  border: none;
-  background: transparent;
-  color: var(--text);
-  /* 排版可调：这几个值都来自 .editor 上的 --w-*，弹层里改一处就跟着变 */
-  font-family: var(--w-font, var(--w-serif));
-  font-size: var(--w-size, 18px);
-  line-height: var(--w-height, 1.9);
-  letter-spacing: 0.01em;
-  padding: 8px 0 30px;
-  outline: none;
-}
-.ed-textarea::placeholder {
-  color: var(--text-faint);
-  font-family: theme('fontFamily.sans');
-  font-size: 13.5px;
-  line-height: 1.7;
-}
+/* 编辑器本体换成了 WriterEditor 组件（衬底/淡化的样式在它自己里），
+   这里只剩窄屏时把它的根节点放宽——组件根带着 ed-editor 类落在这层 DOM 上 */
 
 /* ---------- Markdown 预览（单篇）：版式吃同一组 --w-* 变量，与编辑态一处调 ---------- */
 .md-preview {
@@ -2599,7 +2620,7 @@ async function applyTitle(text, target) {
     padding: 24px 20px 50px;
   }
   .ed-head,
-  .ed-textarea {
+  .ed-body .ed-editor {
     width: 100%;
   }
   .gen-bar {
@@ -2618,8 +2639,7 @@ async function applyTitle(text, target) {
   .spinner {
     animation-duration: 3s;
   }
-  .work-card,
-  .ed-textarea {
+  .work-card {
     transition: none;
   }
 }
