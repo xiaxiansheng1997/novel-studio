@@ -1,0 +1,29 @@
+frontend/src/components/WriterEditor.vue
+  s_c7df7c295a4159::t_9ae1273029fd04 50,155,235-236,238-239,262-263,270-271,301,304
+  s_c7df7c295a4159::t_4dd83125b9f951 215-216
+  s_c7df7c295a4159::t_57bdc5578afce7 40-43,45-49,51-53,75,134-146,149-154,224,300,302-303
+  s_c7df7c295a4159::t_3ebae887d5f6a3 44
+  s_c7df7c295a4159::t_feb0fac0ff8336 147-148
+  s_c7df7c295a4159::t_e1229a4eaa29bc 156
+frontend/src/views/StudioView.vue
+  s_c7df7c295a4159::t_7ac0c7defa8581 1055
+  s_c7df7c295a4159::t_0842a4e67e68cc 319-326,350-364,599,652-672,1026-1027,1041-1048,1054,1056-1061,1073,1082-1085,1111-1117,2367-2368,2372-2434
+frontend/tests/WriterEditor.spec.js
+  s_c7df7c295a4159::t_85e623eea6f9c2 123-139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "28dcbe2541e37396c9896ae0e0ea63d12bdb32ec",
+  "prompts": {},
+  "sessions": {
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
