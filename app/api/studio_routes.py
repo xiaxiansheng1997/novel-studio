@@ -28,6 +28,7 @@ from app.studio import (
     content_types,
     consistency,
     cost,
+    craft,
     exporters,
     graph,
     indexer,
@@ -3411,6 +3412,242 @@ async def cancel_job(job_id: str, request: Request):
     if not ok:
         raise HTTPException(status_code=400, detail="只能取消排队中或失败的任务")
     return {"ok": True}
+
+
+# ==================== 手艺拆解（结构卡片） ====================
+
+class CraftRequest(BaseModel):
+    model: str = ""
+    # 勾选要跑的层级；只跑卷/书不跑章会在执行时报「章未拆完」进失败重试，
+    # 这是用户自己的选择（比如章拆过了只想重汇总），不在入队时拦
+    levels: list[Literal["chapter", "volume", "book"]] = Field(
+        default_factory=lambda: ["chapter", "volume", "book"])
+    force: bool = False
+    ignore_budget: bool = False
+    # 只拆这棵子树（通常是某一卷）：百万字的书全铺是几百次调用、反代账号要
+    # 挂机几小时，先拆一卷看样本再决定要不要铺全书，比任何预筛都稳
+    scope_node_id: str = ""
+
+
+class CraftApply(BaseModel):
+    target_work_id: str = Field(min_length=1)
+    # craft_analyses 行 id；一次最多搬一叠卡片，几百章的书也不会一次全拷
+    analysis_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+# 入队优先级：claim_job 是 priority DESC 先领，章(6)→卷(5)→书(4) 的
+# 依赖顺序靠数字保证，不然同一优先级里插入的新 draft 任务会把卷排到章前面。
+CRAFT_PRIORITY = {"chapter": 6, "volume": 5, "book": 4}
+
+
+@router.post("/studio/works/{work_id}/craft", dependencies=[Depends(verify_key)])
+async def enqueue_craft(work_id: str, body: CraftRequest, request: Request):
+    """把手艺拆解排进队列：逐章→逐卷→全书，落库成 job，挂机跑。
+
+    与 batch 的区别：batch 是同一任务类型铺节点，这里一次入三种层级且
+    有依赖顺序；幂等、预算闸门、只拆「有正文的章」这些口径与 batch 同一套。
+
+    `scope_node_id` 给定则只铺这棵子树（通常是某一卷）。范围拆不排全书级
+    ——全书卡吃的是所有卷的卡片，缺卷的架构分析看着像结论其实不是。
+    """
+    store = _store(request)
+    await _require_work(request, work_id)
+    queue = getattr(request.app.state, "studio_queue", None)
+    if queue is None:
+        raise HTTPException(status_code=503, detail="任务队列未启动")
+    levels = list(dict.fromkeys(body.levels or []))
+    if not levels:
+        raise HTTPException(status_code=400, detail="至少选一个拆解层级")
+
+    tree = await store.list_tree(work_id)
+    scope = None
+    if body.scope_node_id:
+        scope = next((n for n in tree if n["id"] == body.scope_node_id), None)
+        if scope is None:
+            raise HTTPException(status_code=400, detail="拆解范围不是本书的节点：刷新后重选")
+        if scope.get("ordinal") is not None:
+            raise HTTPException(status_code=400,
+                                detail="拆解范围只能选卷（或整本书），不能选到章")
+        if "book" in levels:
+            levels.remove("book")
+            if not levels:
+                raise HTTPException(status_code=400,
+                                    detail="按范围拆只跑逐章/逐卷：全书级请选「整本书」")
+
+    chapters = [n for n in await store.list_readable(work_id)
+                if int(n.get("chars") or 0) >= craft.MIN_CHAPTER_CHARS]
+    if scope is not None:
+        prefix = (scope.get("path") or "") + "."
+        chapters = [n for n in chapters if (n.get("path") or "").startswith(prefix)]
+    chapters.sort(key=lambda n: int(n.get("ordinal") or 0))
+    containers = [n for n in tree if n.get("ordinal") is None]
+    if scope is not None:
+        containers = [n for n in containers if n["id"] == scope["id"]]
+    if "chapter" in levels and not chapters:
+        raise HTTPException(status_code=400,
+                            detail="这个范围里没有带正文的章：换一卷或先写几节再来")
+
+    model = pick_model(request.app.state.registry, body.model or None)
+    agg_calls = (len(containers) if "volume" in levels else 0) + \
+                (1 if "book" in levels else 0)
+    est = craft.estimate_craft(
+        [int(n.get("chars") or 0) for n in chapters], agg_calls,
+        registry=request.app.state.registry, model=model,
+        spent_before=await _spent_on_model(request, store, work_id, model),
+        budget=await cost.budget_limit(store))
+    if est["over_budget"] and not body.ignore_budget:
+        raise _budget_402(est)
+
+    queued = 0
+    deduped = 0
+    plan = ([("chapter", n) for n in chapters] if "chapter" in levels else []) + \
+           ([("volume", n) for n in containers] if "volume" in levels else []) + \
+           ([("book", None)] if "book" in levels else [])
+    for level, node in plan:
+        payload = json.dumps(
+            {"level": level, "model": model, "force": body.force},
+            ensure_ascii=False)
+        job = await store.enqueue_job(
+            work_id=work_id,
+            node_id=node["id"] if node else None,
+            task_type="craft",
+            payload_json=payload,
+            priority=CRAFT_PRIORITY[level],
+            idem_key=f"{work_id}:{node['id'] if node else ''}:craft:{level}",
+        )
+        if job.get("deduped"):
+            deduped += 1
+        else:
+            queued += 1
+    await queue.start()
+    notes: list[str] = []
+    if "chapter" not in levels and ("volume" in levels or "book" in levels):
+        notes.append("没勾章级：卷/全书若发现缺章会失败，等章拆完点重试")
+    if scope is not None:
+        notes.append(f"只拆《{scope.get('title') or '所选范围'}》这一支"
+                     "：全书级等各卷拆完再单独点")
+    return {
+        "queued": queued,
+        "deduped": deduped,
+        "chapters": len(chapters) if "chapter" in levels else 0,
+        "estimate": est,
+        "note": "；".join(notes),
+        "queue": await queue.status(work_id),
+    }
+
+
+@router.get("/studio/works/{work_id}/craft", dependencies=[Depends(verify_key)])
+async def list_craft_analyses(work_id: str, request: Request):
+    """结构卡片列表（全书置顶→卷→章）+ 队列里的拆解任务进度汇总。"""
+    store = _store(request)
+    await _require_work(request, work_id)
+    rows = await store.list_craft(work_id)
+    for r in rows:
+        try:
+            r["data"] = json.loads(r.get("content_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            r["data"] = {}
+        r.pop("content_json", None)
+    jobs = [j for j in await store.list_jobs(work_id=work_id, limit=1000)
+            if j.get("task_type") == "craft"]
+    progress: dict[str, int] = {}
+    for j in jobs:
+        progress[j.get("status") or "?"] = progress.get(j.get("status") or "?", 0) + 1
+    chapters = [n for n in await store.list_readable(work_id)
+                if int(n.get("chars") or 0) >= craft.MIN_CHAPTER_CHARS]
+    return {"analyses": rows, "progress": progress,
+            "total_chapters": len(chapters),
+            "analysed_chapters": sum(1 for r in rows if r.get("level") == "chapter")}
+
+
+@router.post("/studio/works/{work_id}/craft/apply", dependencies=[Depends(verify_key)])
+async def apply_craft_cards(work_id: str, body: CraftApply, request: Request):
+    """把选中的结构卡片拷成目标作品的素材，并立即建索引。
+
+    拷贝而不是共享：素材桶的检索预算（4500 字）是按书算的，隐式跨书注入
+    会把两本书的素材挤在同一份预算里互摧；显式拷贝让「带哪几条进新书」
+    成为作者点得出来的决定。拷到本书自己也合法（卡片变成可检索素材）。
+    """
+    store = _store(request)
+    await _require_work(request, work_id)
+    target = await _require_work(request, body.target_work_id)
+    rows = [r for r in await store.list_craft(work_id) if r["id"] in set(body.analysis_ids)]
+    if not rows:
+        raise HTTPException(status_code=400, detail="没有匹配的拆解卡片：先在拆解页选几条")
+    ok: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for r in rows:
+        text = (r.get("text") or "").strip()
+        if not text:
+            failed.append({"title": r.get("title") or "", "error": "卡片正文是空的"})
+            continue
+        try:
+            src = await store.add_source(
+                body.target_work_id, content=text,
+                title=f"【结构】{r.get('title') or ''}".strip(), kind="note")
+            full = await store.get_source(src["id"]) or src
+            await indexer.index_source(store, full)
+            ok.append({"source_id": src["id"], "title": src["title"]})
+        except Exception as exc:  # noqa: BLE001 - 逐条搬，一条失败不该退回整批
+            logger.warning(f"[craft] 拷贝素材失败 card={r['id']}: {exc}")
+            failed.append({"title": r.get("title") or "", "error": str(exc)})
+    return {"ok": len(ok), "failed": failed, "cards": ok,
+            "target_title": target.get("title") or ""}
+
+
+@router.post("/studio/templates/from-craft/{work_id}", dependencies=[Depends(verify_key)])
+async def template_from_craft(work_id: str, body: TemplateFromWork, request: Request):
+    """把全书拆解的幕结构抽成模板：别人的骨架变成模板库的一个条目。
+
+    不调模型：acts 就是骨架段，target_words 拿这本书自己的章均字数中位数
+    （它自己的体量就是「这一幕大概写多少字」最诚实的答案）。
+    """
+    store = _store(request)
+    work = await _require_work(request, work_id)
+    book = await store.get_craft(work_id, "book", "")
+    if not book:
+        raise HTTPException(status_code=400, detail="这本书还没拆过：先跑「手艺拆解」的全书级")
+    try:
+        data = json.loads(book.get("content_json") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    acts = [a for a in _as_list(data.get("acts")) if isinstance(a, dict)]
+    if not acts:
+        raise HTTPException(status_code=400, detail="全书卡片里没有幕结构：重跑一次全书级再试")
+
+    readable = await store.list_readable(work_id)
+    words = [int(n.get("word_count") or 0) for n in readable if int(n.get("word_count") or 0) > 0]
+    per_act = cost.median(words) if words else 800
+    main_lines = "；".join(str(m)[:60] for m in _as_list(data.get("main_lines"))[:2])
+    outline = []
+    for a in acts[:8]:
+        heading = str(a.get("name") or "").strip()[:80] or "未命名幕"
+        fn = str(a.get("function") or "").strip()[:200]
+        span = str(a.get("span") or "").strip()[:60]
+        prompt = fn + (f"（跨度：{span}）" if span else "")
+        if main_lines:
+            prompt += f"｜参照书主线：{main_lines}"
+        outline.append({"heading": heading, "prompt": prompt[:400],
+                        "target_words": per_act})
+
+    takeaways = "\n".join(f"- {str(t)[:100]}" for t in _as_list(data.get("takeaways"))[:6])
+    resolved = content_types.resolve(
+        work.get("kind") or "article", work.get("scale") or "",
+        work.get("subtype") or "", work.get("channel") or "")
+    created = await store.create_template(
+        kind=work.get("kind") or "article",
+        name=(body.name or "").strip()[:80] or f"{work.get('title') or '未命名'} · 结构拆解",
+        subtype=work.get("subtype") or "",
+        channel=work.get("channel") or "",
+        outline=outline,
+        style_prompt=str(data.get("structure_type") or "") + \
+            (f"\n可借鉴：\n{takeaways}" if takeaways else ""),
+        checks=list(resolved.get("checks") or []),
+        tags=body.tags or ["结构拆解"],
+        note=body.note or f"从《{work.get('title') or ''}》的手艺拆解抽取",
+        source_work_id=work_id,
+    )
+    return {**created, "source_title": work.get("title") or ""}
 
 
 @router.get("/studio/works/{work_id}/scores", dependencies=[Depends(verify_key)])

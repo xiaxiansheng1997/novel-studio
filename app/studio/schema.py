@@ -314,6 +314,33 @@ CREATE TABLE IF NOT EXISTS summaries (
     UNIQUE(scope, ref_id)
 );
 
+-- ============ 手艺拆解（结构卡片） ============
+
+-- 把一本已成稿的书逐章/逐卷/全书拆成「可操作的结构事实」。
+-- 与 summaries 的分工：摘要喂自己书的续写（发生了什么），这里喂手艺分析
+-- （怎么发生的：冲突、信息差、钩子、幕结构），产物归属被拆书，
+-- 别的书要用走显式拷贝（craft/apply 端点）。
+CREATE TABLE IF NOT EXISTS craft_analyses (
+    id TEXT PRIMARY KEY,
+    work_id TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+    level TEXT NOT NULL,               -- chapter / volume / book
+    ref_node_id TEXT NOT NULL DEFAULT '',  -- book 行为空串，其余是章/卷节点 id
+    ref_ordinal INTEGER DEFAULT 0,
+    title TEXT DEFAULT '',
+    content_json TEXT DEFAULT '{}',    -- 结构化拆解结果（渲染与二次加工的数据源）
+    text TEXT NOT NULL,                -- 渲染后的 Markdown（拷进素材桶就是这一份）
+    -- 生成时输入的指纹：章行与 nodes.content_hash 同口径（store._hash，不 strip），
+    -- 卷/书记的是「拼进去的那些下层分析」的哈希，空串 = 已知过期。
+    ref_hash TEXT DEFAULT '',
+    model TEXT DEFAULT '',
+    provider TEXT DEFAULT '',
+    note TEXT DEFAULT '',              -- 「原文 2.1 万字已截断」这类警告
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(work_id, level, ref_node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_craft_work ON craft_analyses(work_id, level, ref_ordinal);
+
 CREATE TABLE IF NOT EXISTS index_state (
     work_id TEXT PRIMARY KEY REFERENCES works(id) ON DELETE CASCADE,
     last_chunk_ordinal INTEGER DEFAULT 0,

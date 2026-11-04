@@ -3567,6 +3567,77 @@ class StudioStore:
             await self._mark_stale_locked(work_id, node_id)
             await self._db.commit()
 
+    # ==================== 手艺拆解 ====================
+
+    async def upsert_craft(
+        self, work_id: str, *, level: str, ref_node_id: str = "", title: str = "",
+        content_json: str = "{}", text: str = "", ref_hash: str = "", model: str = "",
+        provider: str = "", note: str = "", ref_ordinal: int = 0,
+    ) -> dict[str, Any]:
+        """写一张结构卡片（重跑覆盖）。
+
+        冲突键是 (work_id, level, ref_node_id)：book 行靠空串落位，
+        章/卷行就是节点 id——和 jobs 的幂等查重同一套业务键语义。
+        """
+        assert self._db is not None
+        now = _now()
+        cid = _new_id("cr_")
+        async with self._lock:
+            await self._db.execute(
+                "INSERT INTO craft_analyses(id, work_id, level, ref_node_id, ref_ordinal, "
+                "title, content_json, text, ref_hash, model, provider, note, "
+                "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(work_id, level, ref_node_id) DO UPDATE SET "
+                "title=excluded.title, content_json=excluded.content_json, "
+                "text=excluded.text, ref_hash=excluded.ref_hash, model=excluded.model, "
+                "provider=excluded.provider, note=excluded.note, "
+                "ref_ordinal=excluded.ref_ordinal, updated_at=excluded.updated_at",
+                (cid, work_id, level, ref_node_id, int(ref_ordinal), title,
+                 content_json, text, ref_hash, model, provider, note, now, now),
+            )
+            await self._db.commit()
+            cur = await self._db.execute(
+                "SELECT * FROM craft_analyses WHERE work_id = ? AND level = ? AND ref_node_id = ?",
+                (work_id, level, ref_node_id))
+            row = await cur.fetchone()
+        return dict(row) if row else {}
+
+    async def get_craft(self, work_id: str, level: str, ref_node_id: str = "") -> Optional[dict[str, Any]]:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT * FROM craft_analyses WHERE work_id = ? AND level = ? AND ref_node_id = ?",
+                (work_id, level, ref_node_id))
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_craft(self, work_id: str, level: str = "") -> list[dict[str, Any]]:
+        assert self._db is not None
+        sql = ("SELECT id, work_id, level, ref_node_id, ref_ordinal, title, "
+               "content_json, text, ref_hash, model, provider, note, created_at, updated_at "
+               "FROM craft_analyses WHERE work_id = ?")
+        params: list[Any] = [work_id]
+        if level:
+            sql += " AND level = ?"
+            params.append(level)
+        # 显式层级序：全书卡置顶、卷卡次之、章卡按写作顺序展开——
+        # 字母序会把 volume 排到 book 前，界面就成了倒金字塔。
+        sql += (" ORDER BY CASE level WHEN 'book' THEN 0 "
+                "WHEN 'volume' THEN 1 ELSE 2 END, ref_ordinal ASC")
+        async with self._lock:
+            cur = await self._db.execute(sql, params)
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def delete_craft(self, work_id: str, level: str, ref_node_id: str = "") -> bool:
+        assert self._db is not None
+        async with self._lock:
+            cur = await self._db.execute(
+                "DELETE FROM craft_analyses WHERE work_id = ? AND level = ? AND ref_node_id = ?",
+                (work_id, level, ref_node_id))
+            await self._db.commit()
+        return (cur.rowcount or 0) > 0
+
     # ==================== 任务队列（M4） ====================
 
     async def enqueue_job(

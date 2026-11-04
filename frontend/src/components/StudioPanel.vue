@@ -427,6 +427,11 @@
         </div>
       </section>
 
+      <!-- 拆解：导入的参考书 → 结构卡片 → 素材桶 / 模板库（仅小说） -->
+      <section v-else-if="tab === 'craft'" class="section">
+        <CraftPanel />
+      </section>
+
       <!-- 上下文 -->
       <section v-else-if="tab === 'context'" class="section">
         <!-- 记忆状态：索引与摘要。没建索引时 S4/S5 是空的，先在这里看得到 -->
@@ -754,6 +759,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import AskPanel from './AskPanel.vue'
+import CraftPanel from './CraftPanel.vue'
 import GraphMap from './GraphMap.vue'
 import VersionDiff from './VersionDiff.vue'
 import { useStudioStore } from '../stores/studio'
@@ -1285,6 +1291,8 @@ const tabs = computed(() => {
     { id: 'terms', label: '术语', count: store.terms.length },
     { id: 'style', label: '文风', count: 0 },
     { id: 'template', label: '模板', count: 0 },
+    // 拆解挨着模板：「把别人的书拆成骨架」是模板的另一条进货渠道
+    { id: 'craft', label: '拆解', count: 0, novelOnly: true },
     { id: 'graph', label: '图谱', count: graphEntities.value.length, novelOnly: true },
     { id: 'context', label: '上下文', count: 0 },
     { id: 'versions', label: '历史', count: store.versions.length },

@@ -21,7 +21,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from app.core.errors import HumanVerifyRequired, NeedsLogin, ProviderBlocked, W2AError
-from app.studio import consistency, graph, indexer, prompting, scoring, summarizer
+from app.studio import consistency, craft, graph, indexer, prompting, scoring, summarizer
 from app.studio.assembler import assemble, record_used_sources
 
 # 这些错误说明「人不在」，重试没有意义：必须暂停整条队列
@@ -286,6 +286,8 @@ REGISTRY = {
     "check": run_check,
     "summarize": run_summarize,
     "extract": run_extract,
+    # 手艺拆解：章/卷/书三级共用一个 task_type，层级在 payload.level 里分叉
+    "craft": craft.run_craft,
 }
 
 
