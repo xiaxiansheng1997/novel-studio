@@ -18,7 +18,7 @@ from typing import Any, Literal, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -27,21 +27,26 @@ from app.llm.gateway import Gateway, pick_model
 from app.studio import (
     content_types,
     consistency,
+    cost,
+    exporters,
     graph,
     indexer,
     prompting,
     publish,
+    replace,
     retrieval,
     summarizer,
+    tasks,
     tokenize,
     voice,
     wechat,
 )
 from app.studio.assembler import assemble, record_used_sources
+from app.studio.docx_import import docx_to_text
 from app.studio.jsonutil import as_list as _as_list
 from app.studio.jsonutil import parse_json_loose as _parse_json_loose
 from app.studio.prompting import node_instruction as _node_instruction
-from app.studio.store import BackupError
+from app.studio.store import BACKUP_SNAPSHOT_KEEP, BackupError, BUNDLE_FORMAT, LIBRARY_FORMAT
 
 router = APIRouter()
 
@@ -63,14 +68,40 @@ async def _require_work(request: Request, work_id: str) -> dict[str, Any]:
     return work
 
 
+async def _final_gate(store, node: dict[str, Any]) -> dict[str, Any]:
+    """定稿前要过的那道门：这一节还没处理的硬告警。
+
+    只认 `error`：warn/info 是「八成有问题」，不该拦定稿；只看本节，
+    全书级告警（`node_id` 为空，比如伏笔超期）不挡单独一节的定稿——
+    那些在发布体检里看。列表只带前 10 条，够人判断就行。
+    """
+    rows = await store.list_issues(
+        node["work_id"], node_id=node["id"], only_open=True, limit=200
+    )
+    errors = [r for r in rows if (r.get("severity") or "") == "error"]
+    return {
+        "open_errors": len(errors),
+        "issues": [
+            {"id": r["id"], "rule": r["rule"], "message": r["message"]}
+            for r in errors[:10]
+        ],
+        "truncated": max(0, len(errors) - 10),
+    }
+
+
 # ==================== 请求模型 ====================
 
 class WorkCreate(BaseModel):
     kind: Literal["novel", "article"] = "article"
     scale: Literal["single", "series"] = "single"
     subtype: str = ""
+    # 渠道与 subtype 正交：历史专题既可以发公众号也可以发知乎。
+    # 留空就是「不发到任何平台」，只看文种约束。
+    channel: str = ""
     title: str = Field(min_length=1, max_length=120)
     premise: str = ""
+    # 三态：null = 没指定，按 kind+subtype+channel 自动挑一套；
+    # "" = 明确说「不套模板」；具体 id = 用户在下拉框里挑的
     template_id: Optional[str] = None
     target_words: int = 0
 
@@ -84,6 +115,8 @@ class WorkUpdate(BaseModel):
     status: Optional[Literal["active", "paused", "archived"]] = None
     scale: Optional[str] = None
     subtype: Optional[str] = None
+    # 换渠道只影响下一节：已写节点的要点存在 meta_json.outline 里，不动
+    channel: Optional[str] = None
     template_id: Optional[str] = None
     target_words: Optional[int] = None
     style_json: Optional[str] = None
@@ -102,15 +135,47 @@ class NodeUpdate(BaseModel):
     content: Optional[str] = None
     status: Optional[str] = None
     summary: Optional[str] = None
+    # 本节计划：prompt / target_words / pov / time / place。
+    # 传对象而不是 JSON 字符串，前端少一次 stringify，后端统一落成 JSON 文本。
+    plan_json: Optional[dict[str, Any]] = None
     # 前端点「保存」时传 true，才把当前正文留一份版本；自动保存不传
     snapshot: bool = False
     # 只有「采用 AI 结果」那一条会显式传；手改不传，由路由落成 human
     snapshot_source: Optional[str] = None
+    # 采用归因：前端把生成 SSE meta 里的 run_id 带回来，版本行认这根线，
+    # 反馈统计才知道哪次生成真的进了正文
+    run_id: Optional[str] = None
+    # 乐观锁：前端手里那一份的 updated_at。改正文的写入若比库里旧，
+    # 说明取到存之间有别处动过（双开/异地/跑批），409 拦下而不是悄悄盖掉
+    base_updated_at: Optional[float] = None
+    # 看过冲突提示仍要「就存我这份」：只放行上面那道闸，与定稿闸的 force 各管各的
+    ignore_conflict: bool = False
+    # 定稿闸门：这一节有未处理的硬告警时，要人看过并明确「就这样定」才放行
+    force: bool = False
 
 
 class NodeMove(BaseModel):
     # 同层上/下移：只与紧邻的前/后兄弟互换，不支持跨父搬动
     direction: Literal["up", "down"]
+
+
+class NodeReparent(BaseModel):
+    # 拖到哪个容器末尾；null 表示搬到顶层
+    parent_id: Optional[str] = None
+    # 非空时插到该兄弟节点之前（优先于 parent_id，落点由它的 parent 决定）
+    before_id: str = ""
+
+
+class NodeSplit(BaseModel):
+    # 正文字符下标，升序；第 i 段留在原节，其余各段成为紧跟其后的兄弟节
+    offsets: list[int] = Field(default_factory=list, max_length=20)
+
+
+class NodeMerge(BaseModel):
+    # 从这一节起往后吃几节（含自己），至少 2
+    count: int = Field(2, ge=2, le=50)
+    # 段落间隔；空白串退回空行，免得拼出一坨
+    separator: str = "\n\n"
 
 
 class SourceCreate(BaseModel):
@@ -171,21 +236,326 @@ class GenerateRequest(BaseModel):
     variant: int = 0
 
 
+class BeatsRequest(BaseModel):
+    # 用当前还没保存的计划要点重抽也行：传了就以它为准
+    focus: str = ""
+    model: str = ""
+
+
 # ==================== 模板 ====================
 
+# 模板导出文件上的格式标记：导入时靠它认出「这是一份模板」，
+# 而不是靠有没有 name 字段——作品包里也有 name。
+TEMPLATE_FORMAT = "novel-studio.template/1"
+
+# 内置模板只读的统一说辞：前端会把 `detail` 原样显示在按钮旁边，
+# 只说「409」用户不知道该怎么做。
+_BUILTIN_READONLY = "内置模板只读，请先复制一份再改"
+
+
+class TemplateCreate(BaseModel):
+    kind: Literal["novel", "article"] = "article"
+    name: str = Field(min_length=1, max_length=80)
+    subtype: str = ""
+    channel: str = ""
+    outline: list[dict[str, Any]] = Field(default_factory=list)
+    style_prompt: str = ""
+    checks: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class TemplateUpdate(BaseModel):
+    name: Optional[str] = None
+    subtype: Optional[str] = None
+    channel: Optional[str] = None
+    outline: Optional[list[dict[str, Any]]] = None
+    style_prompt: Optional[str] = None
+    checks: Optional[list[str]] = None
+    tags: Optional[list[str]] = None
+    note: Optional[str] = None
+
+
+class TemplateFromWork(BaseModel):
+    # 不填就用「源作品标题 · 骨架」
+    name: str = ""
+    note: str = ""
+    tags: list[str] = Field(default_factory=list)
+
+
+class TemplatePin(BaseModel):
+    # 不传即取反：前端那颗星只要一个点击，没必要先读一遍当前值
+    pinned: Optional[bool] = None
+
+
+def _json_list(raw: Any) -> list:
+    """库里存的是 JSON 文本，取出来给前端要还原成数组。"""
+    if isinstance(raw, list):
+        return raw
+    try:
+        got = json.loads(raw or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return got if isinstance(got, list) else []
+
+
+def _norm_outline(items: Any) -> list[dict[str, Any]]:
+    """模板骨架归一成 {heading, prompt, target_words}。
+
+    与 `_norm_sections` 分开：那个收的是模型输出（字段名要放宽），
+    这个收的是前端表单（字段已定），但都得挡住「heading 为空」与「字数不是数」——
+    空标题的节进了 S0，模型会照着写一段没有主题的话。
+    """
+    out: list[dict[str, Any]] = []
+    if not isinstance(items, list):
+        return out
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        heading = str(it.get("heading") or "").strip()
+        if not heading:
+            continue
+        try:
+            words = int(it.get("target_words") or 0)
+        except (TypeError, ValueError):
+            words = 0
+        out.append({
+            "heading": heading[:80],
+            "prompt": str(it.get("prompt") or "").strip()[:400],
+            "target_words": words,
+        })
+    return out
+
+
+def _template_payload(tpl: dict[str, Any]) -> dict[str, Any]:
+    """导出用的模板快照：去掉 id / 内置标记 / 使用次数这些绑本机库的字段。"""
+    return {
+        "kind": tpl.get("kind") or "article",
+        "name": tpl.get("name") or "",
+        "subtype": tpl.get("subtype") or "",
+        "channel": tpl.get("channel") or "",
+        "outline": _norm_outline(_json_list(tpl.get("outline_json"))),
+        "style_prompt": tpl.get("style_prompt") or "",
+        "checks": [str(c) for c in _json_list(tpl.get("checks_json"))],
+        "tags": [str(t) for t in _json_list(tpl.get("tags_json"))],
+        "note": tpl.get("note") or "",
+    }
+
+
 @router.get("/studio/templates", dependencies=[Depends(verify_key)])
-async def list_templates(request: Request, kind: str = "", subtype: str = ""):
-    return await _store(request).list_templates(kind=kind, subtype=subtype)
+async def list_templates(request: Request, kind: str = "", subtype: str = "",
+                         channel: str = "", q: str = ""):
+    """模板库。`q` 只看名字；其余是精确过滤（渠道与文种正交，可单独筛）。"""
+    return await _store(request).list_templates(
+        kind=kind, subtype=subtype, channel=channel, q=(q or "").strip())
+
+
+@router.post("/studio/templates", dependencies=[Depends(verify_key)])
+async def create_template(body: TemplateCreate, request: Request):
+    """新建模板。界面上一律 is_builtin=0；内置只从 YAML 种子来。"""
+    return await _store(request).create_template(
+        kind=body.kind,
+        name=body.name.strip(),
+        subtype=body.subtype,
+        channel=body.channel,
+        outline=_norm_outline(body.outline),
+        style_prompt=body.style_prompt,
+        checks=body.checks,
+        tags=body.tags,
+        note=body.note,
+    )
+
+
+@router.post("/studio/templates/import", dependencies=[Depends(verify_key)])
+async def import_template(payload: dict[str, Any], request: Request):
+    """导入一份导出的模板 JSON。
+
+    一律落成新模板（`is_builtin=0`），不按原 id 覆盖：导出文件是拿来换机或
+    发给别人的，覆盖掉本机同 id 的模板等于悄悄改别人的库。
+    """
+    tpl = payload.get("template") if isinstance(payload.get("template"), dict) else payload
+    name = str(tpl.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="模板缺 name，认不出这是什么")
+    kind = str(tpl.get("kind") or "article")
+    if kind not in ("article", "novel"):
+        raise HTTPException(status_code=400, detail=f"kind 只认 article / novel: {kind}")
+    outline = _norm_outline(tpl.get("outline"))
+    if not outline:
+        raise HTTPException(status_code=400, detail="模板骨架是空的：没有 outline 就没有可套的东西")
+    return await _store(request).create_template(
+        kind=kind,
+        name=name[:80],
+        subtype=str(tpl.get("subtype") or ""),
+        channel=str(tpl.get("channel") or ""),
+        outline=outline,
+        style_prompt=str(tpl.get("style_prompt") or ""),
+        checks=[str(c) for c in (tpl.get("checks") or [])],
+        tags=[str(t) for t in (tpl.get("tags") or [])],
+        note=str(tpl.get("note") or ""),
+    )
+
+
+@router.post("/studio/templates/from-work/{work_id}", dependencies=[Depends(verify_key)])
+async def template_from_work(work_id: str, body: TemplateFromWork, request: Request):
+    """把一本作品已写好的骨架沉淀成模板。
+
+    只用「已经写出来的东西」反推骨架，不调模型：节标题就是 heading，
+    节拍卡（或正文开头）就是 prompt，实际字数就是 target_words。
+    这样改一版骨架的成本是「正常写一篇」，而不是「先去学写模板」。
+    """
+    store = _store(request)
+    work = await _require_work(request, work_id)
+    tree = await store.list_tree(work_id)
+    readable = [n for n in tree if n.get("ordinal") is not None]
+    readable.sort(key=lambda n: n.get("ordinal") or 0)
+    if not readable:
+        raise HTTPException(
+            status_code=400,
+            detail="这本作品还没有可读的节点：先生成大纲或手写几节，再来沉淀骨架",
+        )
+
+    truncated = max(0, len(readable) - 30)
+    outline: list[dict[str, Any]] = []
+    for item in readable[:30]:
+        node = await store.get_node(item["id"]) or {}
+        heading = (item.get("title") or "").strip() or f"第 {item.get('ordinal')} 节"
+        # 节拍卡优先：它是人（或模型）写这一节时的真实意图
+        prompt = (node.get("summary") or "").strip()
+        if not prompt:
+            prompt = re.sub(r"\s+", " ", (node.get("content") or "")).strip()[:120]
+        outline.append({
+            "heading": heading[:80],
+            "prompt": prompt,
+            "target_words": int(item.get("word_count") or 0) or 800,
+        })
+
+    resolved = content_types.resolve(
+        work.get("kind") or "article", work.get("scale") or "",
+        work.get("subtype") or "", work.get("channel") or "")
+    from app.studio.assembler import _style_text  # 与装配时同一份口径，避免两处漂移
+    created = await store.create_template(
+        kind=work.get("kind") or "article",
+        name=(body.name or "").strip()[:80] or f"{work.get('title') or '未命名'} · 骨架",
+        subtype=work.get("subtype") or "",
+        channel=work.get("channel") or "",
+        outline=outline,
+        style_prompt=_style_text(work),
+        checks=list(resolved.get("checks") or []),
+        tags=body.tags,
+        note=body.note,
+        source_work_id=work_id,
+    )
+    return {**created, "truncated": truncated, "source_title": work.get("title") or ""}
+
+
+@router.get("/studio/templates/{template_id}", dependencies=[Depends(verify_key)])
+async def get_template(template_id: str, request: Request):
+    tpl = await _store(request).get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    return tpl
+
+
+@router.patch("/studio/templates/{template_id}", dependencies=[Depends(verify_key)])
+async def update_template(template_id: str, body: TemplateUpdate, request: Request):
+    store = _store(request)
+    tpl = await store.get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    if int(tpl.get("is_builtin") or 0):
+        raise HTTPException(status_code=409, detail=_BUILTIN_READONLY)
+    payload = body.model_dump(exclude_none=True)
+    if "outline" in payload:
+        payload["outline"] = _norm_outline(payload["outline"])
+        if not payload["outline"]:
+            raise HTTPException(status_code=400, detail="骨架不能为空：至少留一节")
+    if "name" in payload and not payload["name"].strip():
+        raise HTTPException(status_code=400, detail="模板名不能为空")
+    got = await store.update_template(template_id, **payload)
+    if got is None:
+        raise HTTPException(status_code=404, detail="模板不存在或无更新")
+    return got
+
+
+@router.delete("/studio/templates/{template_id}", dependencies=[Depends(verify_key)])
+async def delete_template(template_id: str, request: Request):
+    """删模板并解绑引用它的作品。返回解绑了几本，让前端能说清影响。"""
+    store = _store(request)
+    tpl = await store.get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    if int(tpl.get("is_builtin") or 0):
+        raise HTTPException(status_code=409, detail=_BUILTIN_READONLY)
+    return await store.delete_template(template_id)
+
+
+@router.post("/studio/templates/{template_id}/duplicate", dependencies=[Depends(verify_key)])
+async def duplicate_template(template_id: str, request: Request):
+    """复制一份可改的副本。
+
+    这是改内置模板的唯一入口：内置行每次启动都被 YAML 覆盖，
+    直接放开编辑，用户改完重启就没了，比不能改更让人恼火。
+    """
+    store = _store(request)
+    tpl = await store.get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    return await store.create_template(
+        kind=tpl.get("kind") or "article",
+        name=f"{tpl.get('name') or '未命名'}（副本）"[:80],
+        subtype=tpl.get("subtype") or "",
+        channel=tpl.get("channel") or "",
+        outline=_json_list(tpl.get("outline_json")),
+        style_prompt=tpl.get("style_prompt") or "",
+        checks=[str(c) for c in _json_list(tpl.get("checks_json"))],
+        tags=[str(t) for t in _json_list(tpl.get("tags_json"))],
+        note=tpl.get("note") or "",
+        source_work_id=tpl.get("source_work_id") or "",
+    )
+
+
+@router.post("/studio/templates/{template_id}/default", dependencies=[Depends(verify_key)])
+async def set_default_template(template_id: str, request: Request):
+    """设为同 kind+subtype+channel 的默认模板（同组其它行会被清零）。"""
+    store = _store(request)
+    tpl = await store.get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    await store.set_default_template(template_id)
+    return await store.get_template(template_id)
+
+
+@router.post("/studio/templates/{template_id}/pin", dependencies=[Depends(verify_key)])
+async def pin_template(template_id: str, request: Request, body: Optional[TemplatePin] = None):
+    """收藏 / 取消收藏。不传 body 就是取反。"""
+    got = await _store(request).toggle_template_pin(
+        template_id, None if body is None else body.pinned)
+    if got is None:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    return got
+
+
+@router.get("/studio/templates/{template_id}/export", dependencies=[Depends(verify_key)])
+async def export_template(template_id: str, request: Request):
+    """导出成一份可换机、可发人的 JSON。"""
+    tpl = await _store(request).get_template(template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="模板不存在")
+    return {"format": TEMPLATE_FORMAT, "template": _template_payload(tpl)}
 
 
 # 备份失败时回给前端的那一句：固定文案。
 # 前端会把 `detail` 直接显示出来，而 `BackupError` 的原话里带着本机库文件与备份目录的位置，
 # 那句只该进日志。
 _BACKUP_DENIED = "备份失败，已拒绝删除，详见服务端日志"
+# 快照失败同一口径：它不是「拒绝了某个破坏性动作」，只是多一份副本没落成。
+_SNAPSHOT_FAILED = "快照没写成，详见服务端日志"
 
 # node_versions.source 的取值集合，与前端 SOURCE_LABEL 一一对应。
 # 放开成任意字符串的话，历史页会出现「未知」这种没人看得懂的行，回滚前不敢点。
-_VERSION_SOURCES = {"human", "ai_draft", "ai_polish"}
+# `bulk_replace` 是「全作品替换」单独开的那一档：替换不是今天新写的字，不该刷高日历。
+_VERSION_SOURCES = {"human", "ai_draft", "ai_polish", "bulk_replace"}
 
 
 # ==================== 作品 ====================
@@ -246,17 +616,22 @@ async def search_all(request: Request, q: str = "", limit: int = 20):
 async def create_work(body: WorkCreate, request: Request):
     store = _store(request)
     template_id = body.template_id
-    # 没指定模板时按 subtype 找一个同类的，避免单篇生成时完全没有骨架
-    if not template_id and body.kind == "article":
-        candidates = await store.list_templates(kind="article", subtype=body.subtype or "general")
-        if not candidates:
-            candidates = await store.list_templates(kind="article")
-        if candidates:
-            template_id = candidates[0]["id"]
+    # 没指定模板时按「文种 + 渠道」找一套：优先级链在 store.pick_template 里，
+    # 第一条是 subtype+channel 的默认，最后兜底到该 kind 的任意一个。
+    # 注意区分「没填」与「空串」：前者是「你帮我挑」，后者是「不套模板」，
+    # 两者都当没填的话，界面上那个「不套模板」选项会静默失效。
+    # 空串要归成 NULL：这一列是指向 templates 的外键，空串不是任何模板的 id。
+    if template_id is None:
+        picked = await store.pick_template(body.kind, body.subtype, body.channel)
+        if picked:
+            template_id = picked["id"]
+    elif not template_id.strip():
+        template_id = None
     return await store.create_work(
         kind=body.kind,
         scale=body.scale,
         subtype=body.subtype,
+        channel=body.channel,
         title=body.title,
         premise=body.premise,
         template_id=template_id,
@@ -288,6 +663,91 @@ async def delete_work(work_id: str, request: Request):
         logger.error(f"[studio] 删作品被备份拦住 {work_id}: {exc}")
         raise HTTPException(status_code=500, detail=_BACKUP_DENIED) from exc
     return {"ok": True}
+
+
+# ==================== 整本搬迁（作品包） ====================
+
+def _bundle_filename(title: str) -> str:
+    """包文件名的主干只用安全字符：中文靠 filename* 走 URL 编码。"""
+    return re.sub(r'[\\/:*?"<>|]+', "_", title)[:60] or "work"
+
+
+@router.get("/studio/works/{work_id}/bundle", dependencies=[Depends(verify_key)])
+async def export_bundle(work_id: str, request: Request):
+    """把一本书导出成 JSON 包（树 + 版本 + 素材 + 图谱），用于换机或存档。"""
+    bundle = await _store(request).export_work(work_id)
+    if bundle is None:
+        raise HTTPException(status_code=404, detail=f"作品不存在: {work_id}")
+    title = (bundle["work"] or {}).get("title") or "work"
+    body = json.dumps(bundle, ensure_ascii=False)
+    encoded = quote(_bundle_filename(title) + ".bundle.json")
+    return Response(
+        content=body,
+        media_type="application/json; charset=utf-8",
+        headers={
+            "Content-Disposition":
+                f"attachment; filename=work.bundle.json; filename*=UTF-8''{encoded}",
+            "X-Nodes": str(len(bundle["nodes"])),
+        },
+    )
+
+
+@router.get("/studio/library/bundle", dependencies=[Depends(verify_key)])
+async def export_library(request: Request):
+    """整库导出：每本书一个包，外面套一层书目。"""
+    data = await _store(request).export_library()
+    body = json.dumps(data, ensure_ascii=False)
+    encoded = quote("novel-studio-library.bundle.json")
+    return Response(
+        content=body,
+        media_type="application/json; charset=utf-8",
+        headers={
+            "Content-Disposition":
+                f"attachment; filename=library.bundle.json; filename*=UTF-8''{encoded}",
+            "X-Works": str(len(data["works"])),
+        },
+    )
+
+
+@router.post("/studio/works/import", dependencies=[Depends(verify_key)])
+async def import_bundle(payload: dict[str, Any], request: Request):
+    """导入单个作品包或整库包：每本都落成一本新书，不按原 id 覆盖。
+
+    一本失败不拦别的：把失败清单一起回给前端，已导进来的照常保留——
+    整库导入时因为第三本书缺字段就全都不要，比丢一本更难收拾。
+    """
+    store = _store(request)
+    if payload.get("format") == LIBRARY_FORMAT:
+        items = payload.get("works") or []
+    elif payload.get("format") == BUNDLE_FORMAT:
+        items = [payload]
+    else:
+        raise HTTPException(status_code=400, detail="不是作品包：format 对不上")
+    if not items:
+        raise HTTPException(status_code=400, detail="包里没有作品")
+    if len(items) > 200:
+        raise HTTPException(status_code=400, detail="一次最多导入 200 本")
+
+    imported: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for idx, item in enumerate(items, 1):
+        try:
+            got = await store.import_work(item)
+        except ValueError as exc:
+            failed.append({"index": idx, "error": str(exc)})
+            continue
+        # 索引是派生的：导完重建一次，刚导进来的书立刻能搜、能检索
+        try:
+            got["chunks"] = (await indexer.reindex_work(store, got["id"]))["chunks_total"]
+        except Exception as exc:  # noqa: BLE001 - 建索引失败不该让导入回滚
+            logger.warning(f"[studio] 导入后建索引失败 work={got['id']}: {exc}")
+            got["chunks"] = 0
+        imported.append(got)
+
+    if not imported:
+        detail = failed[0]["error"] if failed else "没有可导入的作品"
+        raise HTTPException(status_code=400, detail=detail)
+    return {"imported": imported, "failed": failed, "count": len(imported)}
 
 
 @router.get("/studio/works/{work_id}/tree", dependencies=[Depends(verify_key)])
@@ -373,6 +833,57 @@ async def daily_writes(request: Request, days: int = 30):
     }
 
 
+@router.get("/studio/stats/pipeline", dependencies=[Depends(verify_key)])
+async def pipeline_stats(request: Request, days: int = 14):
+    """连载节奏：定稿存稿还能日更几天。
+
+    日更速度的口径按用户定的：优先近 N 个**日历天**的实际日均（含今天，
+    没写的那天算 0 天，不把自己休息日藏掉）；窗口内一笔没写退回
+    每日目标；两个都没有就不编数——days_left 给 null 比编一个假天数诚实。
+    """
+    days = max(3, min(int(days or 14), 60))
+    store = _store(request)
+    since = (date.today() - timedelta(days=days - 1)).isoformat()
+    got = await store.pipeline_window(since)
+    window_chars = sum(int(r["chars"] or 0) for r in got["recent"])
+    raw = await store.get_setting("daily_target_words")
+    try:
+        target = max(0, int(float(raw or 0)))
+    except (ValueError, OverflowError):
+        # 设置项是原样存的字符串，直接打 API 能写进 "inf"——int(float("inf"))
+        # 抛的是 OverflowError，漏捕了这里就 500。认不出就当没设。
+        target = 0
+    if window_chars > 0:
+        pace, source = window_chars / days, "history"
+    elif target > 0:
+        pace, source = float(target), "target"
+    else:
+        pace, source = 0.0, None
+    # 天数按展示的那个整数节奏除：窗口内只写过几字时 pace 会四舍五入到 0，
+    # 若仍拿未取整的浮点去除，界面就摆出「0 字/天 · 几千天可更」的自相矛盾。
+    # 不足 1 字/天按 1 兜底——展示与换算从此是同一个数。
+    pace_disp = max(1, round(pace)) if pace > 0 else 0
+    return {
+        "days": days,
+        "stock_words": got["stock_words"],
+        "stock_nodes": got["stock_nodes"],
+        "window_chars": window_chars,
+        "pace": pace_disp,
+        "pace_source": source,
+        "target": target,
+        "days_left": int(got["stock_words"] // pace_disp) if pace_disp > 0 else None,
+    }
+
+
+@router.get("/studio/stats/cost-quality", dependencies=[Depends(verify_key)])
+async def cost_quality(request: Request, works: int = 50, nodes: int = 50):
+    """生成成本与质量：runs 的耗时/字数按作品与按节汇总，附未处理硬告警。
+
+    `works` / `nodes` 只限返回行数，与统计口径无关；均分只算打过分的跑批。
+    """
+    return await _store(request).cost_quality(work_limit=works, node_limit=nodes)
+
+
 
 # ==================== 节点 ====================
 
@@ -401,20 +912,120 @@ async def get_node(node_id: str, request: Request):
 
 @router.patch("/studio/nodes/{node_id}", dependencies=[Depends(verify_key)])
 async def update_node(node_id: str, body: NodeUpdate, request: Request):
+    store = _store(request)
     payload = body.model_dump(exclude_none=True)
     snapshot = bool(payload.pop("snapshot", False))
     source = payload.pop("snapshot_source", None)
+    force = bool(payload.pop("force", False))
+    # nodes 表没有 run_id 列，必须自己 pop 掉——留在 payload 里会随 **fields 进 UPDATE
+    run_id = payload.pop("run_id", None)
+    payload.pop("base_updated_at", None)
+    payload.pop("ignore_conflict", None)
     if source and source not in _VERSION_SOURCES:
         raise HTTPException(
             status_code=400,
             detail=f"版本来源不认: {source}（只能是 {'/'.join(sorted(_VERSION_SOURCES))}）",
         )
-    ok = await _store(request).update_node(
-        node_id, snapshot=snapshot, snapshot_source=source or "human", **payload
+    plan = payload.get("plan_json")
+    clean_plan = _clean_plan(plan) if plan is not None else None
+    if clean_plan is not None:
+        payload["plan_json"] = json.dumps(clean_plan, ensure_ascii=False)
+    node = await store.get_node(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    # 冲突闸：只拦改正文的写入，而且只拦带 base 的调用方——没带 base 的（服务端
+    # 内部写入、旧调用）无从判断对方见过哪一份，维持原行为。
+    # 比的是秒级浮点戳：取到存之间库里被别处写过就 409，把服务端整份带回去
+    # 让调用方选重取还是强存；last-write-wins 会把另一边的改动吞得无声无息。
+    if ("content" in payload and body.base_updated_at is not None
+            and not body.ignore_conflict
+            and float(node.get("updated_at") or 0) - body.base_updated_at > 1e-6):
+        raise HTTPException(status_code=409, detail={
+            "conflict": True,
+            "server": node,
+        })
+    # 定稿闸门：只拦「硬告警」（severity=error），提醒与提示不挡路。
+    # 这里不写库、不改状态——前端拿到 409 里那几条，弹一句确认再带 force 重试；
+    # 告警本身不会随定稿自动消掉，人在「告警」里点「已处理」才消。
+    if payload.get("status") == "final" and not force:
+        gate = await _final_gate(store, node)
+        if gate["open_errors"]:
+            raise HTTPException(status_code=409, detail=gate)
+    ok = await store.update_node(
+        node_id, snapshot=snapshot, snapshot_source=source or "human",
+        run_id=run_id, **payload
     )
     if not ok:
         raise HTTPException(status_code=404, detail="节点不存在或无更新")
-    return await _store(request).get_node(node_id)
+    # 计划改了要顺手同步旧的 works.meta_json.outline：导出包、打分与旧代码
+    # 还在读那一份，两边不一致时「计划页改了、生成没变」会很难查。
+    if plan is not None:
+        work = await store.get_work(node["work_id"])
+        if work:
+            meta = _work_meta(work)
+            meta.setdefault("outline", {})[node_id] = {
+                "prompt": (clean_plan or {}).get("prompt", ""),
+                "target_words": (clean_plan or {}).get("target_words", 0),
+            }
+            await store.update_work(work["id"], meta_json=json.dumps(meta, ensure_ascii=False))
+    return await store.get_node(node_id)
+
+
+@router.get("/studio/nodes/{node_id}/meta", dependencies=[Depends(verify_key)])
+async def node_meta(node_id: str, request: Request):
+    """只报时间戳与字数的轻接口：写作台每十几秒摸一次，探「别处有没有动过这一节」。
+
+    一节正文可能几万字，拿全文轮询太贵；这一份够前端判断要不要再去拉全文。
+    """
+    node = await _store(request).get_node(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    return {k: node.get(k) for k in ("id", "title", "word_count", "status", "updated_at")}
+
+
+@router.post("/studio/nodes/{node_id}/beats", dependencies=[Depends(verify_key)])
+async def regenerate_beats(node_id: str, body: BeatsRequest, request: Request):
+    """给这一节重抽节拍卡（章纲），并直接写回 `nodes.summary`。
+
+    与队列里的 `beats` 任务共用同一套 prompt 与清洗逻辑：交互式重抽
+    不该产出另一种格式，否则「计划页写的」和「排队写的」会打架。
+    """
+    store = _store(request)
+    node = await store.get_node(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    work = await store.get_work(node["work_id"])
+    if not work:
+        raise HTTPException(status_code=404, detail="作品不存在")
+    if (work.get("kind") or "") != "novel":
+        raise HTTPException(status_code=400, detail="节拍卡只用于小说")
+    meta = _work_meta(work)
+    focus = (body.focus or "").strip() or prompting.node_outline(node, meta).get("prompt", "")
+    prev = await tasks._prev_summary(store, work["id"], int(node.get("ordinal") or 0))
+    known = [e["name"] for e in await store.list_entities(work["id"])]
+    system, user = prompting.beats_prompt(
+        work, node, prev_hint=prev, focus=focus, known_names=known)
+    model = pick_model(request.app.state.registry, body.model or None)
+    res = await _gateway(request).complete(
+        model=model, system=system, prompt=user, mode="quick")
+    beats = prompting.parse_beats(res.text or "")
+    if not beats:
+        raise HTTPException(status_code=502, detail="节拍卡为空：换个模型再试，或手写")
+    await store.update_node(node_id, summary=beats)
+    return {"beats": beats, "chars": len(beats)}
+
+
+@router.get("/studio/nodes/{node_id}/final-gate", dependencies=[Depends(verify_key)])
+async def final_gate(node_id: str, request: Request):
+    """定稿前看一眼：这一节还有几条硬告警。
+
+    与 PATCH 里的那一层是同一份判断，单独开一个只读接口是为了让前端在
+    `confirm` 里把规则与原文摆出来——409 只能带一段话，说不清是哪几条。
+    """
+    node = await _store(request).get_node(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    return await _final_gate(_store(request), node)
 
 
 @router.post("/studio/nodes/{node_id}/move", dependencies=[Depends(verify_key)])
@@ -425,6 +1036,77 @@ async def move_node(node_id: str, body: NodeMove, request: Request):
     前端按 `moved` 判断，把 `reason` 当提示语显示就行。
     """
     return await _store(request).move_node(node_id, body.direction)
+
+
+@router.post("/studio/nodes/{node_id}/reparent", dependencies=[Depends(verify_key)])
+async def reparent_node(node_id: str, body: NodeReparent, request: Request):
+    """把一节拖进另一卷末尾（`parent_id` 为 null 则拖回顶层），或插到某节之前。
+
+    `before_id` 非空时按「放到这一行前面」处理，落点由那个节点的父级决定。
+    与 move 不同，这里的不合法多数是误拖（拖到叶子上、拖进自己、跨作品）：
+    404 表示节点或目标不存在，400 带一句人看得懂的原因，前端直接显示。
+    """
+    try:
+        result = await _store(request).reparent_node(
+            node_id, body.parent_id, before_id=body.before_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="节点或目标不存在")
+    return result
+
+
+@router.post("/studio/nodes/{node_id}/duplicate", dependencies=[Depends(verify_key)])
+async def duplicate_node(node_id: str, request: Request):
+    """复制这一节连同整棵子树，插到原节紧后方。
+
+    只复制树上的壳（正文/节拍卡/计划/状态），版本历史与索引不跟。
+    新节需要前端重新 select：章号会随树序重排，与 reparent 同一口径。
+    """
+    try:
+        result = await _store(request).duplicate_node(node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    return result
+
+
+@router.post("/studio/nodes/{node_id}/split", dependencies=[Depends(verify_key)])
+async def split_node(node_id: str, body: NodeSplit, request: Request):
+    """按字符偏移把一节的正文切成若干节，新节紧跟在原节后面。
+
+    切割点由前端在编辑器里选（光标位置即切点），后端只验越界与顺序。
+    offsets 为空什么也不改（`split: false`），方便前端「没选切点就点拆分」给提示。
+    """
+    try:
+        result = await _store(request).split_node(node_id, body.offsets)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    return result
+
+
+@router.post("/studio/nodes/{node_id}/merge", dependencies=[Depends(verify_key)])
+async def merge_node(node_id: str, body: NodeMerge, request: Request):
+    """把连续几节合并成一节：正文拼进第一节，其余节先落备份再删。
+
+    被吸收的节删前会像单删一样写节点备份（在 storage/backups/nodes/），
+    备份写不成为 500；只吃叶子节，遇到容器或带子节点的节是 400。
+    """
+    store = _store(request)
+    try:
+        result = await store.merge_nodes(node_id, count=body.count,
+                                         separator=body.separator)
+    except BackupError as exc:
+        logger.error(f"[studio] 合并被备份拦住 {node_id}: {exc}")
+        raise HTTPException(status_code=500, detail=_BACKUP_DENIED) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    return result
 
 
 @router.delete("/studio/nodes/{node_id}", dependencies=[Depends(verify_key)])
@@ -467,19 +1149,41 @@ async def restore_version(node_id: str, version_id: str, request: Request):
     return node
 
 
-# ==================== 删除备份 ====================
+# ==================== 删除备份与每日快照 ====================
 
 @router.get("/studio/backups", dependencies=[Depends(verify_key)])
 async def list_backups(request: Request):
-    """列出删除前的备份：节点 JSON 与整库副本。只读。"""
+    """列出备份：删除前的节点 JSON 与整库副本，加上每天的整库快照。只读。"""
     store = _store(request)
     return {
         "nodes": store.list_node_backups(),
         "works": store.list_work_backups(),
+        "snapshots": store.list_snapshot_backups(),
+        # 前端拿这个数说「留最近 N 份」，不让它自己再写一份常量
+        "snapshot_keep": BACKUP_SNAPSHOT_KEEP,
         # 只给「相对存储目录」的写法：绝对路径会原样显示到界面上，把部署位置说出去。
         # 想看完整位置用 `scripts/restore_backup.py --list`，那才是给人用的入口。
         "dir": f"{store.db_path.parent.name}/backups/nodes",
+        # 快照与删除副本是两个目录，不给这一行前端就只能说一个地方
+        "snapshot_dir": f"{store.db_path.parent.name}/backups/snapshots",
     }
+
+
+@router.post("/studio/backups/snapshot", dependencies=[Depends(verify_key)])
+async def take_snapshot(request: Request):
+    """立刻取一份整库快照：写一大段之前先存一份，不用等到明天。
+
+    与每日快照同一个目录、同一条保留策略（两类一起数 N 份），所以手动按多了也会
+    挤掉最旧的那一份——这是有意的：留的是「最近的几份」，不是「每天的那一份」。
+    """
+    store = _store(request)
+    try:
+        dest = await store.snapshot_now()
+    except BackupError as exc:
+        logger.error(f"[studio] 手动快照失败: {exc}")
+        raise HTTPException(status_code=500, detail=_SNAPSHOT_FAILED) from exc
+    st = dest.stat()
+    return {"name": dest.name, "bytes": st.st_size, "created_at": st.st_mtime}
 
 
 @router.post("/studio/backups/{filename}/restore", dependencies=[Depends(verify_key)])
@@ -496,6 +1200,30 @@ async def restore_backup_node(filename: str, request: Request):
     if out is None:
         raise HTTPException(status_code=404, detail="备份不存在、读不懂，或那本书已整本删除")
     return out
+
+
+# ==================== DOCX 导入 ====================
+
+@router.post("/studio/import/docx", dependencies=[Depends(verify_key)])
+async def import_docx(request: Request):
+    """把 .docx 解成纯文本（不写库）：前端拿去填进导入弹层，预览、拆节、落库都走老路。
+
+    收原始字节而不是 multipart：那样要新增 python-multipart 依赖，而这一份本来就是
+    单机内网的小工具接口。解析只用标准库（见 `app.studio.docx_import`）。
+    """
+    data = await request.body()
+    try:
+        text = docx_to_text(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not text:
+        raise HTTPException(status_code=400, detail="这份 docx 里没有可读的文字")
+    return {
+        "text": text,
+        "chars": len(text),
+        # 带井号的标题行数：前端拿来提示「按标题拆能不能拆得开」
+        "headings": sum(1 for line in text.splitlines() if line.startswith("#")),
+    }
 
 
 # ==================== 素材 / 事实 / 术语 ====================
@@ -698,12 +1426,10 @@ async def preview_context(body: GenerateRequest, request: Request, work_id: str,
     if node_id and not node:
         raise HTTPException(status_code=404, detail="节点不存在")
 
-    template = None
-    if work.get("template_id"):
-        tpls = [t for t in await store.list_templates() if t["id"] == work["template_id"]]
-        template = tpls[0] if tpls else None
+    template = await _template_of(store, work)
     resolved = content_types.resolve(work.get("kind") or "article",
-                                    work.get("scale") or "", work.get("subtype") or "")
+                                    work.get("scale") or "", work.get("subtype") or "",
+                                    work.get("channel") or "")
 
     # 与「生成」共用一条指令口径，预览显示的就是真要发出去的那一份
     instruction = _instruction_for(body.task_type, node, work, body.instruction)
@@ -757,12 +1483,10 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
         )
     instruction = _instruction_for(body.task_type, node, work, body.instruction)
 
-    template = None
-    if work.get("template_id"):
-        tpls = [t for t in await store.list_templates() if t["id"] == work["template_id"]]
-        template = tpls[0] if tpls else None
+    template = await _template_of(store, work)
     resolved = content_types.resolve(work.get("kind") or "article",
-                                    work.get("scale") or "", work.get("subtype") or "")
+                                    work.get("scale") or "", work.get("subtype") or "",
+                                    work.get("channel") or "")
 
     # 单节生成前把本节最新正文入索引：用户刚手改过，不重建的话
     # S5 检索到的还是旧版本，续写就会接不上。
@@ -863,7 +1587,8 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
                         if _work:
                             _resolved = content_types.resolve(
                                 _work.get("kind") or "article",
-                                _work.get("scale") or "", _work.get("subtype") or "")
+                                _work.get("scale") or "", _work.get("subtype") or "",
+                                _work.get("channel") or "")
                             await consistency.run_checks(store, _work, fresh, resolved=_resolved)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(f"[studio] 检查失败 node={node_id}: {exc}")
@@ -887,9 +1612,11 @@ async def generate(node_id: str, body: GenerateRequest, request: Request):
 
 @router.get("/studio/content-types", dependencies=[Depends(verify_key)])
 async def get_content_types():
-    """前端下拉框的数据源。新增文种只改 content-types.yaml，页面不用动。"""
+    """前端下拉框的数据源。新增文种/渠道只改 content-types.yaml，页面不用动。"""
     return {
         "kinds": content_types.list_kinds(),
+        # 渠道是独立于文种的一层：前端要选「历史 + 公众号」，两个下拉各取一处
+        "channels": content_types.list_channels(),
         "error": content_types.get_types().get("_load_error", ""),
     }
 
@@ -912,10 +1639,7 @@ async def reload_content_types(request: Request):
 async def _template_of(store, work: dict) -> Optional[dict]:
     if not work.get("template_id"):
         return None
-    for tpl in await store.list_templates():
-        if tpl["id"] == work["template_id"]:
-            return tpl
-    return None
+    return await store.get_template(work["template_id"])
 
 
 def _work_meta(work: dict) -> dict[str, Any]:
@@ -924,6 +1648,27 @@ def _work_meta(work: dict) -> dict[str, Any]:
         return meta if isinstance(meta, dict) else {}
     except json.JSONDecodeError:
         return {}
+
+
+def _clean_plan(plan: Any) -> dict[str, Any]:
+    """把前端提交的计划收成稳定形状：四个字符串 + 一个非负整数。
+
+    多出来的键丢掉——`plan_json` 会被拼进 prompt，不能让前端顺手塞别的字段。
+    """
+    if not isinstance(plan, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in ("prompt", "pov", "time", "place"):
+        val = plan.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val.strip()[:2000]
+    try:
+        target = int(plan.get("target_words") or 0)
+    except (TypeError, ValueError):
+        target = 0
+    if target > 0:
+        out["target_words"] = min(target, 100000)
+    return out
 
 
 def _instruction_for(task_type: str, node: Optional[dict], work: dict, extra: str) -> str:
@@ -986,6 +1731,8 @@ class PipelineRequest(BaseModel):
     summarize: bool = True
     # 小说：每节写完就抽一次设定（否则下一节 S6 还是空的），并跑一致性检查（零成本）
     extract: bool = True
+    # 预估超预算时强行开跑（默认拦下；拦的是手滑，不拦清醒的决定）
+    ignore_budget: bool = False
     check: bool = True
 
 
@@ -1000,6 +1747,9 @@ def _outline_prompt(work: dict, resolved: dict, template: Optional[dict],
     if work.get("premise"):
         lines.append(f"主旨：{work['premise']}")
     lines.append(f"类型：{resolved.get('label')} / {resolved.get('subtype_label')}")
+    if resolved.get("channel_label"):
+        # 渠道影响节数与每节字数：公众号 5 节太长，小红书 5 节太多
+        lines.append(f"渠道：{resolved['channel_label']}")
     if resolved.get("target_words"):
         lines.append(f"目标总字数：{resolved['target_words']}")
     if resolved.get("note"):
@@ -1032,7 +1782,8 @@ async def generate_outline(work_id: str, body: OutlineRequest, request: Request)
     store = _store(request)
     work = await _require_work(request, work_id)
     resolved = content_types.resolve(work.get("kind") or "article",
-                                    work.get("scale") or "", work.get("subtype") or "")
+                                    work.get("scale") or "", work.get("subtype") or "",
+                                    work.get("channel") or "")
     template = await _template_of(store, work)
 
     existing = await store.list_readable(work_id)
@@ -1138,6 +1889,11 @@ async def generate_outline(work_id: str, body: OutlineRequest, request: Request)
     meta = _work_meta(work)
     meta.setdefault("outline", {}).update(outline_meta)
     await store.update_work(work_id, meta_json=json.dumps(meta, ensure_ascii=False))
+    # 新计划字段也写一份：右栏「计划」页读的是 nodes.plan_json，
+    # 老代码与导出包继续读上面的 meta_json.outline。
+    for node_id, info in outline_meta.items():
+        await store.update_node(
+            node_id, plan_json=json.dumps(_clean_plan(info), ensure_ascii=False))
 
     elapsed = int((time.perf_counter() - started) * 1000)
     return {
@@ -1150,13 +1906,79 @@ async def generate_outline(work_id: str, body: OutlineRequest, request: Request)
     }
 
 
+@router.post("/studio/works/{work_id}/pipeline/estimate", dependencies=[Depends(verify_key)])
+async def estimate_pipeline(work_id: str, body: PipelineRequest, request: Request):
+    """批量生成前的成本预估：和 run_pipeline 同一套选节与选模型口径，纯读不开跑。
+
+    前端把「点批量」改成「先看这一眼预估再确认」；超预算时开跑会吃 402，
+    这里提前把同一个数摆出来，不让人在 SSE 开到一半才发现要超支。
+    """
+    store = _store(request)
+    await _require_work(request, work_id)
+    nodes = await store.list_readable(work_id, only_empty=body.only_empty)
+    if body.limit > 0:
+        nodes = nodes[: body.limit]
+    model = pick_model(request.app.state.registry, body.model or None)
+    est = await cost.estimate_pipeline(
+        store, request.app.state.registry, work_id=work_id, sections=len(nodes), model=model,
+        spent_before=await _spent_on_model(request, store, work_id, model),
+    )
+    return est
+
+
+async def _spent_on_model(request: Request, store, work_id: str, model: str) -> float:
+    """这本书已经花掉的钱：成功 runs 的产出字数，按本次目标通道的单价折算。
+
+    口径要说实话：只按产出发、输入侧不计（历史 prompt 构成和这次不一样，
+    硬折算反而假）；单价取的是「这次要走的通道」——换通道后拿旧花费
+    抵新额度本就不该精确，预估体系宁可粗而不装细。反代不计钱，直接 0。
+    """
+    price = cost.model_price(request.app.state.registry, model)
+    if price is None:
+        return 0.0
+    chars = await store.output_chars_total(work_id)
+    return chars / cost.CHARS_PER_TOKEN / 1000.0 * price["out_per_1k"]
+
+
+def _budget_402(est: dict) -> HTTPException:
+    """拦下时的说法：把「已花 + 本次」一起报——只报本次会让人以为额度是每次的。"""
+    return HTTPException(
+        status_code=402,
+        detail=(
+            f"预估花 {est['est_cost']}，加上已花的 {est.get('spent_before', 0)} 共 "
+            f"{est.get('projected_total', est['est_cost'])}，超预算上限 {est['budget_limit']}："
+            "改小范围（limit）、调高预算，或确认后带 ignore_budget 重跑"
+        ),
+    )
+
+
+class BudgetUpdate(BaseModel):
+    limit: float = Field(ge=0)
+
+
+@router.get("/studio/budget", dependencies=[Depends(verify_key)])
+async def get_budget(request: Request):
+    return {"limit": await cost.budget_limit(_store(request))}
+
+
+@router.put("/studio/budget", dependencies=[Depends(verify_key)])
+async def put_budget(body: BudgetUpdate, request: Request):
+    """预算上限（钱数）；0 = 不设限。只拦计钱通道，反代不计钱拦不到。"""
+    try:
+        await cost.set_budget_limit(_store(request), body.limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "limit": float(body.limit)}
+
+
 @router.post("/studio/works/{work_id}/pipeline", dependencies=[Depends(verify_key)])
 async def run_pipeline(work_id: str, body: PipelineRequest, request: Request):
     """逐节生成：每节独立装配、独立落库，中途某个失败不影响已完成的部分。"""
     store = _store(request)
     work = await _require_work(request, work_id)
     resolved = content_types.resolve(work.get("kind") or "article",
-                                    work.get("scale") or "", work.get("subtype") or "")
+                                    work.get("scale") or "", work.get("subtype") or "",
+                                    work.get("channel") or "")
     template = await _template_of(store, work)
     work_meta = _work_meta(work)
 
@@ -1171,6 +1993,14 @@ async def run_pipeline(work_id: str, body: PipelineRequest, request: Request):
 
     gateway = _gateway(request)
     model = pick_model(request.app.state.registry, body.model or None)
+
+    # 预算闸门：计钱的通道（compat）估超了就不开跑；要硬跑请带 ignore_budget
+    est = await cost.estimate_pipeline(
+        store, request.app.state.registry, work_id=work_id, sections=len(nodes), model=model,
+        spent_before=await _spent_on_model(request, store, work_id, model),
+    )
+    if est["over_budget"] and not body.ignore_budget:
+        raise _budget_402(est)
 
     # 开跑前把全书旧内容补齐索引（增量，没变就跳过）。
     # 手改过的正文不会自动入库，不补这一步，第 20 节就检索不到第 3 节的新版本。
@@ -1358,6 +2188,25 @@ async def assemble_document(work_id: str, request: Request, include_empty: bool 
     return {"markdown": markdown, "chars": len(markdown), "nodes": used}
 
 
+@router.get("/studio/works/{work_id}/reading", dependencies=[Depends(verify_key)])
+async def reading_view(work_id: str, request: Request, include_empty: bool = False):
+    """整本阅读模式的数据：按全序的节列表，不拼成字符串。
+
+    阅读页要画目录锚点与逐节渲染，拆 markdown 字符串反推结构是最容易漂的做法；
+    服务端本来就有这份列表（导出/发布检查同源），直接给。
+    """
+    store = _store(request)
+    work = await _require_work(request, work_id)
+    sections = await _readable_sections(store, work, include_empty)
+    return {
+        "title": work.get("title") or "",
+        "kind": work.get("kind") or "article",
+        "digest": work.get("digest") or "",
+        "sections": sections,
+        "chars": sum(len(s["content"]) for s in sections),
+    }
+
+
 class DigestRequest(BaseModel):
     model: str = ""
     instruction: str = ""
@@ -1365,19 +2214,45 @@ class DigestRequest(BaseModel):
 
 @router.get("/studio/works/{work_id}/export", dependencies=[Depends(verify_key)])
 async def export_document(work_id: str, request: Request, include_empty: bool = False,
-                          format: Literal["md", "html"] = "md",
-                          theme: str = "", footer: bool = True, archive: bool = True):
-    """导出：md 存档，html 是公众号编辑器认得的富文本（全部内联样式）。
+                          format: Literal["md", "html", "txt", "docx", "epub"] = "md",
+                          theme: str = "", footer: bool = True, archive: bool = True,
+                          author: str = ""):
+    """导出：md 存档，html 是公众号富文本，txt/docx/epub 是交给编辑与阅读器的成稿。
 
     公众号编辑器不认 Markdown：粘 `.md` 进去只会看到一堆井号。`format=html`
     这一份可以直接写进剪贴板，粘到公众号后台带格式。
 
     `theme` 空串表示用「设置里存的默认版式」；`footer` / `archive` 可以关，
-    用于只想拿一份干净正文的场合。
+    用于只想拿一份干净正文的场合。`author` 只写进 docx/epub 的元数据。
     """
     store = _store(request)
     work = await _require_work(request, work_id)
     safe = re.sub(r'[\\/:*?"<>|]+', "_", work["title"])[:60] or "draft"
+
+    if format in ("txt", "docx", "epub"):
+        sections = await _readable_sections(store, work, include_empty)
+        if not sections:
+            raise HTTPException(status_code=400, detail="还没有可导出的内容")
+        if format == "txt":
+            body = exporters.render_txt(work, sections, author=author).encode("utf-8")
+            media = "text/plain; charset=utf-8"
+        elif format == "docx":
+            body = exporters.render_docx(work, sections, author=author)
+            media = ("application/vnd.openxmlformats-officedocument."
+                     "wordprocessingml.document")
+        else:
+            body = exporters.render_epub(work, sections, author=author)
+            media = "application/epub+zip"
+        encoded = quote(f"{safe}.{format}")
+        return Response(
+            content=body,
+            media_type=media,
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=export.{format}; filename*=UTF-8''{encoded}"),
+                "X-Sections": str(len(sections)),
+            },
+        )
 
     if format == "html":
         sections = await _readable_sections(store, work, include_empty)
@@ -1465,7 +2340,9 @@ async def make_digest(work_id: str, body: DigestRequest, request: Request):
 # ==================== 公众号：文风 / 设置 / 标题 / 转发语 / 台账 ====================
 
 # 设置项白名单：settings 是全局的，写坏一个 key 会静默影响所有作品
-_SETTING_KEYS = {"theme", "footer_text", "footer_archive", "voice_profile"}
+# daily_target_words 是作者级日更目标：存稿预警在没历史节奏时拿它当分母
+_SETTING_KEYS = {"theme", "footer_text", "footer_archive", "voice_profile",
+                 "daily_target_words"}
 # 标题上限与公众号后台一致；超过的候选直接丢，别让人点了一个存不进去的标题
 _TITLE_CAP = 64
 _LINE_NOISE = re.compile(r"^\s*(?:[-*·•]|\d+\s*[.、)）]|[（(]\s*\d+\s*[)）])\s*")
@@ -1718,6 +2595,12 @@ async def update_publication(pub_id: str, body: PublicationUpdate, request: Requ
     return await store.get_publication(pub_id)
 
 
+@router.get("/studio/publications/insight", dependencies=[Depends(verify_key)])
+async def publications_insight(request: Request):
+    """发表回流：在手填台账上聚合。阅读数靠人补记，可能不全——这话界面得说。"""
+    return await _store(request).publication_insight()
+
+
 @router.delete("/studio/publications/{pub_id}", dependencies=[Depends(verify_key)])
 async def delete_publication(pub_id: str, request: Request):
     if not await _store(request).delete_publication(pub_id):
@@ -1754,8 +2637,17 @@ class TransformRequest(BaseModel):
     lang: str = "英文"
     candidates: int = 1
     model: str = ""
+    # 跨模型对比：每家各出一条（至多 3），给了就接管 candidates——
+    # 同一家抽第二稿的差异，往往不如换一家的手感大。
+    # 不在 schema 卡 max_length：去重后可能不足 3，截断交给路由里的 want[:3]
+    models: list[str] = Field(default_factory=list)
+    # 选区前后的正文（前端组好的窗口）：只用来对齐语气、称谓与时态，不输出
+    context: str = Field(default="", max_length=20000)
     mode: str = "quick"
     work_id: str = ""
+
+# 上下文只取窗口不取全节：几万字的前后文既撑爆 prompt，模型也抓不住重点
+CONTEXT_MAX = 4000
 
 
 @router.post("/studio/transform", dependencies=[Depends(verify_key)])
@@ -1779,8 +2671,10 @@ async def transform(body: TransformRequest, request: Request):
         work = await store.get_work(body.work_id)
         if work:
             resolved = content_types.resolve(work.get("kind") or "article",
-                                            work.get("scale") or "", work.get("subtype") or "")
-            style = resolved.get("style_prompt") or ""
+                                            work.get("scale") or "", work.get("subtype") or "",
+                                            work.get("channel") or "")
+            # 一次性任务只拼一段给 system：与逐节装配不同，这里不需要分桶分层
+            style = content_types.requirements_text(resolved)
 
     gateway = _gateway(request)
     model = pick_model(request.app.state.registry, body.model or None)
@@ -1790,39 +2684,53 @@ async def transform(body: TransformRequest, request: Request):
     else:
         system = "你是中文编辑，只输出加工后的正文，不解释、不加前后缀。"
     if style:
-        system += "\n文体要求：" + style
+        system += "\n" + style
     user_parts = [f"<task>{brief}</task>"]
     if body.instruction:
         user_parts.append(f"<extra>{body.instruction}</extra>")
+    ctx = (body.context or "").strip()
+    if ctx:
+        # 不声明这句话，模型会把前后文一起复述出来甚至顺手改掉，写回时变成双重替换
+        system += ("\n<context> 是选区前后的正文，只用来对齐语气、称谓与时态；"
+                   "不要输出它，也不要改动它。")
+        user_parts.append(f"<context>\n{ctx[:CONTEXT_MAX]}\n</context>")
     user_parts.append(f"<text>\n{body.text}\n</text>")
     user = "\n\n".join(user_parts)
 
     n = max(1, min(int(body.candidates or 1), 3))
+    # 对比模型去重保序；空串不算。没给 models 才按 candidates 抽同一家多稿
+    want: list[str] = []
+    for m in body.models:
+        m = (m or "").strip()
+        if m and m not in want:
+            want.append(m)
+    targets = list(enumerate(want[:3])) if want else [(i, model) for i in range(n)]
     results: list[dict[str, Any]] = []
     errors: list[str] = []
-    for i in range(n):
+    for i, m in targets:
         run_id = await store.start_run(
             work_id=body.work_id or "transform",
             node_id=None,
             task_type=f"transform:{body.action}",
-            model=model,
-            provider=gateway.resolve(model)[0],
+            model=m,
+            provider=gateway.resolve(m)[0],
             prompt_chars=len(system) + len(user),
             variant=i,
         )
         started = time.perf_counter()
         try:
-            res = await gateway.complete(model=model, system=system, prompt=user, mode=body.mode or "quick")
+            res = await gateway.complete(model=m, system=system, prompt=user, mode=body.mode or "quick")
         except Exception as exc:  # noqa: BLE001
             elapsed = int((time.perf_counter() - started) * 1000)
             await store.finish_run(run_id, status="failed", error=str(exc), elapsed_ms=elapsed)
-            errors.append(f"候选 {i + 1} 失败：{exc}")
+            errors.append(f"候选 {i + 1}（{m}）失败：{exc}")
             continue
         elapsed = int((time.perf_counter() - started) * 1000)
         await store.finish_run(run_id, status="ok", output_chars=len(res.text), elapsed_ms=elapsed)
         results.append({
             "variant": i,
             "run_id": run_id,
+            "model": m,
             "text": res.text.strip(),
             "chars": len(res.text.strip()),
             "elapsed_ms": elapsed,
@@ -1881,6 +2789,48 @@ async def search_work(work_id: str, body: SearchRequest, request: Request):
     return {"query": body.q, "kinds": list(kinds), "hits": hits, "count": len(hits)}
 
 
+class ReplaceRequest(BaseModel):
+    # 不用 `min_length=1`：空串与「全是空白」是两种情况，都得回一句人看得懂的话，
+    # 而不是 422 那种字段校验报错（下面路由里一起拦）
+    find: str = Field(default="", max_length=replace.MAX_FIND_CHARS)
+    replace: str = Field(default="", max_length=replace.MAX_FIND_CHARS)
+    # 范围：整本书，还是只那一节。`node` 这种范围走的是同一个接口，不另开一条路径
+    scope: Literal["work", "node"] = "work"
+    node_id: Optional[str] = None
+    case_sensitive: bool = True
+    # 默认只看：一次替换摊到整本书是几十上百节，不该由一次回车发起
+    dry_run: bool = True
+    # 术语表里同名的那一条跟着改（角色改名时顺手把术语也改对）
+    update_terms: bool = True
+
+
+@router.post("/studio/works/{work_id}/replace", dependencies=[Depends(verify_key)])
+async def replace_in_work_api(work_id: str, body: ReplaceRequest, request: Request):
+    """全作品查找替换。默认 `dry_run=true`：只看命中什么，不动库。
+
+    不做正则：中文稿里用不上，而一条坏正则在一百万字的库上能跑出不归的耗时。
+    真替换之前会把旧文先存进版本表，所以改完发现不对还能在「历史」里逐节回滚。
+    """
+    store = _store(request)
+    await _require_work(request, work_id)
+    find = body.find
+    if not find.strip():
+        raise HTTPException(status_code=400, detail="查找内容不能只有一堆空白")
+    if body.scope == "node" and not body.node_id:
+        raise HTTPException(status_code=400, detail="scope=node 要传 node_id")
+    return await replace.replace_in_work(
+        store,
+        work_id=work_id,
+        find=find,
+        replace=body.replace,
+        scope=body.scope,
+        node_id=body.node_id or "",
+        case_sensitive=body.case_sensitive,
+        dry_run=body.dry_run,
+        update_terms=body.update_terms,
+    )
+
+
 class SummarizeRequest(BaseModel):
     scope: Literal["nodes", "containers", "work", "all"] = "nodes"
     force: bool = False
@@ -1935,6 +2885,25 @@ class CardCreate(BaseModel):
     pinned: bool = True
 
 
+class ForeshadowUpdate(BaseModel):
+    status: Literal["open", "resolved", "abandoned"] = "resolved"
+    # 回收发生在第几节；不传就用它当初埋下的节号
+    ordinal: int = 0
+
+
+class EntityUpdate(BaseModel):
+    name: Optional[str] = None
+    kind: Optional[str] = None
+    aliases: Optional[list[str]] = None
+    status: Optional[str] = None
+    status_ordinal: Optional[int] = None
+
+
+class IssueResolve(BaseModel):
+    # 为什么忽略：同一条告警下次再出现时，人不用从头想一遍
+    note: str = ""
+
+
 class CheckRequest(BaseModel):
     node_id: str = ""
     all: bool = True
@@ -1957,6 +2926,58 @@ async def get_graph(work_id: str, request: Request, refresh: bool = False):
         "foreshadows": await store.list_foreshadows(work_id),
         "cards": await store.list_cards(work_id),
     }
+
+
+@router.get("/studio/works/{work_id}/graph/timeline", dependencies=[Depends(verify_key)])
+async def get_graph_timeline(work_id: str, request: Request):
+    """图谱时间轴：按节把事件与人物状态排成一条线，供「时间轴」视图分组渲染。
+
+    `events` 的 participants 与 `states` 的 name 都换成实体名字：前端只负责摆位置，
+    不该为了一个 id 再拉一次图谱。空图返回三个空数组——刚立完项就点开时间轴
+    不是错误。`state_json` 坏掉也不炸，退化成空对象。
+    """
+    store = _store(request)
+    work = await _require_work(request, work_id)
+    if (work.get("kind") or "") != "novel":
+        raise HTTPException(status_code=400, detail="时间轴只用于小说；单篇文档看事实卡与术语表")
+
+    sections = [
+        {"id": n["id"], "ordinal": int(n["ordinal"]), "title": n["title"]}
+        for n in await store.list_readable(work_id)
+    ]
+    names = {e["id"]: e["name"] for e in await store.list_entities(work_id)}
+
+    events = []
+    for ev in await store.list_events(work_id):
+        try:
+            pids = json.loads(ev.get("participants") or "[]")
+        except json.JSONDecodeError:
+            pids = []
+        if not isinstance(pids, list):
+            pids = []
+        events.append({
+            "ordinal": int(ev["ordinal"]),
+            "summary": ev.get("summary") or "",
+            "participants": [names[str(p)] for p in pids if str(p) in names],
+            "story_time": ev.get("story_time") or "",
+            "importance": int(ev.get("importance") or 1),
+        })
+
+    states = []
+    for st in await store.list_states(work_id):
+        try:
+            state = json.loads(st.get("state_json") or "{}")
+        except json.JSONDecodeError:
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        states.append({
+            "entity_id": st["entity_id"],
+            "name": names.get(st["entity_id"], ""),
+            "ordinal": int(st["ordinal"]),
+            "state": state,
+        })
+    return {"sections": sections, "events": events, "states": states}
 
 
 @router.get("/studio/works/{work_id}/graph/subgraph", dependencies=[Depends(verify_key)])
@@ -2096,13 +3117,62 @@ async def delete_card(card_id: str, request: Request):
     return {"ok": True}
 
 
+@router.patch("/studio/foreshadows/{foreshadow_id}", dependencies=[Depends(verify_key)])
+async def update_foreshadow(
+    foreshadow_id: str, body: ForeshadowUpdate, request: Request,
+):
+    """作者手动回收 / 弃用伏笔：抽出来的不一定都算数。"""
+    store = _store(request)
+    existing = await store.get_foreshadow(foreshadow_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="伏笔不存在")
+    ordinal = int(body.ordinal or existing.get("planted_ordinal") or 0)
+    try:
+        row = await store.update_foreshadow(
+            foreshadow_id, status=body.status, ordinal=ordinal)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    graph.invalidate(existing["work_id"])
+    return row
+
+
+@router.patch("/studio/entities/{entity_id}", dependencies=[Depends(verify_key)])
+async def update_entity(entity_id: str, body: EntityUpdate, request: Request):
+    """作者直接改图谱实体：改名 / 补别名 / 改类型 / 改状态。
+
+    抽取器只做保守对齐，作者知道「阿昭就是林昭」；不给这条路，
+    每次重抽都会把同一个人再拆一个节点出来。
+    """
+    store = _store(request)
+    existing = await store.get_entity(entity_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="实体不存在")
+    kind = body.kind
+    if kind is not None and kind not in graph.ENTITY_KINDS:
+        raise HTTPException(status_code=400, detail=f"实体类型不认：{kind}")
+    status = body.status
+    if status is not None and status not in graph.STATUSES:
+        raise HTTPException(status_code=400, detail=f"实体状态不认：{status}")
+    canonical = graph.canon(body.name) if body.name else None
+    try:
+        row = await store.update_entity(
+            entity_id, name=body.name, kind=kind, canonical=canonical,
+            aliases=body.aliases, status=status, status_ordinal=body.status_ordinal,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    graph.invalidate(existing["work_id"])
+    return row
+
+
 @router.post("/studio/works/{work_id}/check", dependencies=[Depends(verify_key)])
 async def run_check(work_id: str, body: CheckRequest, request: Request):
     """跑一致性检查。全部是本地结构化比对，不调模型。"""
     store = _store(request)
     work = await _require_work(request, work_id)
     resolved = content_types.resolve(
-        work.get("kind") or "article", work.get("scale") or "", work.get("subtype") or "")
+        work.get("kind") or "article", work.get("scale") or "", work.get("subtype") or "",
+        work.get("channel") or "")
     template = await _template_of(store, work)
 
     created: list[dict[str, Any]] = []
@@ -2129,11 +3199,12 @@ async def run_check(work_id: str, body: CheckRequest, request: Request):
 
 
 @router.post("/studio/issues/{issue_id}/resolve", dependencies=[Depends(verify_key)])
-async def resolve_issue(issue_id: str, request: Request):
-    ok = await _store(request).resolve_issue(issue_id)
+async def resolve_issue(issue_id: str, request: Request, body: IssueResolve | None = None):
+    note = (body.note if body else "").strip()[:500]
+    ok = await _store(request).resolve_issue(issue_id, note)
     if not ok:
         raise HTTPException(status_code=404, detail="告警不存在")
-    return {"ok": True}
+    return {"ok": True, "note": note}
 
 
 @router.get("/studio/works/{work_id}/issues/summary", dependencies=[Depends(verify_key)])
@@ -2159,6 +3230,8 @@ class BatchRequest(BaseModel):
     summarize: bool = True
     extract: bool = True
     check: bool = True
+    # 与 pipeline 同一口径：预估超预算默认拦下；闸门覆盖所有会调模型的任务类型
+    ignore_budget: bool = False
 
 
 class TriageRequest(BaseModel):
@@ -2206,6 +3279,19 @@ async def enqueue_batch(work_id: str, body: BatchRequest, request: Request):
         nodes = nodes[: body.limit]
     if not nodes:
         raise HTTPException(status_code=400, detail="没有可入队的节点（检查 only_empty 与正文是否为空）")
+
+    # 预算闸门：凡是要调模型的任务类型都估都拦——beats/polish/extract 这些
+    # 单笔比写正文小，但走的也是计钱通道，积起来一样烧预算（审查 m14）。
+    # check 是纯本地规则不花钱，不在名单里。
+    if body.task_type in ("draft", "article_draft", "beats", "polish", "extract", "summarize"):
+        model = pick_model(request.app.state.registry, body.model or None)
+        est = await cost.estimate_pipeline(
+            store, request.app.state.registry, work_id=work_id,
+            sections=len(nodes), model=model,
+            spent_before=await _spent_on_model(request, store, work_id, model),
+        )
+        if est["over_budget"] and not body.ignore_budget:
+            raise _budget_402(est)
 
     payload = json.dumps({
         "model": body.model, "mode": body.mode, "instruction": body.instruction,
@@ -2340,4 +3426,15 @@ async def list_scores(work_id: str, request: Request, limit: int = 60):
         out[nid] = {"node_id": nid, "score": r.get("score"), "task_type": r["task_type"],
                     "at": r["started_at"], "chars": r.get("output_chars")}
     return list(out.values())
+
+
+@router.get("/studio/feedback", dependencies=[Depends(verify_key)])
+async def quality_feedback(request: Request, sample: int = 300):
+    """质量反馈环：AI 生成的采纳率与采用后的存活率（全局，含所有作品）。
+
+    只读聚合，直接从 runs / node_versions 现算，不新增表；口径细节与
+    排除项都写在 store.feedback 的文档里。控制台「数据」页一次刷新打一趟，
+    sample 限制存活率逐条比对的成本上限。
+    """
+    return await _store(request).feedback(sample=sample)
 

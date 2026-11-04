@@ -13,8 +13,9 @@
 原父节点还在就挂回它下面，父节点没了就挂到作品根；`path` 重新排、`ordinal` 追加到末尾，
 要挪回原来的位置用树上的上下移；历史版本一并写回 `node_versions`。
 
-整库副本（`*.sqlite`）这里只列不改：那种找回是「把整个库盖回去」，
-得先停服务再替换文件，在本脚本里顺手做等于偷偷回滚别人这段时间写的东西。
+整库那两类文件（`backups/works/` 的删除副本、`backups/snapshots/` 的每日快照）这里只列不改：
+那种找回是「把整个库盖回去」，得先停服务再替换文件，
+在本脚本里顺手做等于偷偷回滚别人这段时间写的东西。
 
 `--list` 与不带 `--yes` 的试运行**完全不碰数据库**（只读备份目录里的文件），
 所以服务开着也能放心跑；真恢复才开连接。
@@ -57,6 +58,16 @@ def list_backups(store) -> int:
         out(f"  {r['name']:<58} {r['bytes'] / 1048576:.1f}MB  {_fmt_time(r['created_at'])}")
     if works:
         out("  这些只能整本盖回去：先停服务，替换 storage/studio.sqlite，再启动。本脚本不动它们")
+
+    # 每日快照与删除副本是两个目录、同一个用处：不看这一行人就不知道盘上还有这条退路
+    snaps = store.list_snapshot_backups()
+    out(f"\n整库快照 {len(snaps)} 份（{store.backup_dir('snapshots')}）：")
+    if not snaps:
+        out("  没有——写过字之后服务每半小时看一眼，每天最多取一份")
+    for r in snaps:
+        out(f"  {r['name']:<58} {r['bytes'] / 1048576:.1f}MB  {_fmt_time(r['created_at'])}")
+    if snaps:
+        out("  盖回去的方法与上面相同（先停服务）；只留最近几份，旧的会被自动清掉")
     return 0
 
 
@@ -105,8 +116,9 @@ async def main() -> int:
     try:
         if args.name:
             if args.name.endswith(".sqlite"):
-                out("FAIL: 整库副本不走这里。停服务后把 storage/backups/works/<那个文件> "
-                    "盖到 storage/studio.sqlite 即可")
+                # 两类整库文件都在 backups/ 下面，只说一个目录名会让人找不到
+                out("FAIL: 整库文件不走这里。停服务后把 storage/backups/works/ 或 "
+                    "storage/backups/snapshots/ 里的那一个盖到 storage/studio.sqlite 即可")
                 return 1
             bundle = peek(store, args.name)
             if bundle is None:

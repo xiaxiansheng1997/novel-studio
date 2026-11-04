@@ -1,4 +1,4 @@
-"""一致性检查：小说 5 条硬规则 + 文档 4 条硬规则（软规则见 `soft_rules.py`）。
+"""一致性检查：小说 5 条硬规则 + 文档 4 条硬规则（软规则见 `soft_rules.py`，审校见 `proofread.py`）。
 
 为什么不调 LLM：
 
@@ -17,7 +17,7 @@ import re
 from datetime import date
 from typing import Any, Optional
 
-from app.studio import soft_rules
+from app.studio import proofread, soft_rules
 
 NOVEL_RULES = ("dead_character", "item_conflict", "time_regression",
                "location_destroyed", "foreshadow_overdue")
@@ -354,7 +354,8 @@ async def run_checks(
     from app.studio import content_types
 
     resolved = resolved or content_types.resolve(
-        work.get("kind") or "article", work.get("scale") or "", work.get("subtype") or "")
+        work.get("kind") or "article", work.get("scale") or "", work.get("subtype") or "",
+        work.get("channel") or "")
     is_novel = (work.get("kind") or "article") == "novel"
     rules = set(resolved.get("checks") or [])
     found: list[dict] = []
@@ -369,6 +370,8 @@ async def run_checks(
             else:
                 found += await _doc_rules(store, work, content, resolved)
             found += await soft_rules.check_node(store, work, node, content, ordinal, rules)
+            # 审校是排印底线，不随文种/渠道的 checks 开关走（见 proofread 模块头）
+            found += proofread.check_node(content, ordinal)
         for item in found:
             item["node_id"] = node["id"]
     else:

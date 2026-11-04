@@ -23,12 +23,71 @@ def work_meta(work: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
+def node_plan(node: dict[str, Any]) -> dict[str, Any]:
+    """读节点自己的计划（`nodes.plan_json`）。
+
+    计划是作者写的，坏 JSON 不该让整次生成失败：读不出来就当没有计划，
+    下游会退回 `works.meta_json.outline`。
+    """
+    raw = node.get("plan_json")
+    if isinstance(raw, dict):
+        data = raw
+    else:
+        try:
+            data = json.loads(raw or "{}")
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    out: dict[str, Any] = {}
+    for key in ("prompt", "pov", "time", "place"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val.strip()
+    try:
+        out["target_words"] = int(data.get("target_words") or 0)
+    except (TypeError, ValueError):
+        out["target_words"] = 0
+    return out
+
+
+def node_outline(node: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    """本节计划：节点上的新计划优先，旧的大纲 meta 只做兜底。
+
+    升级前每节的 prompt / target_words 存在 `works.meta_json.outline` 里；
+    现在作者能在右栏直接改，改的是 `nodes.plan_json`。两条都要能读到，
+    否则老书打开「计划」页会是空的。
+    """
+    plan = node_plan(node)
+    legacy = (meta.get("outline") or {}).get(node["id"]) or {}
+    if not isinstance(legacy, dict):
+        legacy = {}
+    prompt = plan.get("prompt") or str(legacy.get("prompt") or "").strip()
+    try:
+        legacy_target = int(legacy.get("target_words") or 0)
+    except (TypeError, ValueError):
+        legacy_target = 0
+    return {
+        "prompt": prompt,
+        "target_words": plan.get("target_words") or legacy_target,
+        "pov": plan.get("pov", ""),
+        "time": plan.get("time", ""),
+        "place": plan.get("place", ""),
+    }
+
+
 def node_instruction(node: dict[str, Any], meta: dict[str, Any], extra: str = "") -> str:
     """本节的具体写作指令（大纲里的 prompt + 用户附加要求 + 篇幅硬约束）。"""
-    info = (meta.get("outline") or {}).get(node["id"]) or {}
+    info = node_outline(node, meta)
     bits = [f"本节标题：{node['title']}"]
     if info.get("prompt"):
         bits.append(f"本节要点：{info['prompt']}")
+    if info.get("pov"):
+        bits.append(f"叙事视角：{info['pov']}")
+    if info.get("time"):
+        bits.append(f"故事内时间：{info['time']}")
+    if info.get("place"):
+        bits.append(f"地点：{info['place']}")
     # 节拍卡（novel 的 beats 任务产出）优先于大纲要点：它是更近的一次规划
     if (node.get("summary") or "").strip():
         bits.append("本章节拍（必须按这个顺序推进）：\n" + node["summary"].strip())
@@ -46,12 +105,8 @@ def node_instruction(node: dict[str, Any], meta: dict[str, Any], extra: str = ""
 
 
 def target_words_of(node: dict[str, Any], meta: dict[str, Any], resolved: dict[str, Any]) -> int:
-    """本节的目标字数：优先大纲，其次按类型目标均摊，最后用 1000 兜底。"""
-    info = (meta.get("outline") or {}).get(node["id"]) or {}
-    try:
-        got = int(info.get("target_words") or 0)
-    except (TypeError, ValueError):
-        got = 0
+    """本节的目标字数：优先节点计划，其次旧大纲，再按类型目标均摊，最后用 1000 兜底。"""
+    got = int(node_outline(node, meta).get("target_words") or 0)
     if got:
         return got
     total = int(resolved.get("target_words") or 0)

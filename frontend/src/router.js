@@ -5,6 +5,8 @@ const routes = [
   // 写作台是工作台，控制台是它的后勤（状态 / 浏览器 / 日志 / 任务 / 数据 / 配置）
   { path: '/studio', name: 'studio', component: () => import('./views/StudioView.vue') },
   { path: '/studio/:id', name: 'studio-work', component: () => import('./views/StudioView.vue') },
+  // 整本阅读模式（迭代 C）：连续排版与目录，与写作台同一套排版偏好
+  { path: '/studio/:id/read', name: 'studio-read', component: () => import('./views/ReadView.vue') },
   // 对话已并进写作台的「问一问」：老链接带过去，具体会话用 ?conv= 带
   { path: '/chat', redirect: () => ({ path: '/studio', query: { panel: 'ask' } }) },
   {

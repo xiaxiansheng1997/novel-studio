@@ -47,14 +47,28 @@ async def main() -> int:
         r = await c.get(f"{base}/health")
         print(f"[1] health -> {r.status_code} {r.json().get('status')}")
 
+        # 模板列表是控制台模板库与新建表单的数据源：空了或字段缺了，
+        # 界面上只是「没模板可选」，背后是播种或迁移出了问题，这里先拦住
         r = await c.get(f"{base}/studio/templates")
         tpls = r.json()
         print(f"[2] templates -> {len(tpls)} 个：{', '.join(t['name'] for t in tpls[:4])}…")
+        if not tpls or "use_count" not in tpls[0] or "is_builtin" not in tpls[0]:
+            print(f"      模板列表不可用：{r.status_code} {str(tpls)[:200]}")
+            return 1
+
+        # 渠道与文种正交：这里只验证下发得出来，「历史 + 公众号」的组合留给单元测试
+        r = await c.get(f"{base}/studio/content-types")
+        chans = [x["id"] for x in (r.json().get("channels") or [])]
+        print(f"[2b] channels -> {len(chans)} 个：{', '.join(chans)}")
+        if not chans:
+            print("      渠道列表为空：前端「渠道」下拉框会只剩「不限渠道」")
+            return 1
 
         r = await c.post(f"{base}/studio/works", json={
             "kind": "article",
             "scale": "single",
             "subtype": "tech",
+            "channel": "wechat",
             "title": "把本地向量检索接进写作服务",
             "premise": "给现有 Python 服务加本地检索，替代 Chroma，重点讲落地步骤与踩坑。",
             "target_words": 5000,
@@ -64,7 +78,7 @@ async def main() -> int:
             print(f"[3] 创建作品失败: {r.status_code} {work}")
             return 1
         wid = work["id"]
-        print(f"[3] work -> {wid} template={work.get('template_id')}")
+        print(f"[3] work -> {wid} template={work.get('template_id')} channel={work.get('channel')}")
 
         node_ids = []
         for i, title in enumerate(["背景与问题", "方案概述", "落地步骤"], 1):

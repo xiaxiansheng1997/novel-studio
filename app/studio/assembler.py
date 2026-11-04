@@ -290,8 +290,9 @@ async def assemble(
     kind = work.get("kind") or "article"
     scale = work.get("scale") or "single"
     subtype = work.get("subtype") or ""
+    channel = work.get("channel") or ""
     if resolved is None:
-        resolved = content_types.resolve(kind, scale, subtype)
+        resolved = content_types.resolve(kind, scale, subtype, channel)
 
     if task_type in _DRAFT_TASKS:
         enabled = list(resolved.get("buckets") or [])
@@ -315,6 +316,10 @@ async def assemble(
                 parts.append("骨架：\n" + outline)
             if template.get("style_prompt"):
                 parts.append("文体要求：" + str(template["style_prompt"]))
+        # 渠道进 S0 而不只是 S1：骨架的长度节奏是按平台定的（公众号一节
+        # 800 字、知乎可以 1500），模型看到“渠道”这两个字才对得上后面的字数要求。
+        if resolved.get("channel_label"):
+            parts.append(f"渠道：{resolved['channel_label']}")
         text = "\n".join(parts)
         if text:
             buckets["S0"].text = text
@@ -345,6 +350,14 @@ async def assemble(
             text += "\n" + type_style
         if type_rules:
             text += "\n" + type_rules
+        # 渠道的约束单独一段带前缀：两条来自不同维度（文种说「区分史料与推断」，
+        # 平台说「每段不超过三行」），混成一条时模型会拿其中一条把另一条顶掉。
+        plat = "\n".join(x for x in (
+            str(resolved.get("channel_style_prompt") or "").strip(),
+            str(resolved.get("channel_instructions") or "").strip()) if x)
+        if plat:
+            label = resolved.get("channel_label") or "当前渠道"
+            text += f"\n平台要求（{label}）：\n" + plat
         if voice:
             text += ("\n按作者自己的文风写（下面的数字来自他发表过的文章，不是泛泛的形容词）：\n"
                      + voice)

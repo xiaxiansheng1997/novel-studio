@@ -95,9 +95,13 @@ exe 上跑它们时没通过还会弹一个框。
 
 ## 一条完整主线
 
+写作台随时可以按 `Ctrl+Shift+F`（或顶栏「专注」）进入专注模式：左树与右栏收起，只留作品名、保存状态、正文与生成条，
+`Esc` 或「退出专注」回来。它只动视线不动排版——字号行距仍归「排版」那一档管，切节也留在专注里。
+
 1. 建作品（选 kind / subtype / 模板）→ 生成大纲 → 逐节生成（`POST /studio/works/{id}/pipeline` 走 SSE 看着它写，或 `POST …/batch` 落库入队关页面不管）
 2. 每节生成前按桶装配上下文（S0–S8 + S_src；novel 默认 28,000 字符、article 18,000）。`POST /studio/context/preview` 只装配不花钱，能看到每桶占多少、丢了什么——**调 prompt 靠这个，不然就是盲调**
-3. 生成后可选自动后处理：分块索引 → 三段式摘要（事件 / 变化 / 钩子）→ 图谱抽取 → 一致性检查 → 5 维打分
+3. 生成后可选自动后处理：分块索引 → 三段式摘要（事件 / 变化 / 钩子）→ 图谱抽取 → 一致性检查
+   （硬规则 9 条 + 软规则 5 条，最后一条「自我重复」专看跨节的字面复用：同一句在几节里重复、几节开头同一个起手式）→ 5 维打分
 4. 全文拼装 `POST …/assemble`，导出 `GET …/export`（Markdown）
 5. 选中任意段落可单独加工（重写 / 压缩 / 扩写 / 润色 / 翻译 / 拆分 / 合并 / 起标题，`POST /studio/transform`），多候选横向比较；
    「起标题」给 5 个备选（每个 ≤20 字，禁「震惊/必看/一文读懂」那套），点一行就回填到**本节标题**或**作品标题**
@@ -115,12 +119,26 @@ exe 上跑它们时没通过还会弹一个框。
     发出去的文章在控制台「数据」里记一条台账（日期 / 链接 / 阅读 / 在看），跨作品汇总也在那一页
 11. **作品多了也找得到**：书架有搜索框（标题 / 主旨即时筛）与「在写 / 已归档」两个视图；归档只改 `works.status`，
     正文、版本、索引都不动。跨作品搜正文与素材按 `Ctrl+K`（或书架上的「搜正文」），结果分「作品」与「正文片段」两组，
-    点一条直接跳到那一篇的那一节
+    点一条直接跳到那一篇的那一节；**改名换姓按 `Ctrl+H`**：全作品查找替换先看预览（哪节、几处、字数怎么变），
+    看过再动手，替换前先把旧文存进版本表，术语同名跟着改，撞上已有术语只给一句警告、不毁整批
 12. **写作手感**：书架顶部一条写作日历（今天手写字数 / 连续天 / 近 14 天柱状），下面是「灵感箱」——一句话想法先记着，
     「用它开写」只把它填进新建表单；生成结果可以逐段勾选后再采用，编辑器顶部有「本节 / 目标」进度
 13. **结构与资料可维护**：左树能折叠（写完的卷先收起来，状态按作品记住；跳到被折叠的节会自动展开祖先），
     树头「导入」能把旧稿一次搬进来——粘贴或拖 `.txt / .md`，按「第X章 / ## 标题」或空行拆节，看过预览再逐节建；
-    右栏的素材、事实卡、术语都能就地改，素材正文改完会重建这一条的检索索引（不改的话生成还在按旧文字找资料）
+    右栏的素材、事实卡、术语都能就地改，素材正文改完会重建这一条的检索索引（不改的话生成还在按旧文字找资料）；
+    左树上把一章**拖到另一卷**就行——只搬章与节（卷本身不拖），落点只有目标卷的末尾，松手后全书章号按树序重排成 1..N，
+    摘要、分块与图谱里的章号一起跟过去
+14. **定稿不是一键过**：状态切「定稿」前先看这一节还有几条没处理的硬告警（`GET /studio/nodes/{id}/final-gate`），
+    「死者说话」「道具已毁」这类必然错的先摆出来，点「仍然定稿」才放行（`PATCH` 不带 `force` 回 409 与同一份清单）。
+    只拦本节 + `error` + 未处理：warn/info、别的节与全书级告警都不挡，定稿也不顺手帮你消告警
+15. **换机 / 借给人看**：书架「导出整库」打成一个 JSON（每本一个自足的包：树、全部历史版本、素材、事实、术语、设定卡与图谱），
+    新机器上「导入」即重建——id 全部重发、引用跟着改，同一份包导两次得到两本独立的书；作品卡悬停还能单本导出。
+    摘要、分块、运行记录不进包（从正文派生），导入后重建索引，摘要按需重算
+16. **钱花在哪儿、写得好不好**：控制台「数据」页有「生成成本与质量」——按任务、按作品、按最耗时的节看调用次数、失败数、
+    总耗时与每次耗时、输出字数与均分，旁边挂着未处理的硬告警数。均分只算打过分的跑批，没评不按 0 分算
+17. **计划与设定可改**：右栏「计划」页能改本节要点、目标字数、视角、时间、地点与节拍卡，还能一键重抽节拍
+    （`POST /studio/nodes/{id}/beats`）；设定卡带 `id` 提交即更新，伏笔可手动回收 / 弃用，图谱实体可改名、补别名、改类型与状态（改名会同步挂着的设定卡名）；
+    忽略告警要填一句原因并落库（`issues.resolution_note`），下次同一条再出现时不用从头想一遍
 
 ## 两种形态
 
@@ -137,7 +155,7 @@ exe 上跑它们时没通过还会弹一个框。
 写作台页底只有一行队列进度（排队 / 完成 / 约 X 分钟 / 当前在跑的那一节）；暂停与恢复（`POST /studio/queue/resume`）、
 抽检判定、单条任务的重试与取消（`POST /studio/jobs/{id}/retry`，会把 attempts 清零）都在控制台「任务」（`/admin?tab=tasks`）里。
 每一节用了哪个 model / provider、输入输出各多少字符、耗时与打分，都记在 `runs` 表里，成本可以回看
-（用量是字符估算，不是真实 token）。
+（用量是字符估算，不是真实 token）；控制台「数据」页把这些按任务 / 作品 / 节汇总成一张「生成成本与质量」表。
 
 ## 检索与记忆
 
@@ -153,13 +171,16 @@ exe 上跑它们时没通过还会弹一个框。
   卷摘要与全书摘要是多节拼出来的，没有单一源文本，靠失效传播把它们的 `ref_hash` 置空。
   过期的摘要**不会进生成上下文**（S3/S4 只取新鲜的），被丢了哪几节写在「上下文」预览的 warnings 里，
   右栏「记忆」也会显示「N 节摘要待重算」——按钮文案跟着变成「重算过期摘要」，点下去只会补过期那些，不重烧没改过的。
-- **每一版都留得回来**。每次「采用」与生成落库都会存一个版本，来源标成 AI 草稿 / AI 润色 / 手改（接口只认这三个值，
-  乱填的当场 400；交互式润色落的那一版标 `ai_polish`，不再和「AI 草稿」混成一行），
+- **每一版都留得回来**。每次「采用」、生成落库、全作品替换都会存一个版本，来源标成 AI 草稿 / AI 润色 / 手改 / 批量替换
+  （接口只认这四个值，乱填的当场 400；交互式润色落的那一版标 `ai_polish`，不再和「AI 草稿」混成一行；
+  替换那一档叫 `bulk_replace`，它不刷高「今天写的字」），
   右栏「历史」页能列出、能跟当前正文并排比对、能点「用这一版」回滚。
   回滚前服务端会先把当下这份还没进版本表的正文存一版，所以点回滚不会吃掉你刚敲的几百字。
 - **上下移会把章号一起带走**。树上的 ↑↓ 只跟同一个父节点下的紧邻兄弟互换；「第几章」这个数在库里存了十份
   （章节序、摘要序号、分块序、实体的登场/死亡章号、关系与事件与伏笔的章号、角色状态章号），
   交换时一起对调，否则「已死的角色在第 5 章出场」这类判定会跟着错位。
+  跨卷拖拽不是对调而是整体重排：按树序把全书章号写成 1..N，同样那十列一起映射（先整体取负再翻正，
+  避开 `UNIQUE(entity_id, ordinal)` 与关系唯一键的中间态）；映射外的章号（比如伏笔计划在尚未写到的第 100 章回收）原样留着。
   内容没变，所以不重算索引与摘要，只把库标脏。
 - **删除前自动留备份**。删一节（含整棵子树与全部历史版本）先写一份 JSON 到 `storage/backups/nodes/`，
   删作品先在锁内取一份整库副本到 `storage/backups/works/`（`VACUUM INTO` 的一致快照，不是热拷文件）；
@@ -179,23 +200,37 @@ exe 上跑它们时没通过还会弹一个框。
 ## 检查规则
 
 - **硬规则 9 条**（小说 5 + 文档 4，即上表「专属能力」那串）：结构上必然错，报 `error/warn` 并参与「设定合规」扣分；
-- **软规则 4 条**（`address_drift` 称呼漂移 / `setting_conflict` 设定冲突（目前只判年龄）/ `absolute_claim` 绝对化表述 / `number_unsourced` 数字无出处）：
+- **软规则 5 条**（`address_drift` 称呼漂移 / `setting_conflict` 设定冲突（目前只判年龄）/ `absolute_claim` 绝对化表述 / `number_unsourced` 数字无出处 / `phrase_repeat` 自我重复）：
   **零 LLM 调用**，一律 `info`、不扣分、不阻塞定稿，每节每规则封顶 3 条，措辞永远是「请确认」——改判交给人。
-  哪几条开在每个文种的 `checks` 里自己选：小说默认开前两条，文档按子类只开绝对化表述 / 数字无出处。
+  哪几条开在每个文种的 `checks` 里自己选：小说默认开前两条，文档按子类只开绝对化表述 / 数字无出处；
+  `phrase_repeat` 只有整本检查跑得出来（跨节才看得出复用），小说与系列文档都默认开着：5 字起的字面复用落在 ≥3 节
+  才报，人物/道具/地点/组织的名字、术语、节标题一律先排掉——真实语料上线的口径是「先验证不报再接线」。
 
 告警在右栏分「硬 / 待确认」两组渲染，点「定位」会高亮正文对应片段。
 
 ## 图谱
 
 实体 / 关系 / 事件 / 伏笔从正文里抽出来存库，除了列表还能开力导向视图（虚线圈 = 已死/已毁，虚线边 = 已过期关系）。
+弹层头部可切「关系 / 时间轴」：时间轴按节把事件（谁参与、故事内时间、重要度）与人物状态排开，点一行跳回那一节；
+还没抽过的作品在那里只有一句「先在右栏点『抽本节』」，不是空白。
 抽取要真调模型（`smoke_m3.py --llm` 是它的验收入口），右栏「图谱」那页会给出实体 / 关系 / 伏笔的计数。
 
 ## 文种全部配置化
 
 `content-types.yaml`（`kinds → scales → subtypes` 三层合并；预算、启用的上下文桶、层级、`checks`/`checks_append`），
 **新增文种不改代码**；改完调 `POST /studio/content-types/reload` 立即生效，前端下拉框的数据源是 `GET /studio/content-types`。
+
+同文件的顶层 `channels` 是与文种**正交**的第二个维度：文种管「写什么」，渠道管「发到哪」（公众号要短段与配图位，
+知乎要结论先行，小红书要开头三行给利益点）。「历史 + 公众号」不再需要在两者间二选一。渠道的写法在 S1 里单独成段、
+带「平台要求（公众号）：」前缀——它说「发到哪」，文体要求说「写什么领域」，拼成一句时模型会拿其中一条把另一条顶掉；
+`label`/预算/层级仍归文种管，`checks_append` 与文种合并去重，字数与段落节奏则由渠道决定。第三个维度是文风
+（`works.style_json` 与文风画像），三者合起来才是「这一篇怎么写」。
+
 启动时按它覆盖库内内置模板（`is_builtin=1`），用户自建模板不动；写坏了不会让服务起不来（解析失败回落内置兜底，接口返回里带 `error`）。
-约定见 `docs/content-types.md`。
+**模板库在控制台的「配置」页维护**（新建 / 克隆 / 设为默认 / 收藏 / 删除 / 导入导出；内置行只读，要改先复制一份），
+写作台右栏「模板」页可以换模板、换渠道、内联改骨架，也能把当前这篇已有的节沉淀成一套新骨架。
+新作品的模板按「`kind+subtype+channel` 默认 → `kind+subtype` 默认 → `kind+channel` 默认 → YAML 出厂默认 → 该文种任意一个 → 无」六级链自动挑，
+也可以指定这套或明确「不套模板」。约定见 `docs/content-types.md`。
 
 ## 数据与清理
 
@@ -217,6 +252,11 @@ python -m scripts.cleanup_works --sweep-orphans    # 默认试运行，加 --yes
 找回入口：`python -m scripts.restore_backup --list`（只看，不碰数据库）。脚本先按与恢复那侧同一套判据
 （`store.check_node_bundle`）校验备份结构，才敢说「restore 没成功 = 那本书整本删了」；判据写两套就会
 把空 `nodes`、没写 work_id 这类坏备份报成「书没了」，那是另一种谎话。
+
+每天还有一份**整库自动快照**：服务起来先看一眼，之后每 30 分钟看一眼，当天第一次真改过正文就 `VACUUM INTO`
+一份到 `storage/backups/snapshots/`，留最近 7 份。空库不占名额、没改过字不产重复副本、今天取过不再取第二份；
+写不成只进日志，不拦任何一次保存。控制台「数据」页也能手动按一份（`POST /studio/backups/snapshot`），
+手动那份不顶掉当天的自动那份——早上按过、晚上崩了也该有退路。
 
 ## 界面规范
 
@@ -242,7 +282,7 @@ AI 草稿预览与流水线预览也吃当前字体档，字号给到 15px / 14p
 - `config.yaml`：provider 开关、首页地址、模型列表、**并发上限**、全局每分钟限流（非敏感）。跑批前先确认这里的 `max_concurrency` 与全局限流符合你能接受的频率。
 - 每个 provider 的 `min_interval_sec`（秒，从上一次回复结束算起）：千问默认 3 秒，用于降低人机验证触发率；`0` 关闭。**过夜跑批别把它设成 0**。
 - 人机验证：`W2A_AUTO_SLIDE=1` 自动处理（滑块直接拖）；`W2A_HUMAN_WAIT_SEC=60` 遇到只能人工做的图片点选验证码时，在有头浏览器里等人做完的最长秒数（`0` 不等）；`W2A_RISK_COOLDOWN=60` 验证失败后的风控冷却秒数。
-- `content-types.yaml`（项目根）：文种与模板配置，见上面「文种全部配置化」。
+- `content-types.yaml`（项目根）：文种、渠道与模板配置，见上面「文种全部配置化」。
 - 写作业务库：`<W2A_STORAGE_DIR>/studio.sqlite`（默认 `storage/studio.sqlite`）。
 - 桌面壳依赖：`requirements-desktop.txt`（pywebview / pystray / pillow / pyinstaller），与后端依赖分开；
   `scripts\setup_desktop.ps1` 会两份一起装。壳往后端传 `W2A_CONTROL_PORT` / `W2A_CONTROL_TOKEN`（随机、一次性，停机协议用），
@@ -254,7 +294,7 @@ AI 草稿预览与流水线预览也吃当前字体档，字号给到 15px / 14p
 ```
 app/
   main.py runtime.py config.py
-  api/      studio_routes.py（89 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
+  api/      studio_routes.py（98 个接口）  openai_routes.py  admin_routes.py  live_routes.py  conversation_routes.py  schemas.py
   studio/   schema.py store.py content_types.py assembler.py prompting.py tokenize.py chunker.py
             indexer.py retrieval.py summarizer.py graph.py consistency.py soft_rules.py
             scoring.py tasks.py jobs.py jsonutil.py
@@ -270,7 +310,7 @@ frontend/   Vue 3 + Vite（写作台 `/studio`（含右栏「问一问」）/ �
 desktop/    桌面壳（不含后端）：launcher.py 窗口+托盘 / serve.py 后端入口带控制口 / backend.py 起停与三级兜底
             control.py 停机协议 / config.py 读 .env 与找项目根 / win32.py 互斥·消息框·杀进程树
             make_icon.py + assets/novel-studio.ico / NovelStudio.spec + build.ps1（打 exe，产物 desktop/dist 已 gitignore）
-content-types.yaml   文种配置（kinds → scales → subtypes + 模板；article 有 wechat 子类）
+content-types.yaml   文种与渠道配置（kinds → scales → subtypes + channels + 模板）
 risk-words.yaml      公众号风险词（发布前检查用，改完不用重启）
 docs/       novel-studio-tech-design.md（设计与各里程碑实测）  m0-baseline.md  content-types.md  reverse-proxy.md
 design-system/  本地生成，已 gitignore（写作台的界面规范）
@@ -279,9 +319,10 @@ dev.py      frontend / backend / build / all
 scripts/    smoke_studio.py  smoke_m1_tail.py  smoke_m2.py  smoke_m3.py  smoke_m4.py  smoke_soft_rules.py
             measure_baseline.py  shot_studio.py  cleanup_works.py  restore_backup.py  login.py  recon.py  check.ps1
             setup_desktop.ps1（桌面版一键装机 + 快捷方式）
-tests/      pytest（全量 309 例，含桌面壳 40 例；写作侧用 tmp_path 建临时库，不碰 storage/）
+tests/      pytest（全量 373 例，含桌面壳 40 例；写作侧用 tmp_path 建临时库，不碰 storage/）
 storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
-            backups/nodes（删节前的 JSON 备份）/ backups/works（删作品前的整库副本），已 gitignore>
+            backups/nodes（删节前的 JSON 备份）/ backups/works（删作品前的整库副本）
+            backups/snapshots（每日整库快照，留 7 份），已 gitignore>
 ```
 
 `scripts/` 下的验收脚本分两类，账号被风控时别看错哪类会花钱：
@@ -335,25 +376,30 @@ storage/    <浏览器 profile / 票据 / sessions.sqlite / studio.sqlite
 
 ## 已知限制
 
-- **告警不阻塞定稿**：`PATCH /studio/nodes/{id}` 不查 `issues`，下拉框改成 `final` 就直接过（设计文档 9.5 已如实注明“没实现”）。
+- **定稿闸门只看本节 + error**：warn / info、别的节与全书级告警（`node_id` 为空）都不挡；确认「仍然定稿」只是一次布尔放行
+  （`force=true`），**不记原因**；「忽略告警」另走 resolve，会留下 `resolution_note`。
 - **软规则只给 `info`**：不改正文也不扣分，到底算不算问题要人判；且只在作品 `checks` 里显式开着时才跑。
 - **向量检索未接入**：换个说法的语义查询仍只能靠 jieba + FTS5 的关键词召回。
 - 自动打分为 5 维，**不做多候选盲评**；`/transform` 的候选只并排列出来给人比。
 - 模板里的 `target_words` 是软约束，实测偏差约 ±20%~40%。
 - 删节点/删素材现在会把 `chunks_fts` / `index_units`（以及节点相关的 `summaries`）一起清掉；
   在这之前删下的历史残留用 `cleanup_works --sweep-orphans` 清（旧版只按 work_id 判，认不出「作品还活着、节点已没」的那些行）。
-- **备份只在删除那一刻写，不是定时快照**：没删过的东西不会自己多一份副本（`storage/backups/`），
-  也没做界面化的恢复入口——节点备份靠 `scripts/restore_backup.py`，整库副本靠停服务盖文件。
-  备份只带正文与历史版本，库本身坏了（文件损坏 / 磁盘没了）仍然没有退路，因为没人定时拷走整库。
-- **上下移只在同层**：不能把一节拖到另一个卷下面（要跨卷得自己剪切正文重排）。
+- **备份能救「删错了」，救不了「这一小时刚写的」**：删节/删作品各有独立副本（`storage/backups/`），整库另有
+  每日快照（留 7 份），而快照是当天的一份、不是逐次改动的——今天早些时候的正文靠的是版本表（右栏「历史」），
+  不是备份。整库副本没有界面化恢复入口：节点备份走 `scripts/restore_backup.py`，整库副本靠停服务把文件盖回
+  `storage/studio.sqlite`；库文件彻底损坏时能用的是 `backups/snapshots/` 里那一份。
+- **迁移包只带「写下的东西」**：正文、版本、素材、事实、术语、设定卡与图谱在包里；摘要、分块、运行记录不在——导入后重建索引，
+  摘要要重算一次。导入只做「新增」：id 全部重发，同一份包导两次得到两本独立的书；整库一次最多 200 本、单本上限 2 万个节点。
+- **拖拽只搬叶子、只落末尾**：章与节可以拖进任意一卷的末尾（或顶层），卷本身不拖、也不能插到某一节之前
+  （那要另配一套插入交互与半自动排序）；跨作品拖拽不做。
 - 生成吞吐受网页账号的限流与风控硬约束，串行跑一本长篇要按小时计；想要并发得自己解决账号问题。
 - 底座（`/v1` OpenAI 接口、模式与文案校准）的限制另有 **十几条**，见 `docs/reverse-proxy.md` 的「已知限制（底座侧）」。
 
 ## 文档索引
 
-- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.7）
+- `docs/novel-studio-tech-design.md` — 设计文档，含各里程碑的实测记录与踩坑（当前 v2.11）
 - `docs/m0-baseline.md` — M0 基线实测数据
-- `docs/content-types.md` — 文种与模板配置约定
+- `docs/content-types.md` — 文种、渠道与模板配置约定
 - `docs/reverse-proxy.md` — 底座：驱动三家网页端、`/v1` API 用法、风控排查细则
 
 ## 免责声明

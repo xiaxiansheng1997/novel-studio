@@ -7,165 +7,17 @@
       {{ notice }}
     </div>
 
-    <div class="studio">
-      <!-- 未选作品：书架 -->
-      <main v-if="!store.work" ref="shelfEl" class="shelf">
-        <header class="shelf-head">
-          <div>
-            <h1>写作台</h1>
-            <p class="shelf-sub">长篇连载与单篇文档共用一套工作台，结构由作品类型决定。</p>
-          </div>
-          <div class="shelf-tools">
-            <label class="shelf-search">
-              <AppIcon name="search" :size="14" />
-              <input v-model="shelfQ" class="field" placeholder="搜标题 / 主旨" aria-label="筛选作品" />
-            </label>
-            <button class="btn btn-sm" title="跨作品搜正文与素材（Ctrl+K）" @click="openSearch()">
-              <AppIcon name="search" :size="13" /> 搜正文
-            </button>
-            <button class="btn btn-sm" title="立项前先把题名与前提聊出来" @click="askOpen = true">
-              <AppIcon name="chat" :size="13" /> 先聊聊
-            </button>
-            <button class="btn btn-primary" @click="showCreate = !showCreate">
-              <AppIcon name="plus" :size="15" /> 新建作品
-            </button>
-          </div>
-        </header>
+    <div class="studio" :class="{ 'is-focus': focus }">
+      <!-- 未选作品：书架（ShelfView 自己管筛选与滚动；打开/先聊聊/搜正文都交回这一层） -->
+      <ShelfView
+        v-if="!store.work"
+        :seed="shelfSeed"
+        @open="openWork"
+        @ask="askOpen = true"
+        @search="openSearch"
+        @notice="showNotice"
+      />
 
-        <!-- 归档只是从书架收起，不删任何东西：所以在写/已归档是两个视图，不是筛选器 -->
-        <div class="shelf-views">
-          <button class="view-chip" :class="{ 'is-on': !showArchived }" @click="showArchived = false">
-            在写 {{ activeWorks.length }}
-          </button>
-          <button class="view-chip" :class="{ 'is-on': showArchived }" @click="showArchived = true">
-            已归档 {{ archivedWorks.length }}
-          </button>
-        </div>
-
-        <!-- 写作日历：数据从版本表现算，不在别处另记一份 -->
-        <section class="write-log" aria-label="写作统计">
-          <span class="wl-item"><strong>{{ fmt(store.dailyWrites.today) }}</strong> 今天字数</span>
-          <span class="wl-item"><strong>{{ store.dailyWrites.streak }}</strong> 连续天</span>
-          <span class="wl-days" :title="last14.map((d) => `${d.day} ${d.chars} 字`).join(' / ')">
-            <span
-              v-for="d in last14"
-              :key="d.day"
-              class="wl-bar"
-              :class="{ 'is-on': d.chars > 0 }"
-              :style="{ height: barHeight(d.chars) }"
-            ></span>
-          </span>
-        </section>
-
-        <form v-if="showCreate" class="create card" @submit.prevent="create">
-          <div class="create-row">
-            <label class="fl">
-              <span>类型</span>
-              <select v-model="form.kind" class="field" @change="onKindChange">
-                <option v-for="k in kinds" :key="k.id" :value="k.id">{{ k.label }}</option>
-              </select>
-            </label>
-            <label v-if="scales.length > 1" class="fl">
-              <span>规模</span>
-              <select v-model="form.scale" class="field" @change="applyScaleDefaults">
-                <option v-for="s in scales" :key="s.id" :value="s.id">{{ s.label }}</option>
-              </select>
-            </label>
-            <label v-if="form.kind === 'novel'" class="fl">
-              <span>题材</span>
-              <input v-model="form.subtype" class="field" placeholder="玄幻 / 都市 / 科幻…" />
-            </label>
-            <label v-else-if="subtypes.length" class="fl">
-              <span>文体</span>
-              <select v-model="form.subtype" class="field">
-                <option v-for="s in subtypes" :key="s.id" :value="s.id">{{ s.label }}</option>
-              </select>
-            </label>
-            <label class="fl grow">
-              <span>标题</span>
-              <input v-model="form.title" class="field" required placeholder="作品标题" />
-            </label>
-          </div>
-          <label class="fl grow">
-            <span>一句话主旨</span>
-            <textarea v-model="form.premise" class="field" rows="2"
-                      placeholder="这篇/这本书要讲什么，给谁看，最重要的一句话是什么" />
-          </label>
-          <div class="create-foot">
-            <label class="fl small">
-              <span>目标字数</span>
-              <input v-model.number="form.target_words" class="field" type="number" min="0" step="1000" />
-            </label>
-            <p v-if="store.error" class="err">{{ store.error }}</p>
-            <button class="btn btn-primary" type="submit" :disabled="creating">
-              {{ creating ? '创建中…' : '创建并进入' }}
-            </button>
-          </div>
-        </form>
-
-        <!-- 灵感箱：一句话想法先落这儿，不占作品 -->
-        <section class="ideas">
-          <div class="ideas-head">
-            <h2>灵感箱</h2>
-            <span class="ideas-sub">还没成形的一句话，先记着；「用它开写」会填进上面的新建表单</span>
-          </div>
-          <form class="ideas-add" @submit.prevent="saveIdea">
-            <input v-model="ideaDraft" class="field" placeholder="一句话：想写什么，给谁看" />
-            <button class="btn btn-sm" type="submit" :disabled="ideaBusy || !ideaDraft.trim()">记下</button>
-          </form>
-          <ul v-if="store.ideas.length" class="idea-list">
-            <li v-for="i in store.ideas" :key="i.id" class="idea-row">
-              <span class="idea-text" :title="i.text">{{ i.text }}</span>
-              <button class="link-btn" @click="startFromIdea(i)">用它开写</button>
-              <button class="idea-del" title="删掉这条想法" @click="store.deleteIdea(i.id)">删</button>
-            </li>
-          </ul>
-        </section>
-
-        <div v-if="visibleWorks.length" class="grid">
-          <div
-            v-for="w in visibleWorks"
-            :key="w.id"
-            class="work-card"
-            role="button"
-            tabindex="0"
-            @click="openWork(w.id)"
-            @keydown.enter="openWork(w.id)"
-          >
-            <button
-              class="work-arch"
-              :title="showArchived ? '移回「在写」' : '归档：从书架收起，正文与版本都不删'"
-              @click.stop="showArchived ? unarchiveWork(w) : archiveWork(w)"
-            >
-              <AppIcon :name="showArchived ? 'refresh' : 'archive'" :size="12" />
-            </button>
-            <button
-              class="work-del"
-              title="删除作品（连同节点树与全部历史版本；删前留一份整库副本）"
-              @click.stop="removeWork(w)"
-            >
-              <AppIcon name="trash" :size="12" />
-            </button>
-            <span class="work-kind">{{ kindLabel(w) }}</span>
-            <span class="work-title">{{ w.title }}</span>
-            <span class="work-meta">{{ w.node_count }} 节 · {{ fmt(w.words) }} 字</span>
-            <span class="work-premise">{{ w.premise || '还没有主旨' }}</span>
-          </div>
-        </div>
-        <p v-else-if="!showCreate" class="shelf-empty">
-          <template v-if="shelfQ">
-            没有匹配「{{ shelfQ }}」的作品。
-            <button class="link-btn" @click="openSearch(shelfQ)">去正文里搜</button>
-          </template>
-          <template v-else-if="showArchived">还没有归档的作品。归档只是从书架收起，不删正文。</template>
-          <template v-else-if="archivedWorks.length">
-            在写的都归档了（{{ archivedWorks.length }} 篇），切到「已归档」可以翻出来。
-          </template>
-          <template v-else>
-            还没有作品。先点右上角「新建作品」，进去之后左栏有「导入旧稿」，能把已有章节一次贴进来。
-          </template>
-        </p>
-      </main>
 
       <!-- 已选作品：三栏工作台 -->
       <template v-else>
@@ -176,11 +28,20 @@
           :stats="store.stats"
           :target="store.work.target_words || 0"
           :work-id="store.work.id"
+          :selected-ids="[...pickedIds]"
+          :splittable-id="splittableId"
           @select="onSelectNode"
           @create="quickCreate"
           @remove="removeNode"
           @move="moveNode"
+          @reparent="onReparent"
           @import="importOpen = true"
+          @update:selected="setPicked"
+          @duplicate="onDuplicate"
+          @split="onSplitHere"
+          @merge="onMergeWithNext"
+          @insert="onInsertSibling"
+          @batch="onBatch"
         />
 
         <main class="editor" :style="writerVars">
@@ -234,10 +95,18 @@
             <span v-if="store.template" class="pill pill--info">{{ store.template.name }}</span>
             <span
               class="ed-save"
-              :class="{ 'is-bad': saveState === 'error' }"
-              :title="saveState === 'error' ? '没存上，点一下重试（正文还在页面上）' : ''"
+              :class="{ 'is-bad': saveState === 'error' || saveState === 'conflict' }"
+              :title="saveState === 'error' ? '没存上，点一下重试（正文还在页面上）' : (saveState === 'conflict' ? '别处改过这一节，在下方冲突条里选一下' : '')"
               @click="saveState === 'error' && flushSave()"
             >{{ saveLabel }}</span>
+            <button
+              class="btn btn-sm ed-focus"
+              :class="{ 'is-on': focus }"
+              :title="focus ? '退出专注（Esc）' : '专注写作：只留正文与生成条（Ctrl+Shift+F）'"
+              @click="toggleFocus"
+            >
+              <AppIcon name="panel" :size="13" /> {{ focus ? '退出专注' : '专注' }}
+            </button>
             <div class="ed-right">
               <button class="btn btn-sm" :disabled="store.outlineBusy || store.pipeline.running"
                       title="按模板和主旨生成目录，落成节点" @click="doOutline">
@@ -252,11 +121,17 @@
                       title="排进队列，关页面也会继续跑" @click="doEnqueue">
                 <AppIcon name="activity" :size="13" /> 排队
               </button>
-              <button class="btn btn-sm" title="拼装成 Markdown 并下载" @click="store.downloadExport()">
+              <button class="btn btn-sm" title="整本连着读：阅读模式带目录与排版偏好" @click="openReader">
+                <AppIcon name="book" :size="13" /> 通读
+              </button>
+              <button class="btn btn-sm" title="选择格式导出成稿（md / txt / docx / epub）" @click="exportOpen = true">
                 <AppIcon name="download" :size="13" /> 导出
               </button>
               <button class="btn btn-sm" title="公众号排版预览、发布前检查与一键复制" @click="wechatOpen = true">
                 <AppIcon name="send" :size="13" /> 公众号
+              </button>
+              <button class="btn btn-sm" title="人名、说法、错字一次改完整本书（先预览）" @click="openReplace">
+                <AppIcon name="swap" :size="13" /> 替换
               </button>
               <div class="ed-type-wrap">
                 <button
@@ -341,6 +216,42 @@
                       >降亮</button>
                     </div>
                   </div>
+                  <div class="type-row">
+                    <span class="type-label">专注</span>
+                    <div class="type-seg" role="group" aria-label="段落聚焦淡化">
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': !writer.focusDim }"
+                        @click="setFocusDim(false)"
+                      >关</button>
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': writer.focusDim }"
+                        title="只亮在写的那一段，其余淡成底纹；字还在，不是折叠"
+                        @click="setFocusDim(true)"
+                      >淡化</button>
+                    </div>
+                  </div>
+                  <div class="type-row">
+                    <span class="type-label">打字机</span>
+                    <div class="type-seg" role="group" aria-label="打字机滚动">
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': !writer.typewriter }"
+                        @click="setTypewriter(false)"
+                      >关</button>
+                      <button
+                        type="button"
+                        class="type-chip"
+                        :class="{ 'is-on': writer.typewriter }"
+                        title="在写的那一行停在纸面偏上处，往下写时文字向上走"
+                        @click="setTypewriter(true)"
+                      >跟随</button>
+                    </div>
+                  </div>
                   <div class="type-foot">
                     <button type="button" class="type-reset" @click="resetWriter">还原默认</button>
                     <span class="type-keys">
@@ -397,17 +308,86 @@
                 class="ed-prog"
                 :title="`本节目标 ${nodeTarget} 字`"
               ><i :style="{ width: Math.min(100, (wordCount / nodeTarget) * 100) + '%' }"></i></span>
+              <!-- 单篇才给预览：小说正文里的井号是要读的字，不是标记 -->
+              <button
+                v-if="isArticleWork"
+                class="mini md-toggle"
+                :class="{ 'is-on': mdPreview }"
+                :title="mdPreview ? '回到编辑（Ctrl+M）' : '按 Markdown 渲染预览（Ctrl+M）'"
+                @click="mdPreview = !mdPreview"
+              >{{ mdPreview ? '编辑' : '预览' }}</button>
+              <!-- 段落导航：两三段的短节不值得开列表，多于一段才出现 -->
+              <button
+                v-if="navParas.length > 1"
+                class="mini para-toggle"
+                :class="{ 'is-on': paraOpen }"
+                title="本节段落列表（Ctrl+G）：点段首行跳过去"
+                @click="paraOpen = !paraOpen"
+              >¶</button>
+            </div>
+
+            <!-- 章内查找：只在 ed-head 下面多出一行条，不弹窗、不遮正文 -->
+            <div v-if="findOpen" class="find-bar">
+              <input
+                ref="findEl"
+                v-model="findQuery"
+                class="field find-input"
+                placeholder="在本节里找…"
+                @keydown.enter.exact.prevent="stepFind(1)"
+                @keydown.shift.enter.prevent="stepFind(-1)"
+              />
+              <span class="find-count">
+                {{ findHits.length ? `${findIdx + 1} / ${findHits.length}` : (findQuery ? '无匹配' : '') }}
+              </span>
+              <button class="mini" title="上一处（Shift+Enter）" @click="stepFind(-1)">↑</button>
+              <button class="mini" title="下一处（Enter）" @click="stepFind(1)">↓</button>
+              <button class="mini" title="关闭（Esc）" @click="closeFind">
+                <AppIcon name="x" :size="12" />
+              </button>
+            </div>
+
+            <!-- 乐观锁撞出的冲突：库里这一节比你手里的新（双开/异地/跑批动的）。
+                 改动留在页面上不丢，但自动保存已停住——不先让人选就反复撞闸 -->
+            <div v-if="store.saveConflict" class="conflict-bar">
+              <AppIcon name="alert" :size="13" />
+              <span class="conflict-msg">
+                这一节被别处改过了（服务端 {{ store.saveConflict.word_count || 0 }} 字），你页面上这份还没存。
+              </span>
+              <button class="btn btn-sm" @click="resolveConflictReload">取对方版本</button>
+              <button class="btn btn-sm btn-primary" @click="resolveConflictForce">就存我这份</button>
             </div>
 
             <div class="ed-body">
-              <textarea
+              <!-- 浮层锚在正文右上：只认段首行，不复制全文——长节几十段时重绘成本高 -->
+              <div v-if="paraOpen" class="para-pop">
+                <header class="para-pop-head">段落列表 · {{ navParas.length }} 段</header>
+                <button
+                  v-for="p in navParas"
+                  :key="p.i"
+                  class="para-item"
+                  :class="{ on: p.i === activeParaIdx }"
+                  @click="gotoPara(p)"
+                >
+                  <span class="para-no">{{ p.i + 1 }}</span>
+                  <span class="para-snip">{{ p.text.trim().slice(0, 26) }}</span>
+                  <span class="para-len">{{ p.text.length }}</span>
+                </button>
+              </div>
+              <WriterEditor
+                v-show="!mdPreview"
                 ref="editorEl"
+                class="ed-editor"
                 v-model="contentDraft"
-                class="ed-textarea"
-                spellcheck="false"
+                :focus-dim="writer.focusDim"
+                :typewriter="writer.typewriter"
                 placeholder="在这里写，或点下方「生成」让 AI 出草稿…"
                 @input="onInput"
               />
+              <div
+                v-if="mdPreview"
+                class="md-preview"
+                v-html="renderedDraft"
+              ></div>
             </div>
 
             <!-- 生成预览：先看，点采用才写回 -->
@@ -425,7 +405,7 @@
                 引用素材：{{ store.genMeta.used_sources.map((s) => s.title).join('、') }}
               </p>
               <!-- 逐段勾选：一千五百字里只想要三段时，不必先整段采用再手删 -->
-              <div v-if="store.genText" class="gen-text">
+              <div v-if="store.genText" ref="genBoxEl" class="gen-text" @scroll="onGenScroll">
                 <label
                   v-for="(p, i) in genParas"
                   :key="i"
@@ -442,6 +422,12 @@
                   <span class="gen-para-text">{{ p }}</span>
                 </label>
               </div>
+              <!-- 打字机滚动断了（人往上翻前文）：给一个一键回到最新的出口 -->
+              <button
+                v-if="store.generating && !genStick"
+                class="btn btn-sm gen-follow"
+                @click="followGenTail(true)"
+              >跟随到最新</button>
               <p v-if="store.genError" class="gen-err">{{ store.genError }}</p>
               <!-- 停止后别把半截稿当失败：已经出来的部分可以照常采用 -->
               <p v-if="store.genStopped" class="gen-stop">
@@ -543,6 +529,7 @@
           :initial-tab="initialPanel"
           :initial-conv="initialConv"
           @locate="locateEvidence"
+          @goto-node="onSelectNode"
           @restore="onRestoreVersion"
         />
       </template>
@@ -552,11 +539,19 @@
       v-model:open="transformOpen"
       :text="contentDraft"
       :selection="selectedText"
+      :context="transformCtx"
       :instruction="instruction"
       @adopt="onTransformAdopt"
     />
 
     <WechatDialog v-model:open="wechatOpen" @goto="gotoIssue" />
+    <ExportDialog v-model:open="exportOpen" />
+    <BatchEstimateDialog
+      v-model:open="batchEstOpen"
+      :mode="batchEstMode"
+      :params="batchEstParams"
+      @confirm="onBatchEstConfirm"
+    />
     <GlobalSearch v-model:open="searchOpen" :initial="searchSeed" @goto="gotoSearchHit" />
     <ImportDocDialog
       v-model:open="importOpen"
@@ -564,6 +559,13 @@
       :parent-title="importParent.title"
       :leaf-kind="importKind"
       @done="onImported"
+    />
+
+    <ReplaceDialog
+      v-model:open="replaceOpen"
+      :node-id="store.node?.id || ''"
+      :node-title="store.node?.title || ''"
+      @done="onReplaced"
     />
 
     <!-- 先聊聊：立项前把题名/前提聊出来，一键回填上面的新建表单 -->
@@ -589,15 +591,23 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppNav from '../components/AppNav.vue'
 import AppIcon from '../components/AppIcon.vue'
+import ShelfView from '../components/ShelfView.vue'
 import StudioTree from '../components/StudioTree.vue'
 import StudioPanel from '../components/StudioPanel.vue'
 import AskPanel from '../components/AskPanel.vue'
 import TransformDialog from '../components/TransformDialog.vue'
 import WechatDialog from '../components/WechatDialog.vue'
+import ExportDialog from '../components/ExportDialog.vue'
+import BatchEstimateDialog from '../components/BatchEstimateDialog.vue'
 import GlobalSearch from '../components/GlobalSearch.vue'
 import ImportDocDialog from '../components/ImportDocDialog.vue'
+import ReplaceDialog from '../components/ReplaceDialog.vue'
+import WriterEditor from '../components/WriterEditor.vue'
+import { marked } from 'marked'
 import { useStudioStore } from '../stores/studio'
 import { apiFetch } from '../utils/api'
+import { collectHits, stepIndex } from '../utils/find'
+import { splitWithOffsets } from '../utils/paras'
 import {
   FONT_PRESETS,
   FONT_SIZES,
@@ -611,6 +621,8 @@ import {
   setMeasure,
   setFont,
   setTint,
+  setFocusDim,
+  setTypewriter,
   fontName,
   writer,
   writerVars,
@@ -620,9 +632,8 @@ const store = useStudioStore()
 const route = useRoute()
 const router = useRouter()
 
-const showCreate = ref(false)
-const creating = ref(false)
-const form = ref({ kind: 'article', scale: 'single', subtype: 'tech', title: '', premise: '', target_words: 5000 })
+// 书架「先聊聊」的回填：每回填一次换一个新对象，ShelfView 靠身份变化触发表单
+const shelfSeed = ref(null)
 
 // 问一问：书架上用弹层（立项前），工作台里是右栏第 9 个 tab
 const askOpen = ref(false)
@@ -634,9 +645,41 @@ const contentDraft = ref('')
 const saveState = ref('saved') // saved | saving | dirty | error
 const taskType = ref('article_draft')
 const instruction = ref('')
+// 单篇的 Markdown 渲染预览：只切显示，草稿还是同一份源文，一个字都不动
+const mdPreview = ref(false)
 const editorEl = ref(null)
 const instrEl = ref(null)
 const panelRef = ref(null)
+// 章内查找（Ctrl+F）：命中用 textarea 选区定位，与 locateEvidence 同一条路
+const findOpen = ref(false)
+const findQuery = ref('')
+const findHits = ref([])   // [[start, end], ...]
+const findIdx = ref(0)
+const findEl = ref(null)
+// 打字机滚动：流式生成时预览贴尾走，人往上翻就停住
+const genBoxEl = ref(null)
+const genStick = ref(true)
+
+// 节内段落导航（Ctrl+G）：长节没有目录，靠段首行认路——衬底架构把段表
+// 算好了（paras.js），这里只把「第几段开头在第几行」变成可点的列表
+const paraOpen = ref(false)
+const navParas = computed(() =>
+  splitWithOffsets(contentDraft.value)
+    .map((p, i) => ({ i, text: p.text, start: p.start }))
+    .filter((p) => p.text.trim()),
+)
+// 当前段跟编辑器里那个走（衬底自己的对表结果），不在这里重算一遍
+const activeParaIdx = computed(() => editorEl.value?.activeIndex ?? -1)
+
+function gotoPara(p) {
+  const el = editorEl.value
+  if (!el) return
+  paraOpen.value = false
+  el.focus()
+  // 光标落段首、不整段选中：目录跳转选中整段的话，接下来敲的第一个字就把整段换了
+  el.setSelectionRange(p.start, p.start)
+  el.scrollToOffset(p.start)
+}
 
 // 类型下拉来自 /studio/content-types（content-types.yaml），新增文种只改 YAML
 const kinds = computed(() =>
@@ -644,12 +687,12 @@ const kinds = computed(() =>
     ? store.contentTypes
     : [{ id: 'article', label: '文档', scales: [{ id: 'single', label: '单篇' }], subtypes: [] }],
 )
-const currentKind = computed(() => kinds.value.find((k) => k.id === form.value.kind) || null)
-const scales = computed(() => currentKind.value?.scales || [])
-const subtypes = computed(() => currentKind.value?.subtypes || [])
-
 const transformOpen = ref(false)
 const selectedText = ref('')
+// 选区前后的正文窗口：加工时随请求发给模型对齐语气称谓（见 TransformDialog）
+const transformCtx = ref('')
+// 查找替换：开着的状态属于这一屏，不进 store（切作品要收起，见下面的 watch）
+const replaceOpen = ref(false)
 // 排版弹层：开着的状态属于这一屏，不进 store（切作品要收起，见下面的 watch）
 const typeOpen = ref(false)
 // 不展开弹层也能从悬停提示里看到当前档位
@@ -665,10 +708,16 @@ const workDigestDraft = ref('')
 const savingWork = ref(false)
 const digestBusy = ref(false)
 const wechatOpen = ref(false)
+// 导出成稿弹层：格式与署名在这里选，下载动作在弹层里自己收口
+const exportOpen = ref(false)
+// 批量前预估弹层（迭代 C）：两个批量入口共用，mode 区分 SSE 逐节与落库队列
+const batchEstOpen = ref(false)
+const batchEstMode = ref('pipeline')
+// 预估弹层与确认后的开跑共用同一份参数：两边各自靠默认值碰齐，
+// 任何一边改了默认口径就静默分家（审查 M1）
+const batchEstParams = ref({})
 
-// 书架：搜索框只筛卡片，跨作品搜正文走 Ctrl+K 那个弹层——两种搜索混在一个框里会互相误会
-const shelfQ = ref('')
-const showArchived = ref(false)
+// 全库搜索弹层：书架与工作台共用（Ctrl+K，或书架上的「搜正文」）
 const searchOpen = ref(false)
 const searchSeed = ref('')
 
@@ -676,58 +725,6 @@ const searchSeed = ref('')
 function openSearch(seed = '') {
   searchSeed.value = seed
   searchOpen.value = true
-}
-
-const ideaDraft = ref('')
-const ideaBusy = ref(false)
-const pendingIdea = ref('')
-const shelfEl = ref(null)
-
-// 关掉新建表单就别再记着那条灵感：否则下一次手动新建会被误标成「用它开写」
-watch(showCreate, (on) => {
-  if (!on) pendingIdea.value = ''
-})
-
-async function saveIdea() {
-  const text = ideaDraft.value.trim()
-  if (!text || ideaBusy.value) return
-  ideaBusy.value = true
-  const idea = await store.addIdea(text)
-  ideaBusy.value = false
-  if (!idea) {
-    showNotice(store.error || '记下失败', true)
-    return
-  }
-  ideaDraft.value = ''
-}
-
-/** 用它开写：只填新建表单，kind/scale 仍由人挑——猜错类型比不填更麻烦 */
-async function startFromIdea(idea) {
-  pendingIdea.value = idea.id
-  form.value.title = idea.text.slice(0, 40)
-  form.value.premise = idea.text
-  showCreate.value = true
-  await nextTick()
-  shelfEl.value?.scrollTo({ top: 0, behavior: 'smooth' })
-}
-
-const activeWorks = computed(() => store.works.filter((w) => (w.status || 'active') !== 'archived'))
-const archivedWorks = computed(() => store.works.filter((w) => w.status === 'archived'))
-const visibleWorks = computed(() => {
-  const base = showArchived.value ? archivedWorks.value : activeWorks.value
-  const q = shelfQ.value.trim().toLowerCase()
-  if (!q) return base
-  return base.filter((w) =>
-    (w.title || '').toLowerCase().includes(q) || (w.premise || '').toLowerCase().includes(q),
-  )
-})
-
-async function archiveWork(w) {
-  if (!(await store.setWorkStatus(w.id, 'archived'))) showNotice(store.error || '归档失败', true)
-}
-
-async function unarchiveWork(w) {
-  if (!(await store.setWorkStatus(w.id, 'active'))) showNotice(store.error || '恢复失败', true)
 }
 
 /** 全库搜索的结果点进来：同一篇里就直接换节，不然带着 node 跳过去 */
@@ -809,23 +806,13 @@ const pipePercent = computed(() => {
   return Math.min(100, Math.round((p.done / p.total) * 100)) + '%'
 })
 
-function onKindChange() {
-  applyScaleDefaults()
-  form.value.subtype = subtypes.value[0]?.id || ''
-}
-
-function applyScaleDefaults() {
-  form.value.scale = scales.value[0]?.id || 'single'
-  const s = scales.value.find((x) => x.id === form.value.scale)
-  if (s?.target_words) form.value.target_words = s.target_words
-}
-
 let saveTimer = 0
 
 const saveLabel = computed(() => {
   if (!store.node) return ''
   // 失败要显眼：以前无论成功失败都写「已保存」，关页面前一秒才发现白写了
   if (saveState.value === 'error') return '保存失败'
+  if (saveState.value === 'conflict') return '冲突·未保存'
   if (store.saving || saveState.value === 'saving') return '保存中…'
   if (saveState.value === 'dirty') return '未保存'
   return '已保存'
@@ -837,6 +824,14 @@ const wordCount = computed(() => {
   const words = text.replace(/[\u4e00-\u9fff]/g, ' ').split(/\s+/).filter(Boolean).length
   return cjk + words
 })
+
+// Markdown 预览只给文档类作品：小说正文里的井号是要读的字，不是标记
+const isArticleWork = computed(() => (store.work?.kind || 'article') === 'article')
+// 渲染只在预览开着时做：源文始终是 contentDraft 那一份，切回编辑不丢字
+const renderedDraft = computed(() => (
+  mdPreview.value && contentDraft.value
+    ? marked(contentDraft.value, { breaks: true, gfm: true }) : ''
+))
 
 /** 本节目标字数：只在大纲生成过的那一节有（存在 meta_json.outline 里） */
 const nodeTarget = computed(() => {
@@ -875,32 +870,6 @@ watch(() => store.genText, (text) => {
   if (!text) genPicked.value = []
 })
 
-// ---- 写作日历（近 14 天，今天在最右）----
-function ymd(dt) {
-  const m = String(dt.getMonth() + 1).padStart(2, '0')
-  const d = String(dt.getDate()).padStart(2, '0')
-  return `${dt.getFullYear()}-${m}-${d}`
-}
-
-const last14 = computed(() => {
-  const got = new Map((store.dailyWrites.days || []).map((d) => [d.day, d.chars]))
-  const out = []
-  const base = new Date()
-  for (let i = 13; i >= 0; i--) {
-    const dt = new Date(base.getFullYear(), base.getMonth(), base.getDate() - i)
-    const day = ymd(dt)
-    out.push({ day, chars: got.get(day) || 0 })
-  }
-  return out
-})
-
-const dailyMax = computed(() => Math.max(1, ...last14.value.map((d) => d.chars)))
-
-function barHeight(chars) {
-  if (!chars) return '3px'
-  return Math.max(6, Math.round((chars / dailyMax.value) * 24)) + 'px'
-}
-
 const genStatus = computed(() => {
   if (store.generating) return store.genText ? '生成中' : '装配上下文…'
   if (store.genStopped) return '已停止'
@@ -928,11 +897,6 @@ function knownModel(id) {
   return store.allGenModels.some((m) => m.id === id)
 }
 
-function fmt(n) {
-  if (!n) return '0'
-  return n >= 10000 ? (n / 10000).toFixed(1) + '万' : String(n)
-}
-
 /** 把告警定位到正文：按证据原文找，找不到就退到前 24 / 前 12 字。 */
 function locateEvidence(text) {
   const el = editorEl.value
@@ -952,10 +916,82 @@ function locateEvidence(text) {
   return false
 }
 
-function kindLabel(w) {
-  if (w.kind === 'novel') return '长篇'
-  return w.scale === 'series' ? '系列' : (w.subtype || '单篇')
+// ---- 章内查找（Ctrl+F）----
+// 只管这一节里跳来跳去：全库有 Ctrl+K，跨节替换有 Ctrl+H，三条各管一段
+function openFind() {
+  mdPreview.value = false // 查找作用于源文：预览态下 textarea 被藏着，没处圈选
+  findOpen.value = true
+  nextTick(() => findEl.value?.select())
 }
+
+function closeFind() {
+  findOpen.value = false
+  findQuery.value = ''
+  findHits.value = []
+  findIdx.value = 0
+}
+
+/** 重扫一遍命中：正文可能刚被改过（手打或生成回填），位置不能留旧的 */
+function collectFindHits() {
+  findHits.value = collectHits(contentDraft.value, findQuery.value)
+  return findHits.value
+}
+
+function gotoFindHit(i) {
+  const hits = findHits.value
+  if (!hits.length) return
+  findIdx.value = stepIndex(i, 0, hits.length)
+  const [start, end] = hits[findIdx.value]
+  const el = editorEl.value
+  if (!el) return
+  // 绝不对 textarea 调 focus()：没聚焦时 setSelectionRange 照样生效，
+  // 一抢焦点，用户敲的下一个字符就落进正文替换掉选中的命中段——
+  // 坏的是存了库的字，不只是查找体验（审查 C1）
+  el.setSelectionRange(start, end)
+  // 与 locateEvidence 同一个坑：浏览器常只滚到边上「差一点点」，手工再校准
+  const full = contentDraft.value || ''
+  const ratio = start / Math.max(full.length, 1)
+  el.scrollTop = Math.max(0, ratio * el.scrollHeight - el.clientHeight / 3)
+}
+
+function stepFind(delta) {
+  const hits = collectFindHits()
+  if (!hits.length) return
+  gotoFindHit(stepIndex(findIdx.value, delta, hits.length))
+  // 定位完把焦点还给查找框：Enter 连按下一处才顺
+  findEl.value?.focus()
+}
+
+// 输入只重算不定位：每敲一个字就把正文滚动一跳反而晕；
+// 命中数的变化已经反馈了「找没找到」，要去哪处由 Enter/↑↓ 决定
+watch(findQuery, () => {
+  collectFindHits()
+  findIdx.value = 0
+})
+
+// ---- 打字机滚动：流式生成时预览跟着尾巴走 ----
+// 往上翻说明在看前文，就此停住；翻回贴着底部（或点「跟随到最新」）再继续跟
+function onGenScroll() {
+  const el = genBoxEl.value
+  if (!el) return
+  genStick.value = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+}
+
+function followGenTail(take = false) {
+  const el = genBoxEl.value
+  if (!el) return
+  if (take) genStick.value = true
+  el.scrollTop = el.scrollHeight
+}
+
+watch(() => store.genText, () => {
+  if (genStick.value) followGenTail()
+})
+
+// 每轮开始先贴底：不然上一轮停在哪就跟到哪
+watch(() => store.generating, (on) => {
+  if (on) nextTick(() => followGenTail(true))
+})
 
 onMounted(async () => {
   // 模型目录拉不到只影响下拉框选项，不能把整个写作台卡住，所以单独吞掉错误
@@ -966,9 +1002,8 @@ onMounted(async () => {
     store.loadGenModels().catch(() => {}),
     store.loadIdeas().catch(() => {}),
     store.loadDailyWrites().catch(() => {}),
+    store.loadPipeline().catch(() => {}),
   ])
-  if (!kinds.value.some((k) => k.id === form.value.kind)) form.value.kind = kinds.value[0]?.id || 'article'
-  applyScaleDefaults()
   const id = route.params.id
   if (id) await openWork(id)
 })
@@ -988,35 +1023,121 @@ watch(
   { immediate: true, deep: true },
 )
 
-/** 「先聊聊」的回答回填新建表单：只是草稿，建不建、怎么改都还由人定 */
+/** 「先聊聊」的回答交给书架回填：只是草稿，建不建、怎么改都还由人定 */
 function onUseFromAsk(payload) {
-  form.value.title = String(payload?.title || '').slice(0, 60)
-  form.value.premise = String(payload?.premise || '').slice(0, 400)
+  shelfSeed.value = {
+    title: String(payload?.title || '').slice(0, 60),
+    premise: String(payload?.premise || '').slice(0, 400),
+  }
   askOpen.value = false
-  showCreate.value = true
-  nextTick(() => shelfEl.value?.scrollTo({ top: 0, behavior: 'smooth' }))
 }
 
-watch(() => store.work?.id, () => {
+watch(() => store.work?.id, (id) => {
   workEditOpen.value = false
   typeOpen.value = false
+  replaceOpen.value = false
+  paraOpen.value = false
+  scrollMemo.clear()
+  // 换作品回到编辑态：小说没有预览，留着标记会让 textarea 被 v-show 藏没
+  mdPreview.value = false
+  // 书架「新建作品」时 createWork 内部已经 selectWork，书架随即卸载，
+  // @open 未必赶得上；以「work 已落、路由还没跟上」为准补一段收尾（不重复拉树）。
+  if (id && route.params.id !== id) enterWork(id)
 })
 
-watch(() => store.node?.id, () => {
+// 同一部作品改文种也算离开编辑态：article→novel 后预览按钮和 Ctrl+M 都随
+// v-if 消失，不复位 mdPreview 的话 textarea 被 v-show 藏着，编辑区死锁
+watch(() => store.work?.kind, () => {
+  mdPreview.value = false
+})
+
+// 切节滚动位置记忆：去别的节查一眼回来，不该再用滚轮找位。
+// Map 放内存不落 localStorage：「看到哪一行」是正在写这本书的状态，
+// 刷新后上下文已经没了，恢复上次的「位置」反而更意外
+const scrollMemo = new Map()
+
+watch(() => store.node?.id, (id, prev) => {
+  // 这个回调跑在内容灌入之前：此刻编辑器里还是上一节，它的 scrollTop 就是旧节的位置
+  if (prev && editorEl.value) scrollMemo.set(prev, editorEl.value.scrollTop)
   titleDraft.value = store.node?.title || ''
   contentDraft.value = store.node?.content || ''
   saveState.value = 'saved'
+  // 换节收起查找条：上一节的命中位置在这一节里没有意义
+  closeFind()
+  paraOpen.value = false
+  // textarea 被灌新值时浏览器会把 scrollTop 打回 0：等 DOM 落定再放回去
+  const y = id ? scrollMemo.get(id) : 0
+  if (y && editorEl.value) {
+    nextTick(() => {
+      if (store.node?.id === id) editorEl.value.scrollTop = y
+    })
+  }
 })
 
-// 键盘可达：Ctrl+S 立即存，Ctrl+Enter 生成（见 design-system MASTER.md）
+// 专注模式：左树与右栏收起，只留正文与生成条。状态只属于这一屏，不写 localStorage
+const focus = ref(false)
+function toggleFocus() {
+  focus.value = !focus.value
+}
+// Esc 优先给弹层：排版、替换、公众号、加工、搜索、导入、先聊聊、作品信息、导出、批量预估都算弹层
+const dialogOpen = computed(() => (
+  typeOpen.value || replaceOpen.value || wechatOpen.value || transformOpen.value
+  || searchOpen.value || importOpen.value || askOpen.value || workEditOpen.value
+  || exportOpen.value || batchEstOpen.value || paraOpen.value
+))
+
+// 键盘可达：Ctrl+S 立即存，Ctrl+Enter 生成，Ctrl+F 章内查找（见 design-system MASTER.md）
 function onKeydown(e) {
+  if (e.key === 'Escape' && findOpen.value) {
+    closeFind()
+    return
+  }
+  if (e.key === 'Escape' && paraOpen.value) {
+    paraOpen.value = false
+    return
+  }
   if (e.key === 'Escape' && typeOpen.value) {
     typeOpen.value = false
+    return
+  }
+  // Esc 退专注：弹层优先，没弹层才轮到这一屏
+  if (e.key === 'Escape' && focus.value && !dialogOpen.value) {
+    focus.value = false
+    return
+  }
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
+    e.preventDefault()
+    toggleFocus()
     return
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault()
     openSearch()
+    return
+  }
+  // Ctrl+H 查找替换。与已有的 Ctrl+K / S / Enter / = / - / Esc 都不撞
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
+    e.preventDefault()
+    openReplace()
+    return
+  }
+  // Ctrl+G 节内段落列表（G=goto）。浏览器默认的 Ctrl+G「查找下一个」
+  // 在写作场景几乎没人用，抢得过；没选中节点时按了不响
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'g') {
+    e.preventDefault()
+    if (store.node) paraOpen.value = !paraOpen.value
+    return
+  }
+  // Ctrl+M 单篇 Markdown 预览开关（M=Markdown）；小说没这功能，按了不响
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'm') {
+    e.preventDefault()
+    if (isArticleWork.value) mdPreview.value = !mdPreview.value
+    return
+  }
+  // Ctrl+F 章内查找；Ctrl+Shift+F（专注模式）的分支排在更前面，不会被这里吞
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    e.preventDefault()
+    openFind()
     return
   }
   if (!(e.ctrlKey || e.metaKey)) return
@@ -1066,6 +1187,7 @@ onUnmounted(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   stopQueuePoll()
+  stopMetaWatch()
   clearTimeout(noticeTimer)
 })
 
@@ -1082,26 +1204,52 @@ async function onSelectNode(id) {
   await store.selectNode(id)
 }
 
+// 同一篇只进一次：新建作品时 store.work 先落、书架随即卸载，@open 与上面的
+// 兜底 watcher 可能同时来叫，重入会白拉一遍树。
+let openingId = ''
 async function openWork(id) {
-  await store.selectWork(id)
-  await store.loadTemplates(store.work?.kind || 'article')
-  if (route.params.id !== id) router.replace(`/studio/${id}`)
-  // 队列可能在关页面期间一直在跑，回来先把状态拉齐（一行进度要能显示出来）
-  await store.loadQueue()
-  if (store.queueActive) startQueuePoll()
-  // 默认选中第一个有正文的节点，省一次点击；从全库搜索跳进来时先认 ?node=
-  const wanted = typeof route.query.node === 'string' ? route.query.node : ''
-  const first = (wanted && store.tree.find((n) => n.id === wanted))
-    || store.tree.find((n) => n.ordinal != null)
-  if (first) await store.selectNode(first.id)
+  if (!id || openingId === id) return
+  openingId = id
+  try {
+    await store.selectWork(id)
+    await enterWork(id)
+  } finally {
+    if (openingId === id) openingId = ''
+  }
+}
+
+/** 作品已经选中之后的收尾：模板、路由、队列、首节。 */
+let enteringId = ''
+async function enterWork(id) {
+  if (enteringId === id) return
+  enteringId = id
+  try {
+    await store.loadTemplates(store.work?.kind || 'article')
+    if (route.params.id !== id) router.replace(`/studio/${id}`)
+    // 队列可能在关页面期间一直在跑，回来先把状态拉齐（一行进度要能显示出来）
+    await store.loadQueue()
+    if (store.queueActive) startQueuePoll()
+    // 双开探测的常驻轮询：写台开着就每 10 秒摸一次当前节的时间戳
+    startMetaWatch()
+    // 默认选中第一个有正文的节点，省一次点击；从全库搜索跳进来时先认 ?node=
+    const wanted = typeof route.query.node === 'string' ? route.query.node : ''
+    const first = (wanted && store.tree.find((n) => n.id === wanted))
+      || store.tree.find((n) => n.ordinal != null)
+    if (first) await store.selectNode(first.id)
+  } finally {
+    if (enteringId === id) enteringId = ''
+  }
 }
 
 async function backToShelf() {
   // 回书架等于离开这一节：没存上的改动先重试，别一声不响地丢
   const ok = await flushSave()
   if (!ok && !window.confirm('这一节还没存上，回书架会丢掉这段改动。仍要离开吗？')) return
-  // 刚写完的字要立刻反映到书架上的「今天字数 / 连续天」
+  focus.value = false
+  stopMetaWatch()
+  // 刚写完的字要立刻反映到书架上的「今天字数 / 连续天 / 存稿」
   store.loadDailyWrites().catch(() => {})
+  store.loadPipeline().catch(() => {})
   router.replace('/studio')
   store.work = null
   store.tree = []
@@ -1118,33 +1266,6 @@ function showNotice(text, bad = false) {
   noticeBad.value = bad
   clearTimeout(noticeTimer)
   noticeTimer = setTimeout(() => (notice.value = ''), bad ? 5200 : 2600)
-}
-
-async function removeWork(w) {
-  if (!window.confirm(
-    `删除《${w.title}》？会连同它的节点树、正文与全部历史版本一并删掉。\n\n`
-    + '删之前会先拷一份整库副本到 storage/backups/works/，要找回只能停服务把那个文件盖回去。')) return
-  if (!(await store.deleteWork(w.id))) showNotice(store.error || '删除失败', true)
-}
-
-async function create() {
-  creating.value = true
-  store.error = ''
-  try {
-    const w = await store.createWork({ ...form.value })
-    // 从灵感箱开的稿：记下指向，之后在库里能回看这句想法变成了哪篇
-    if (pendingIdea.value) {
-      await store.useIdea(pendingIdea.value, w.id)
-      pendingIdea.value = ''
-    }
-    showCreate.value = false
-    form.value = { kind: 'article', scale: 'single', subtype: 'tech', title: '', premise: '', target_words: 5000 }
-    router.replace(`/studio/${w.id}`)
-  } catch (e) {
-    store.error = String(e?.message || e).slice(0, 200)
-  } finally {
-    creating.value = false
-  }
 }
 
 async function quickCreate(parent) {
@@ -1189,7 +1310,231 @@ async function moveNode(node, direction) {
   await panelRef.value?.refreshContext()
 }
 
+/**
+ * 拖拽落点：放进容器、插到某节之前/之后都走同一条 reparent。
+ *
+ * 与上下移一样先 flushSave：搬完按树序重排全书章号，摘要、分块与图谱上的
+ * 章号引用一起改；编辑器里还没落盘的正文不先存上，重拉回来的节点就会盖掉它。
+ * 落点后重跑一次一致性检查（规则按章号判定），再刷右栏上下文。
+ */
+async function onReparent(node, target, placement = { mode: 'inside' }) {
+  await flushSave()
+  let r
+  if (placement.mode === 'before') {
+    r = await store.reparentNode(node.id, target?.parent_id || null, target?.id)
+  } else if (placement.mode === 'after') {
+    r = await store.reparentNode(
+      node.id, target?.parent_id || null, placement.beforeId || '')
+  } else {
+    r = await store.reparentNode(node.id, target ? target.id : null)
+  }
+  if (!r.moved) {
+    showNotice(r.reason || '移动失败', true)
+    return
+  }
+  const where = r.before_title
+    ? `「${r.before_title}」之前`
+    : `「${r.parent_title || '顶层'}」末尾`
+  showNotice(`已把「${node.title}」移到${where}，全书章号已重排`)
+  await store.runCheck()
+  await panelRef.value?.refreshContext()
+}
+
+// ---- 结构操作（迭代 B）：复制 / 拆分 / 合并 / 相邻插入 / 多选批量 ----
+// 多选集合只属于这一屏：换作品要清空，不然 id 对到另一本书上就串了
+const pickedIds = ref(new Set())
+function setPicked(ids) {
+  pickedIds.value = new Set(ids || [])
+}
+watch(() => store.work?.id, () => setPicked([]))
+
+/** 只有当前选中的这一节能拆（光标在它正文里）：空正文也没意义 */
+const splittableId = computed(() => (
+  store.node && (store.node.content || '').trim() ? store.node.id : ''
+))
+
+/** 结构动作前的统一一步：正文必须先落盘，后面的章号重排才对得上库里的内容 */
+async function prepareStructure() {
+  setPicked([])
+  return flushSave()
+}
+
+async function finishStructure(msg) {
+  showNotice(msg)
+  await store.runCheck()
+  await panelRef.value?.refreshContext()
+}
+
+async function onDuplicate(node) {
+  if (!(await prepareStructure())) return
+  const r = await store.duplicateNode(node.id)
+  if (!r.ok) {
+    showNotice(r.reason || '复制失败', true)
+    return
+  }
+  // 编辑器里那份是原节的正文：新节同文，不重灌草稿就会把原节旧字再存回新节
+  contentDraft.value = store.node?.content || ''
+  saveState.value = 'saved'
+  await finishStructure(`已复制出「${node.title}」的副本，全书章号已重排`)
+}
+
+async function onSplitHere(node) {
+  if (!editorEl.value || node.id !== store.node?.id) return
+  if (!(contentDraft.value || '').trim()) {
+    showNotice('这一节还没有正文，拆不出东西', true)
+    return
+  }
+  // v-model 让草稿就是编辑器此刻的内容：下面 prepareStructure 落盘的就是这一份
+  const pos = editorEl.value.selectionStart ?? -1
+  const len = (contentDraft.value || '').length
+  if (pos <= 0 || pos >= len) {
+    showNotice('先把光标放到正文中间：拆分按光标位置切成前后两节', true)
+    return
+  }
+  if (!(await prepareStructure())) return
+  const r = await store.splitNode(node.id, [pos])
+  if (!r.ok) {
+    showNotice(r.reason || '拆分失败', true)
+    return
+  }
+  if (!r.split) {
+    showNotice('没切开：光标不在正文里', true)
+    return
+  }
+  contentDraft.value = store.node?.content || ''
+  saveState.value = 'saved'
+  await finishStructure(`已拆成 ${r.parts.length} 节，切出的那一节紧跟在后面`)
+}
+
+async function onMergeWithNext(node) {
+  const sibs = store.tree.filter((x) => (x.parent_id || '') === (node.parent_id || ''))
+  const i = sibs.findIndex((x) => x.id === node.id)
+  const next = i >= 0 ? sibs[i + 1] : null
+  if (!next || next.ordinal == null) {
+    showNotice('后面没有可合并的叶子兄弟：合并只吃紧接其后的章/节', true)
+    return
+  }
+  if (!window.confirm(
+    `把「${node.title}」与「${next.title}」合成一节？\n\n`
+    + '正文按顺序拼进前一节；被合掉的那节删前会先落备份，可找回。',
+  )) return
+  if (!(await prepareStructure())) return
+  const r = await store.mergeNodes(node.id, 2)
+  if (!r.ok) {
+    showNotice(r.reason || '合并失败', true)
+    return
+  }
+  contentDraft.value = store.node?.content || ''
+  saveState.value = 'saved'
+  await finishStructure(`已合并为「${r.title}」，全书章号已重排`)
+}
+
+/** 右键菜单的「在前面/后面插入」：建一个空兄弟节，落在指定位 */
+async function onInsertSibling(node, where) {
+  if (!(await prepareStructure())) return
+  const meta = scaleMeta.value
+  const kind = node.kind === 'volume' ? (meta?.leaf_kind || 'chapter') : node.kind
+  const label = meta?.leaf_label || '节'
+  const got = await store.createNode({ kind, title: `新${label}`, parent_id: node.parent_id || null })
+  if (!got) {
+    showNotice(store.error || '建不起来', true)
+    return
+  }
+  let r
+  if (where === 'before') {
+    r = await store.reparentNode(got.id, node.parent_id || null, node.id)
+  } else {
+    const sibs = store.tree.filter((x) => (x.parent_id || '') === (node.parent_id || ''))
+    const i = sibs.findIndex((x) => x.id === node.id)
+    const next = i >= 0 ? sibs[i + 1] : null
+    r = next
+      ? await store.reparentNode(got.id, node.parent_id || null, next.id)
+      : await store.reparentNode(got.id, node.parent_id || null)
+  }
+  if (!r.moved) {
+    showNotice(r.reason || '位置没调成，新节在这一层末尾', true)
+    return
+  }
+  contentDraft.value = ''
+  saveState.value = 'saved'
+  await finishStructure(`已在「${node.title}」${where === 'before' ? '前面' : '后面'}插了一节`)
+}
+
+/** 批量：移入容器 / 逐对合并 / 删除。都沿用同一个后端接口，不另开门 */
+async function onBatch(act, ids, opts = {}) {
+  const leaves = store.tree.filter((n) => ids.includes(n.id) && n.ordinal != null)
+  if (!leaves.length) {
+    showNotice('选里的容器不参与批量：只圈章与节', true)
+    return
+  }
+  if (!(await prepareStructure())) return
+  if (act === 'move') {
+    let moved = 0
+    for (const n of leaves) {
+      if (n.id === opts.targetId) continue
+      const r = await store.reparentNode(n.id, opts.targetId)
+      if (r.moved) moved += 1
+      else if (r.reason && r.reason !== '已经在这一卷末尾') showNotice(r.reason, true)
+    }
+    await finishStructure(`已把 ${moved} 节移入目标容器，全书章号已重排`)
+    return
+  }
+  if (act === 'merge') {
+    // 按同一父节点下紧相邻的段逐段合并：选 4 连节 → 收成 1 节
+    const groups = []
+    let cur = []
+    for (const n of store.tree) {
+      if (n.ordinal == null) { cur = []; continue }
+      if (!leaves.some((x) => x.id === n.id)) { cur = []; continue }
+      if (cur.length && (cur[0].parent_id || '') !== (n.parent_id || '')) { cur = []; }
+      cur.push(n)
+      if (cur.length >= 2) {
+        if (groups.length && groups[groups.length - 1].slice(-1)[0] === cur[0]) continue
+        groups.push([...cur])
+      }
+    }
+    const runs = groups.filter((g) => {
+      // 去掉被上一段吃掉开头的 group：[a,b] 与 [b,c] 只保留 [a,b,c] 那一条链
+      const prev = groups[groups.indexOf(g) - 1]
+      return !(prev && prev.includes(g[0]))
+    })
+    if (!runs.length) {
+      showNotice('批量合并要选紧相邻的同层节：中间隔了别的就合不了', true)
+      return
+    }
+    let done = 0
+    for (const run of runs) {
+      const r = await store.mergeNodes(run[0].id, run.length)
+      if (r.ok) done += r.merged - 1
+      else showNotice(r.reason || '有段没合上', true)
+    }
+    contentDraft.value = store.node?.content || ''
+    saveState.value = 'saved'
+    await finishStructure(done ? `已合并掉 ${done} 节` : '一节都没合上')
+    return
+  }
+  if (act === 'remove') {
+    if (!window.confirm(
+      `删除选中的 ${leaves.length} 节（连同各自子树）？\n\n`
+      + '每一节删前都会先落备份，可用 scripts/restore_backup.py 找回。',
+    )) return
+    let gone = 0
+    for (const n of leaves) {
+      if (await store.deleteNode(n.id)) gone += 1
+      else showNotice(store.error || `「${n.title}」删掉了但备份没写成`, true)
+    }
+    await store.afterStructureChange()
+    await finishStructure(`已删除 ${gone} 节，全书章号已重排`)
+  }
+}
+
 function onInput() {
+  // 冲突没定夺前不再排自动保存：改动留在页面上等冲突条的按钮，
+  // 带着旧 base 反复去撞闸只会每 800ms 吃一个 409
+  if (store.saveConflict || saveState.value === 'conflict') {
+    saveState.value = 'conflict'
+    return
+  }
   saveState.value = 'dirty'
   clearTimeout(saveTimer)
   saveTimer = setTimeout(flushSave, 800)
@@ -1204,6 +1549,11 @@ async function flushSave() {
   saveState.value = 'saving'
   const ok = await store.saveNode({ content: contentDraft.value })
   if (!ok) {
+    if (store.saveConflict) {
+      // 冲突不是网络问题，重试不会自愈：停住自动保存，等人在冲突条里选
+      saveState.value = 'conflict'
+      return false
+    }
     saveState.value = 'error'
     // 自动保存每 800ms 会再试一次；服务端挂着的时候不该每敲一个字弹一遍
     if (!wasError) showNotice(store.error || '保存失败：正文还在页面上，先别关', true)
@@ -1213,6 +1563,38 @@ async function flushSave() {
   return true
 }
 
+/**
+ * 打开替换前先把正文落盘。
+ * 服务端读的是库里那一份，屏幕上还没存上的改动不先进去，替换完回灌草稿时
+ * 就会拿库里的旧字覆盖掉人刚敲的那一段——与换节/回书架/点生成/回滚四个入口同一处理。
+ */
+async function openReplace() {
+  if (!store.work) return
+  if (store.node && !(await flushSave())) {
+    showNotice('正文没存上，先重试保存再替换', true)
+    return
+  }
+  replaceOpen.value = true
+}
+
+/**
+ * 替换落库之后只管屏幕上这一份：树、字数、术语已由 store.replaceText 拉齐。
+ * 当前节也被改到时必须把新正文回灌进草稿并置成 saved，否则屏幕上还是旧字，
+ * 几秒后那一次自动保存会把刚替换好的那段盖回去。
+ */
+async function onReplaced(res) {
+  if (store.node) {
+    await store.selectNode(store.node.id)
+    if (store.node && store.node.content !== contentDraft.value) {
+      contentDraft.value = store.node.content || ''
+      saveState.value = 'saved'
+    }
+  }
+  // 正文换了：右栏的上下文预览与「N 节摘要待重算」要跟着重装配（纯本地，不调模型）
+  await panelRef.value?.refreshContext()
+  showNotice(`已替换 ${res.replaced_nodes} 节里的 ${res.replaced_hits} 处：旧稿在本节「历史」里`)
+}
+
 async function saveTitle() {
   if (!titleDraft.value.trim()) return
   if (!(await store.saveNode({ title: titleDraft.value.trim() }))) {
@@ -1220,8 +1602,32 @@ async function saveTitle() {
   }
 }
 
+/**
+ * 切状态。定稿前先过一道闸：这一节有未处理的硬告警时，把人话摆出来再确认；
+ * 确认过才带 force 重发。取消就把下拉框退回原值——否则屏幕上写着「定稿」，库里还是草稿。
+ */
 async function changeStatus(e) {
-  if (!(await store.saveNode({ status: e.target.value }, { snapshot: true }))) {
+  const el = e.target
+  const next = el.value
+  const opts = { snapshot: true }
+  if (next === 'final') {
+    const gate = await store.finalGate(store.node.id)
+    if (gate?.open_errors) {
+      const lines = gate.issues.map((it) => `· ${it.message}`)
+      if (gate.truncated) lines.push(`· 还有 ${gate.truncated} 条`)
+      const ok = window.confirm(
+        `这一节还有 ${gate.open_errors} 条硬告警：\n${lines.join('\n')}\n\n`
+        + '定稿不会消掉这些告警（要去「告警」里逐条处理）；仍要定稿吗？',
+      )
+      if (!ok) {
+        el.value = store.node.status
+        return
+      }
+      opts.force = true
+    }
+  }
+  if (!(await store.saveNode({ status: next }, opts))) {
+    el.value = store.node?.status || 'draft'
     showNotice(store.error || '状态没存上，再试一次', true)
   }
 }
@@ -1380,11 +1786,43 @@ async function doOutline() {
   await store.generateOutline({ instruction: instruction.value, append })
 }
 
+/** 批量开跑的实际参数：同一个对象既送进预估弹层、也喂给确认后的开跑，
+ *  只定义一处——两边各自靠默认值碰齐，任何一边改了默认口径就静默分家 */
+function batchRunParams() {
+  return { instruction: instruction.value }
+}
+
 async function doPipeline() {
   if (store.pipeline.running || !store.work) return
+  // 不直接开跑：先弹预估——预算超限在 SSE 里才看见就晚了，字已经一个一个烧掉了
+  batchEstMode.value = 'pipeline'
+  batchEstParams.value = batchRunParams()
+  batchEstOpen.value = true
+}
+
+async function doEnqueue() {
+  if (!store.work) return
+  batchEstMode.value = 'batch'
+  batchEstParams.value = batchRunParams()
+  batchEstOpen.value = true
+}
+
+/** 预估弹层确认后真正的开跑：两条批量路各走各的收尾 */
+async function onBatchEstConfirm({ ignoreBudget = false } = {}) {
+  if (batchEstMode.value === 'batch') {
+    await flushSave()
+    const j = await store.enqueueBatch({ ...batchEstParams.value, ignoreBudget })
+    if (!j) {
+      showNotice(store.error || '入队失败（可能是超预算被拦）', true)
+      return
+    }
+    startQueuePoll()
+    if (store.node) await store.selectNode(store.node.id)
+    return
+  }
   await flushSave()
   resetPipeline()
-  await store.runPipeline({ instruction: instruction.value })
+  await store.runPipeline({ ...batchEstParams.value, ignore_budget: ignoreBudget })
 }
 
 // ---- 队列（M4） ----
@@ -1417,25 +1855,84 @@ async function fetchNodeQuietly(id) {
   }
 }
 
-/** 队列写完后把正文换成服务端版本（只在本地没有未保存修改时） */
+/** 队列写完后把正文换成服务端版本（只在本地没有未保存修改时）；返回有没有换 */
 function applyRemoteContent(node) {
-  if (saveState.value === 'dirty' || store.saving) return
+  if (saveState.value === 'dirty' || store.saving) return false
   contentDraft.value = node.content || ''
   store.node = node
   saveState.value = 'saved'
+  return true
 }
 
-async function doEnqueue() {
-  if (!store.work) return
-  await flushSave()
-  const j = await store.enqueueBatch({ instruction: instruction.value })
-  if (!j) return
-  startQueuePoll()
-  if (store.node) await store.selectNode(store.node.id)
+// ---- 双开与异地探测（缺口 5）：轻轮询摸时间戳，事前提示 + 保存时 409 拦 ----
+let metaTimer = 0
+
+function startMetaWatch() {
+  if (metaTimer) return
+  metaTimer = setInterval(checkRemoteMeta, 10000)
+}
+
+function stopMetaWatch() {
+  if (metaTimer) clearInterval(metaTimer)
+  metaTimer = 0
+}
+
+/**
+ * 每 10 秒摸一次当前节的 updated_at（只拿五个字段，不拖全文）。
+ * 库里比手里新就是别处写过：本地已存过就直接换成服务端版并知会一声；
+ * 还有没存上的字就不碰——那一份只有人知道要不要丢，交给保存时的 409 闸与冲突条。
+ * 跑批期间队列轮询每 3 秒已经在拉全文，不叠一份重复的。
+ */
+async function checkRemoteMeta() {
+  const id = store.node?.id
+  if (!id || store.queueActive || store.saveConflict || store.saving) return
+  let meta = null
+  try {
+    const r = await apiFetch(`/studio/nodes/${id}/meta`)
+    if (!r.ok) return
+    meta = await r.json()
+  } catch {
+    return   // 网络抖一下不值得打扰写作
+  }
+  if (Number(meta.updated_at) - Number(store.node.updated_at || 0) <= 1e-6) return
+  if (saveState.value === 'dirty' || saveState.value === 'conflict') return
+  const full = await fetchNodeQuietly(id)
+  if (full && applyRemoteContent(full)) showNotice('这一节被别处更新了，已换成最新版')
+}
+
+/**
+ * 冲突条「取对方版本」：页面里那份未存的改动会被丢弃——所以先 confirm。
+ * 用的是 409 带回的那一整份，不再补一次 GET；base 随之刷新，下一次自动保存正常走。
+ */
+function resolveConflictReload() {
+  const server = store.saveConflict
+  if (!server) return
+  if (!window.confirm('取对方版本会丢弃你页面上还没存上的改动，继续吗？')) return
+  store.saveConflict = null
+  contentDraft.value = server.content || ''
+  store.node = server
+  saveState.value = 'saved'
+  showNotice('已取对方版本；你那份未存的改动没有落库，找不回了')
+}
+
+/** 冲突条「就存我这份」：带放行重发，盖掉的对面那份若没留过版本就真没了，提示实话实说 */
+async function resolveConflictForce() {
+  if (!(await store.saveNode({ content: contentDraft.value }, { ignoreConflict: true }))) {
+    saveState.value = store.saveConflict ? 'conflict' : 'error'
+    if (!store.saveConflict) showNotice(store.error || '强存也没落上，先别关页面', true)
+    return
+  }
+  saveState.value = 'saved'
+  showNotice('已存上你这版；对方刚才写的改动若没留过版本，会被盖掉')
 }
 
 function gotoConsole() {
   router.push({ path: '/admin', query: { tab: 'tasks' } })
+}
+
+/** 整本通读：跳独立阅读页，目录、排版偏好与「回写作台」都在那边 */
+function openReader() {
+  if (store.work) router.push(`/studio/${store.work.id}/read`)
 }
 
 function resetPipeline() {
@@ -1453,8 +1950,15 @@ function openTransform() {
   if (!store.node) return
   const el = editorEl.value
   let sel = ''
+  transformCtx.value = ''
   if (el && el.selectionStart !== el.selectionEnd) {
-    sel = contentDraft.value.slice(el.selectionStart, el.selectionEnd)
+    const s = el.selectionStart
+    const e = el.selectionEnd
+    sel = contentDraft.value.slice(s, e)
+    // 前后各取 800 字：再远就不是「选区语境」而是重读整节了，prompt 也撑
+    const before = contentDraft.value.slice(Math.max(0, s - 800), s)
+    const after = contentDraft.value.slice(e, e + 800)
+    transformCtx.value = [before, after].filter((x) => x.trim()).join('\n【……选区略……】\n')
   }
   selectedText.value = sel
   transformOpen.value = true
@@ -1516,196 +2020,6 @@ async function applyTitle(text, target) {
   background: var(--bg);
 }
 
-/* ---------- 书架 ---------- */
-.shelf {
-  flex: 1;
-  overflow-y: auto;
-  padding: 34px 40px 60px;
-  max-width: 1080px;
-  margin: 0 auto;
-  width: 100%;
-}
-.shelf-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 22px;
-}
-.shelf-head h1 {
-  margin: 0 0 5px;
-  font-family: theme('fontFamily.serif');
-  font-size: 26px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  color: var(--text);
-}
-.shelf-sub {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--text-faint);
-}
-.shelf-tools {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.shelf-search {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 30px;
-  padding: 0 9px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--panel);
-  color: var(--text-faint);
-}
-.shelf-search:focus-within {
-  border-color: rgba(var(--run-rgb), 0.45);
-}
-.shelf-search .field {
-  width: 168px;
-  height: 26px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  font-size: 12px;
-}
-.shelf-search .field:focus {
-  outline: none;
-}
-.shelf-views {
-  display: flex;
-  gap: 6px;
-  margin: -6px 0 18px;
-}
-.view-chip {
-  height: 26px;
-  padding: 0 11px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 12px;
-  font-family: theme('fontFamily.mono');
-  cursor: pointer;
-  transition: color 0.18s var(--ease), background-color 0.18s var(--ease);
-}
-.view-chip:hover {
-  color: var(--text);
-  background: rgba(var(--over), 0.04);
-}
-.view-chip.is-on {
-  /* 主色当小字用必须走 --run-fg：--run 是填充/描边档，在带色的底上不够 */
-  color: var(--run-fg);
-  background: rgba(var(--run-rgb), 0.1);
-}
-.write-log {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin: -6px 0 14px;
-  padding: 8px 12px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-control);
-  background: var(--panel);
-  font-size: 11.5px;
-  color: var(--text-faint);
-}
-.wl-item strong {
-  margin-right: 4px;
-  font-family: theme('fontFamily.mono');
-  font-size: 14px;
-  color: var(--text);
-}
-.wl-days {
-  margin-left: auto;
-  display: flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 26px;
-}
-.wl-bar {
-  width: 4px;
-  min-height: 3px;
-  border-radius: 1px;
-  background: rgba(var(--over), 0.09);
-}
-.wl-bar.is-on {
-  background: rgba(var(--run-rgb), 0.65);
-}
-.ideas {
-  margin-bottom: 18px;
-  padding: 12px 14px;
-  border: 1px dashed var(--line);
-  border-radius: var(--radius-panel);
-}
-.ideas-head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.ideas-head h2 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-}
-.ideas-sub {
-  font-size: 11px;
-  color: var(--text-faint);
-}
-.ideas-add {
-  display: flex;
-  gap: 8px;
-}
-.ideas-add .field {
-  flex: 1;
-  min-width: 0;
-}
-.idea-list {
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 150px;
-  overflow-y: auto;
-}
-.idea-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 6px;
-  border-radius: 5px;
-}
-.idea-row:hover {
-  background: rgba(var(--over), 0.035);
-}
-.idea-text {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.idea-del {
-  border: none;
-  background: transparent;
-  color: var(--text-faint);
-  font-size: 11px;
-  cursor: pointer;
-}
-.idea-del:hover {
-  color: var(--danger);
-}
 .link-btn {
   margin-left: 4px;
   padding: 0;
@@ -1720,18 +2034,6 @@ async function applyTitle(text, target) {
 }
 .link-btn:hover {
   color: var(--text);
-}
-.create {
-  padding: 16px 18px;
-  margin-bottom: 22px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.create-row {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 .fl {
   display: flex;
@@ -1756,122 +2058,19 @@ async function applyTitle(text, target) {
 .fl.small .field {
   width: 110px;
 }
-.create-foot {
-  display: flex;
-  align-items: flex-end;
-  gap: 12px;
+/* ---------- 专注模式 ---------- */
+/* 左树与右栏收起，ed-top 只留返回 / 作品名 / 保存状态 / 退出专注；生成条不动 */
+.is-focus .tree,
+.is-focus .panel {
+  display: none;
 }
-.create-foot .btn {
-  margin-left: auto;
+.is-focus .ed-top .pill,
+.is-focus .ed-right {
+  display: none;
 }
-.err {
-  margin: 0;
-  font-size: 12px;
-  color: var(--danger);
-}
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 12px;
-}
-.work-card {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 15px 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-panel);
-  background: var(--panel);
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 0.18s var(--ease), background-color 0.18s var(--ease);
-}
-.work-del {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s var(--ease), color 0.15s var(--ease);
-}
-.work-arch {
-  position: absolute;
-  top: 8px;
-  right: 34px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s var(--ease), color 0.15s var(--ease);
-}
-.work-card:hover .work-arch,
-.work-card:focus-within .work-arch {
-  opacity: 1;
-}
-.work-arch:hover {
-  color: var(--run);
-  background: rgba(var(--run-rgb), 0.12);
-}
-.work-card:hover .work-del,
-.work-card:focus-within .work-del {
-  opacity: 1;
-}
-.work-del:hover {
-  color: var(--danger);
-  background: rgba(var(--danger-rgb), 0.1);
-}
-.work-card:hover {
+.ed-focus.is-on {
   border-color: rgba(var(--run-rgb), 0.45);
-  background: var(--panel-2);
-}
-.work-kind {
-  font-family: theme('fontFamily.mono');
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   color: var(--run-fg);
-}
-.work-title {
-  font-family: theme('fontFamily.serif');
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--text);
-}
-.work-meta {
-  font-size: 11px;
-  color: var(--text-faint);
-  font-family: theme('fontFamily.mono');
-}
-.work-premise {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-muted);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.shelf-empty {
-  margin-top: 30px;
-  font-size: 13px;
-  color: var(--text-faint);
 }
 
 /* ---------- 编辑器 ---------- */
@@ -2224,6 +2423,49 @@ async function applyTitle(text, target) {
   height: 100%;
   background: var(--run);
 }
+/* ---------- 章内查找条：贴着 ed-head 下面的一行，宽度跟着正文走 ---------- */
+.find-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: min(var(--w-measure, 646px), calc(100% - 64px));
+  margin: 0 auto;
+  padding-bottom: 8px;
+}
+/* 冲突条：与正文同宽、压在 ed-head 下方——它拦的是这一节的保存，不该像全局弹窗 */
+.conflict-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(var(--w-measure, 646px), calc(100% - 64px));
+  margin: 0 auto;
+  padding: 6px 10px;
+  border: 1px solid var(--danger-fg);
+  border-radius: 6px;
+  color: var(--danger-fg);
+  font-size: 12px;
+}
+.conflict-msg {
+  flex: 1;
+  min-width: 0;
+}
+.find-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  font-size: 12px;
+}
+.find-count {
+  font-family: theme('fontFamily.mono');
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.find-bar .mini {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .ed-body {
   flex: 1;
   min-height: 0;
@@ -2231,29 +2473,133 @@ async function applyTitle(text, target) {
   display: flex;
   justify-content: center;
   padding: 0 32px;
+  /* 段落导航浮层锚在这一层 */
+  position: relative;
   /* 护眼档：关的时候是 transparent，开了压一层本主题的暗色分量（--shade-rgb） */
   background: var(--w-tint-bg, transparent);
 }
-.ed-textarea {
+/* 节内段落导航（Ctrl+G） */
+.para-pop {
+  position: absolute;
+  top: 10px;
+  right: 36px;
+  z-index: 30;
+  width: 268px;
+  max-height: 62%;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 14px 36px -18px rgba(var(--shade-rgb), 0.6);
+}
+.para-pop-head {
+  padding: 2px 8px 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.para-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.para-item:hover {
+  background: rgba(var(--over), 0.05);
+}
+.para-item.on {
+  color: var(--text);
+}
+.para-no {
+  flex-shrink: 0;
+  width: 24px;
+  text-align: right;
+  font-family: theme('fontFamily.mono');
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.para-snip {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.para-len {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.para-toggle.is-on {
+  color: var(--run);
+}
+/* 编辑器本体换成了 WriterEditor 组件（衬底/淡化的样式在它自己里），
+   这里只剩窄屏时把它的根节点放宽——组件根带着 ed-editor 类落在这层 DOM 上 */
+
+/* ---------- Markdown 预览（单篇）：版式吃同一组 --w-* 变量，与编辑态一处调 ---------- */
+.md-preview {
   width: min(var(--w-measure, 646px), 100%);
   height: 100%;
-  resize: none;
-  border: none;
-  background: transparent;
-  color: var(--text);
-  /* 排版可调：这几个值都来自 .editor 上的 --w-*，弹层里改一处就跟着变 */
+  overflow-y: auto;
+  padding: 8px 0 30px;
   font-family: var(--w-font, var(--w-serif));
   font-size: var(--w-size, 18px);
   line-height: var(--w-height, 1.9);
   letter-spacing: 0.01em;
-  padding: 8px 0 30px;
-  outline: none;
+  color: var(--text);
 }
-.ed-textarea::placeholder {
-  color: var(--text-faint);
-  font-family: theme('fontFamily.sans');
-  font-size: 13.5px;
-  line-height: 1.7;
+.md-preview :deep(h1),
+.md-preview :deep(h2),
+.md-preview :deep(h3),
+.md-preview :deep(h4) {
+  margin: 1.2em 0 0.6em;
+  font-family: theme('fontFamily.serif');
+  font-weight: 600;
+  line-height: 1.5;
+}
+.md-preview :deep(h1) { font-size: 1.35em; }
+.md-preview :deep(h2) { font-size: 1.2em; }
+.md-preview :deep(h3) { font-size: 1.08em; }
+.md-preview :deep(ul),
+.md-preview :deep(ol) {
+  margin: 0 0 1em;
+  padding-left: 1.6em;
+}
+.md-preview :deep(li) { margin: 0.2em 0; }
+.md-preview :deep(blockquote) {
+  margin: 0 0 1em;
+  padding: 2px 14px;
+  border-left: 3px solid var(--line);
+  color: var(--text-muted);
+}
+.md-preview :deep(pre) {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(var(--over), 0.05);
+  font-family: theme('fontFamily.mono');
+  font-size: 0.85em;
+  line-height: 1.6;
+}
+.md-preview :deep(code) {
+  font-family: theme('fontFamily.mono');
+  font-size: 0.85em;
+}
+.md-preview :deep(hr) {
+  margin: 1.6em 0;
+  border: none;
+  border-top: 1px solid var(--line);
+}
+.md-preview :deep(img) {
+  max-width: 100%;
 }
 
 /* ---------- 操作结果提示（浮在内容外角，不插进布局，不然行高会跳） ---------- */
@@ -2388,6 +2734,10 @@ async function applyTitle(text, target) {
   font-size: 11px;
   color: var(--text-faint);
 }
+.gen-follow {
+  align-self: flex-start;
+  margin-top: 6px;
+}
 
 /* ---------- 整篇流水线进度 ---------- */
 .pipe {
@@ -2481,6 +2831,10 @@ async function applyTitle(text, target) {
   color: var(--text);
   border-color: var(--line-strong);
 }
+.md-toggle.is-on {
+  border-color: rgba(var(--run-rgb), 0.45);
+  color: var(--run-fg);
+}
 
 /* ---------- 生成工具条 ---------- */
 .gen-bar {
@@ -2513,7 +2867,7 @@ async function applyTitle(text, target) {
     padding: 24px 20px 50px;
   }
   .ed-head,
-  .ed-textarea {
+  .ed-body .ed-editor {
     width: 100%;
   }
   .gen-bar {
@@ -2532,8 +2886,7 @@ async function applyTitle(text, target) {
   .spinner {
     animation-duration: 3s;
   }
-  .work-card,
-  .ed-textarea {
+  .work-card {
     transition: none;
   }
 }

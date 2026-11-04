@@ -8,7 +8,7 @@
         :class="{ 'is-active': tab === t.id }"
         role="tab"
         :aria-selected="tab === t.id"
-        @click="tab = t.id"
+        @click="pickTab(t.id)"
       >
         {{ t.label }}
         <span v-if="t.count" class="tab-count">{{ t.count }}</span>
@@ -16,8 +16,65 @@
     </div>
 
     <div class="panel-body" :class="{ 'is-ask': tab === 'ask' }">
+      <!-- 计划：作者对每一节的意图。写正文前先看这里，生成指令也从这里取。 -->
+      <section v-if="tab === 'plan'" class="section">
+        <div class="ctx-head">
+          <span class="hint inline">
+            {{ store.node ? (store.node.title || '当前节') : '未选中节点' }}
+            <template v-if="planDirty"> · 未保存</template>
+          </span>
+          <span v-if="store.node?.ordinal" class="item-meta">第 {{ store.node.ordinal }} 节</span>
+        </div>
+        <p v-if="!store.node" class="empty">先在左边选中一节。</p>
+        <template v-else>
+          <div class="fl">
+            <span>本节要点</span>
+            <textarea
+              v-model="planDraft.prompt"
+              class="field"
+              rows="5"
+              placeholder="这一节要推进什么：谁做了什么、信息怎么变、结尾停在哪"
+            ></textarea>
+          </div>
+          <div class="fl">
+            <span>目标字数</span>
+            <input v-model.number="planDraft.target_words" class="field" type="number" min="0" step="100" />
+          </div>
+          <div class="fl">
+            <span>叙事视角（可选）</span>
+            <input v-model="planDraft.pov" class="field" placeholder="如：第三人称限知，跟林昭" />
+          </div>
+          <div class="fl">
+            <span>故事内时间 / 地点（可选）</span>
+            <input v-model="planDraft.time" class="field" placeholder="如：入冬后第三天" />
+            <input v-model="planDraft.place" class="field" placeholder="如：青云宗后山" />
+          </div>
+          <div class="fl">
+            <span>节拍卡</span>
+            <textarea
+              v-model="beatsDraft"
+              class="field"
+              rows="6"
+              placeholder="出场 / 地点 / 事件 / 变化 / 钩子；按顺序推进"
+            ></textarea>
+          </div>
+          <div class="row-act">
+            <button class="btn btn-sm" :disabled="planBusy" @click="savePlan">
+              {{ planBusy ? '保存中…' : '保存计划' }}
+            </button>
+            <button class="btn btn-sm" :disabled="beatsBusy" @click="regenBeats">
+              {{ beatsBusy ? '重抽中…' : '重抽节拍' }}
+            </button>
+          </div>
+          <p class="hint">
+            计划会进入本节的生成指令；节拍卡按顺序推进，重抽会覆盖当前节拍。
+            老作品的大纲要点会在第一次保存时落到本节。
+          </p>
+        </template>
+      </section>
+
       <!-- 素材 -->
-      <section v-if="tab === 'sources'" class="section">
+      <section v-else-if="tab === 'sources'" class="section">
         <div class="src-top">
           <p class="hint inline">生成时按本节标题与提示词检索素材，命中不了才退回最近导入的；素材桶总预算约 4500 字。</p>
           <button class="btn btn-sm" @click="srcAdding = !srcAdding">
@@ -286,6 +343,90 @@
         </div>
       </section>
 
+      <!-- 模板：写什么（骨架）× 发到哪（渠道）。文风在上一页，三者互不影响 -->
+      <section v-else-if="tab === 'template'" class="section">
+        <p class="hint">
+          模板管「写什么」（几节、每节管什么），渠道管「发到哪」（段落节奏、配图位、平台禁忌）。
+          换模板不改语气，换渠道不改骨架。
+        </p>
+
+        <div class="blk">
+          <div class="blk-head">
+            <span class="blk-title">当前模板</span>
+            <span class="hint inline">{{ currentTemplate ? currentTemplate.name : '没套模板' }}</span>
+          </div>
+          <label class="fl">
+            <span>换模板</span>
+            <select v-model="tplPick" class="field" @change="switchTemplate">
+              <option value="">不套模板（只按文体要求写）</option>
+              <option v-for="t in tplCandidates" :key="t.id" :value="t.id">
+                {{ t.name }} · {{ t.outline.length }} 节
+              </option>
+            </select>
+          </label>
+          <!-- 这句必须说：换模板后旧节不会重写，否则会以为点一下就全重生成了 -->
+          <p class="hint">只影响后面生成的节：已写节点的要点存在 meta_json.outline 里，不会被改。要重写哪一节就单独重生它。</p>
+
+          <label class="fl">
+            <span>渠道</span>
+            <select v-model="channelPick" class="field" @change="switchChannel">
+              <option value="">不指定</option>
+              <option v-for="c in store.channels" :key="c.id" :value="c.id">{{ c.label }}</option>
+            </select>
+          </label>
+          <p class="hint">下一节生成时生效：平台要求会单独一段进 S1，不会和文体要求混在一起。</p>
+        </div>
+
+        <div class="blk">
+          <div class="blk-head">
+            <span class="blk-title">骨架</span>
+            <button class="btn btn-sm" :disabled="!canEditOutline || tplBusy" @click="saveOutline">
+              {{ tplBusy ? '保存中…' : '保存骨架' }}
+            </button>
+          </div>
+          <p v-if="currentTemplate && currentTemplate.is_builtin" class="hint">
+            内置模板只读：下面只能看。要改就用「另存为我的模板」，改副本。
+          </p>
+          <div v-for="(s, i) in outlineDraft" :key="i" class="tpl-sec">
+            <div class="tpl-sec-head">
+              <span class="tpl-sec-no">{{ i + 1 }}</span>
+              <input v-model="s.heading" class="field" placeholder="节标题" :disabled="!canEditOutline" />
+              <input
+                v-model.number="s.target_words"
+                class="field tpl-words"
+                type="number" min="0" step="100"
+                :disabled="!canEditOutline"
+              />
+              <button v-if="canEditOutline" class="mini-btn" title="删掉这一节" @click="removeSection(i)">
+                <AppIcon name="trash" :size="12" />
+              </button>
+            </div>
+            <textarea v-model="s.prompt" class="field" rows="2" placeholder="这一节要写什么"
+                      :disabled="!canEditOutline"></textarea>
+          </div>
+          <p v-if="!outlineDraft.length" class="empty">
+            这套模板还没有节。没有骨架时 S0 不出内容，就成了无结构写作。
+          </p>
+          <button v-if="canEditOutline" class="btn btn-sm" @click="addSection">+ 加一节</button>
+        </div>
+
+        <div class="blk">
+          <div class="blk-head">
+            <span class="blk-title">沉淀与复用</span>
+          </div>
+          <div class="row-act">
+            <button class="btn btn-sm" :disabled="!currentTemplate || tplBusy" @click="saveAsMine">
+              另存为我的模板
+            </button>
+            <button class="btn btn-sm" :disabled="tplBusy" @click="sedimentFromWork">
+              {{ tplBusy ? '处理中…' : '从本篇沉淀模板' }}
+            </button>
+          </div>
+          <p v-if="tplNote" class="hint">{{ tplNote }}</p>
+          <p class="hint">沉淀是把本篇的节标题与节拍卡直接抽成骨架，不调模型，也不改原稿。</p>
+        </div>
+      </section>
+
       <!-- 上下文 -->
       <section v-else-if="tab === 'context'" class="section">
         <!-- 记忆状态：索引与摘要。没建索引时 S4/S5 是空的，先在这里看得到 -->
@@ -452,6 +593,10 @@
             <div v-for="f in graphForeshadows" :key="f.id" class="g-fs">
               <span class="g-fs-ord">第{{ f.planted_ordinal }}节</span>
               <span>{{ f.content }}</span>
+              <div class="row-act">
+                <button class="btn btn-sm" @click="resolveForeshadow(f, 'resolved')">回收</button>
+                <button class="btn btn-sm" @click="resolveForeshadow(f, 'abandoned')">弃用</button>
+              </div>
             </div>
           </template>
         </template>
@@ -465,7 +610,10 @@
               <span class="item-meta">{{ KIND_LABEL[c.kind] || c.kind }}</span>
             </div>
             <p v-if="c.summary" class="hint">{{ c.summary }}</p>
-            <button class="btn btn-sm" @click="store.deleteCard(c.id)">删</button>
+            <div class="row-act">
+              <button class="btn btn-sm" @click="editCard(c)">编辑</button>
+              <button class="btn btn-sm" @click="store.deleteCard(c.id)">删</button>
+            </div>
           </div>
           <div class="fl">
             <select v-model="cardForm.kind" class="field">
@@ -479,7 +627,12 @@
               <option value="destroyed">已毁</option>
               <option value="missing">下落不明</option>
             </select>
-            <button class="btn btn-sm" @click="submitCard">加卡</button>
+            <div class="row-act">
+              <button class="btn btn-sm" @click="submitCard">
+                {{ cardForm.id ? '保存卡' : '加卡' }}
+              </button>
+              <button v-if="cardForm.id" class="btn btn-sm" @click="cancelCard">取消</button>
+            </div>
           </div>
           <p class="hint">
             设定卡是权威：抽取时会作为硬约束注入，状态从「第 N 节」起生效。
@@ -542,7 +695,7 @@
           <p v-if="i.evidence" class="issue-ev">{{ i.evidence }}</p>
           <div class="issue-act">
             <button v-if="i.evidence" class="btn btn-sm" @click="emit('locate', i.evidence)">定位</button>
-            <button class="btn btn-sm" @click="store.resolveIssue(i.id)">忽略</button>
+            <button class="btn btn-sm" @click="ignoreIssue(i)">忽略</button>
           </div>
         </div>
 
@@ -557,7 +710,7 @@
             <p v-if="i.evidence" class="issue-ev">{{ i.evidence }}</p>
             <div class="issue-act">
               <button v-if="i.evidence" class="btn btn-sm" @click="emit('locate', i.evidence)">定位</button>
-              <button class="btn btn-sm" @click="store.resolveIssue(i.id)">就是这样</button>
+              <button class="btn btn-sm" @click="ignoreIssue(i, '就是这样')">就是这样</button>
             </div>
           </div>
         </template>
@@ -582,7 +735,10 @@
     <GraphMap
       v-model:open="graphOpen"
       :graph="store.graphData"
+      :work-id="store.work?.id || ''"
       @locate="(t) => emit('locate', t)"
+      @goto-node="(id) => emit('goto-node', id)"
+      @update-entity="saveEntity"
     />
 
     <VersionDiff
@@ -611,7 +767,7 @@ const props = defineProps({
   // /chat/:id 老链接带过来的会话
   initialConv: { type: String, default: '' },
 })
-const emit = defineEmits(['locate', 'restore'])
+const emit = defineEmits(['locate', 'restore', 'goto-node'])
 
 const store = useStudioStore()
 const tab = ref('sources')
@@ -728,6 +884,137 @@ async function saveProfile() {
   await store.saveVoiceProfile(profileDraft.value)
 }
 
+// ---- 模板：写什么（骨架）× 发到哪（渠道），与上一页的文风互不影响 ----
+const tplPick = ref('')
+const channelPick = ref('')
+const currentTemplate = ref(null)
+const tplCandidates = ref([])
+const outlineDraft = ref([])
+const tplBusy = ref(false)
+const tplNote = ref('')
+
+// 只读判断落在 is_builtin 上：内置行每次启动都被 YAML 覆盖，改了下一次就是白干
+const canEditOutline = computed(
+  () => Boolean(currentTemplate.value) && !Number(currentTemplate.value.is_builtin || 0),
+)
+
+async function loadTemplatePanel() {
+  const w = store.work
+  tplPick.value = w?.template_id || ''
+  channelPick.value = w?.channel || ''
+  currentTemplate.value = null
+  outlineDraft.value = []
+  tplNote.value = ''
+  if (!w) return
+  // 候选只按文种筛，不按 subtype/channel 硬筛：同一套骨架换个平台照样能用，
+  // 筛掉只会让人以为没得选
+  tplCandidates.value = await store.loadTemplateLib({ kind: w.kind || 'article' })
+  // 当前这套单独取：它可能属于别的文种，混在筛过的列表里会显示成「没套模板」
+  currentTemplate.value = await store.loadTemplate(w.template_id)
+  outlineDraft.value = (currentTemplate.value?.outline || []).map((s) => ({ ...s }))
+}
+
+async function switchTemplate() {
+  // 空串 = 明确「不套模板」；发 null 会被服务端当成「这个字段没改」而丢掉
+  const ok = await store.updateWork({ template_id: tplPick.value || '' })
+  if (!ok) return
+  await loadTemplatePanel()
+  tplNote.value = currentTemplate.value
+    ? `已切到「${currentTemplate.value.name}」，下一节起按这套骨架写。`
+    : '已取消模板：下一节起只按文体要求写，不再有固定骨架。'
+}
+
+async function switchChannel() {
+  const ok = await store.updateWork({ channel: channelPick.value })
+  if (!ok) return
+  tplNote.value = channelPick.value
+    ? `下一节起按「${store.channelLabel(channelPick.value)}」的节奏写，平台要求单独一段进 S1。`
+    : '下一节起不再叠加平台要求。'
+}
+
+async function saveOutline() {
+  if (!currentTemplate.value || !canEditOutline.value) return
+  tplBusy.value = true
+  try {
+    const clean = outlineDraft.value
+      .map((s) => ({
+        heading: (s.heading || '').trim(),
+        prompt: (s.prompt || '').trim(),
+        target_words: Number(s.target_words) || 0,
+      }))
+      .filter((s) => s.heading)
+    if (!clean.length) {
+      tplNote.value = '至少要留一节：没有骨架时 S0 不出内容，就成了无结构写作。'
+      return
+    }
+    const got = await store.updateTemplate(currentTemplate.value.id, { outline: clean })
+    if (!got) return
+    currentTemplate.value = got
+    outlineDraft.value = (got.outline || []).map((s) => ({ ...s }))
+    tplNote.value = `骨架已保存（${clean.length} 节）。`
+  } finally {
+    tplBusy.value = false
+  }
+}
+
+function addSection() {
+  outlineDraft.value.push({ heading: '', prompt: '', target_words: 800 })
+}
+
+function removeSection(i) {
+  outlineDraft.value.splice(i, 1)
+}
+
+async function saveAsMine() {
+  const t = currentTemplate.value
+  if (!t) return
+  tplBusy.value = true
+  try {
+    // 用编辑框里这份而不是库里的：刚改完骨架还没点保存时，「另存」应当带上改过的内容
+    const got = await store.createTemplate({
+      kind: t.kind || store.work?.kind || 'article',
+      name: `${t.name}（我的副本）`.slice(0, 80),
+      subtype: t.subtype || '',
+      channel: t.channel || '',
+      outline: outlineDraft.value
+        .map((s) => ({
+          heading: (s.heading || '').trim(),
+          prompt: (s.prompt || '').trim(),
+          target_words: Number(s.target_words) || 0,
+        }))
+        .filter((s) => s.heading),
+      style_prompt: t.style_prompt || '',
+      checks: t.checks || [],
+      tags: t.tags || [],
+      note: t.note || '',
+    })
+    if (!got) return
+    // 复制完直接切过去：这一步本来就是「我要改这套内置模板」，切过去才好接着改
+    await store.updateWork({ template_id: got.id })
+    await loadTemplatePanel()
+    tplNote.value = `已另存为「${got.name}」并切到这份副本上，现在可以改骨架了。`
+  } finally {
+    tplBusy.value = false
+  }
+}
+
+async function sedimentFromWork() {
+  if (!store.work) return
+  tplBusy.value = true
+  try {
+    const got = await store.templateFromWork(store.work.id)
+    if (!got) return
+    const n = (got.outline || []).length
+    // 服务端超 30 节会截断，说清楚取了多少，否则会以为整本都进去了
+    tplNote.value = got.truncated
+      ? `已沉淀「${got.name}」：取前 ${n} 节，另有 ${got.truncated} 节因超过 30 节上限没进来。`
+      : `已沉淀「${got.name}」：${n} 节。可在控制台「配置 → 模板」里改名或设为默认。`
+    await loadTemplatePanel()
+  } finally {
+    tplBusy.value = false
+  }
+}
+
 // ---- 图谱 ----
 const KIND_LABEL = {
   character: '人物', location: '地点', item: '物品',
@@ -749,8 +1036,95 @@ const graphForeshadows = computed(() =>
   (store.graphData?.foreshadows || []).filter((f) => f.status === 'open')
 )
 const graphCards = computed(() => store.graphData?.cards || [])
-const cardForm = ref({ kind: 'character', name: '', summary: '', status: '' })
+const cardForm = ref({ id: '', kind: 'character', name: '', summary: '', status: '', data: {} })
 const graphOpen = ref(false)
+
+// ---- 计划：作者对每一节的意图 ----
+const planDraft = ref({ prompt: '', target_words: 0, pov: '', time: '', place: '' })
+const beatsDraft = ref('')
+const planBusy = ref(false)
+const beatsBusy = ref(false)
+
+function parsePlan(node) {
+  try {
+    const got = JSON.parse(node?.plan_json || '{}')
+    return got && typeof got === 'object' ? got : {}
+  } catch {
+    return {}
+  }
+}
+
+function legacyPlan(nodeId) {
+  try {
+    const meta = JSON.parse(store.work?.meta_json || '{}')
+    const got = meta?.outline?.[nodeId]
+    return got && typeof got === 'object' ? got : {}
+  } catch {
+    return {}
+  }
+}
+
+function cleanPlan(plan) {
+  const out = {}
+  for (const key of ['prompt', 'pov', 'time', 'place']) {
+    const val = String(plan?.[key] || '').trim()
+    if (val) out[key] = val
+  }
+  const target = Number(plan?.target_words || 0)
+  if (target > 0) out.target_words = Math.round(target)
+  return out
+}
+
+function syncPlanDraft() {
+  const node = store.node
+  if (!node) {
+    planDraft.value = { prompt: '', target_words: 0, pov: '', time: '', place: '' }
+    beatsDraft.value = ''
+    return
+  }
+  const plan = parsePlan(node)
+  const legacy = legacyPlan(node.id)
+  planDraft.value = {
+    prompt: plan.prompt || legacy.prompt || '',
+    target_words: Number(plan.target_words || legacy.target_words || 0),
+    pov: plan.pov || '',
+    time: plan.time || '',
+    place: plan.place || '',
+  }
+  beatsDraft.value = node.summary || ''
+}
+
+const planDirty = computed(() => {
+  if (!store.node) return false
+  const saved = cleanPlan(parsePlan(store.node))
+  const now = cleanPlan(planDraft.value)
+  return JSON.stringify(saved) !== JSON.stringify(now)
+    || (beatsDraft.value || '').trim() !== (store.node.summary || '').trim()
+})
+
+async function savePlan() {
+  if (!store.node || planBusy.value) return
+  planBusy.value = true
+  try {
+    await store.saveNode({
+      plan_json: cleanPlan(planDraft.value),
+      summary: beatsDraft.value,
+    })
+  } finally {
+    planBusy.value = false
+  }
+}
+
+async function regenBeats() {
+  if (!store.node || beatsBusy.value) return
+  beatsBusy.value = true
+  try {
+    const got = await store.generateBeats({ focus: planDraft.value.prompt })
+    if (got?.beats) beatsDraft.value = got.beats
+  } finally {
+    beatsBusy.value = false
+  }
+}
 
 // 缩略图不跑力导向：那要量尺寸、还会抽帧抖一阵；环形定死位置就够看出密度和孤岛。
 // 两个上限（44 点 / 140 线）是为了不让 300px 宽的图变成一团黑。
@@ -781,7 +1155,10 @@ const thumbLinks = computed(() =>
 
 // ---- 历史（版本） ----
 // 来源标签必须与库里的 source 枚举对齐：都是 ai_draft，作者得分清哪条是模型抽风
-const SOURCE_LABEL = { ai_draft: 'AI 草稿', ai_polish: 'AI 润色', human: '手改' }
+// bulk_replace 单独一档：整本书换名那一趟不是人一个字一个字敲的，也不该算进今天的字数
+const SOURCE_LABEL = {
+  ai_draft: 'AI 草稿', ai_polish: 'AI 润色', human: '手改', bulk_replace: '批量替换',
+}
 const diffOpen = ref(false)
 const diffVersion = ref(null)
 const newestNo = computed(() => store.versions[0]?.version_no ?? -1)
@@ -814,6 +1191,11 @@ const RULE_LABEL = {
   structure_incomplete: '结构不完整',
   address_drift: '称呼待确认', setting_conflict: '设定待确认',
   absolute_claim: '绝对化表述', number_unsourced: '数字无出处',
+  phrase_repeat: '自我重复',
+  // 审校（proofread）：warn 四条进硬告警栏但不拦定稿，info 三条进待确认
+  halfwidth_punct: '半角标点', punct_unbalanced: '符号不配对', punct_cluster: '标点连用',
+  char_repeat: '叠字残留', long_sentence: '超长单句', de_density: '的字堆叠',
+  long_paragraph: '超长段落',
 }
 const hardIssues = computed(() => store.issues.filter((i) => i.severity !== 'info'))
 const softIssues = computed(() => store.issues.filter((i) => i.severity === 'info'))
@@ -833,14 +1215,60 @@ async function doExtract({ all = false, force = false } = {}) {
 
 async function submitCard() {
   if (!cardForm.value.name.trim()) return
-  const data = cardForm.value.status ? { status: cardForm.value.status } : {}
+  const data = { ...(cardForm.value.data || {}) }
+  if (cardForm.value.status) data.status = cardForm.value.status
+  else delete data.status
   const ok = await store.addCard({
+    id: cardForm.value.id,
     kind: cardForm.value.kind,
     name: cardForm.value.name.trim(),
     summary: cardForm.value.summary.trim(),
     dataJson: JSON.stringify(data),
   })
-  if (ok) cardForm.value = { kind: 'character', name: '', summary: '', status: '' }
+  if (ok) cardForm.value = { id: '', kind: 'character', name: '', summary: '', status: '', data: {} }
+}
+
+function editCard(card) {
+  let data = {}
+  try {
+    const got = JSON.parse(card.data_json || '{}')
+    if (got && typeof got === 'object') data = got
+  } catch {
+    data = {}
+  }
+  cardForm.value = {
+    id: card.id,
+    kind: card.kind,
+    name: card.name,
+    summary: card.summary || '',
+    status: String(data.status || ''),
+    data,
+  }
+}
+
+function cancelCard() {
+  cardForm.value = { id: '', kind: 'character', name: '', summary: '', status: '', data: {} }
+}
+
+async function resolveForeshadow(f, status) {
+  const ordinal = status === 'resolved' ? Number(store.node?.ordinal || 0) : 0
+  await store.resolveForeshadow(f.id, status, ordinal)
+}
+
+async function ignoreIssue(issue, label = '忽略') {
+  const note = window.prompt(`${label}的原因（可留空，之后还能在库里查到）`, '')
+  if (note === null) return
+  await store.resolveIssue(issue.id, note)
+}
+
+async function saveEntity(patch, done) {
+  let ok = false
+  try {
+    ok = await store.updateEntity(patch.id, patch)
+  } finally {
+    // 网络异常也要把表单解锁，否则「保存中…」会一直挂着
+    if (typeof done === 'function') done(ok)
+  }
 }
 
 async function doCheck(whole) {
@@ -850,10 +1278,13 @@ async function doCheck(whole) {
 
 const tabs = computed(() => {
   const all = [
+    // 计划排第一：写小说时最常改的是「这一节要发生什么」，不是素材列表
+    { id: 'plan', label: '计划', count: 0, novelOnly: true },
     { id: 'sources', label: '素材', count: store.sources.length },
     { id: 'facts', label: '事实', count: store.facts.length },
     { id: 'terms', label: '术语', count: store.terms.length },
     { id: 'style', label: '文风', count: 0 },
+    { id: 'template', label: '模板', count: 0 },
     { id: 'graph', label: '图谱', count: graphEntities.value.length, novelOnly: true },
     { id: 'context', label: '上下文', count: 0 },
     { id: 'versions', label: '历史', count: store.versions.length },
@@ -865,11 +1296,20 @@ const tabs = computed(() => {
   return all.filter((t) => !t.novelOnly || store.isNovel)
 })
 
+const tabTouched = ref(false)
+function pickTab(id) {
+  tab.value = id
+  tabTouched.value = true
+}
+
 // 写作台 URL 的 ?panel=ask 直达：放在 tabs 定义之后，immediate 时才不会碰到 TDZ
 watch(
   () => props.initialTab,
   (v) => {
-    if (v && tabs.value.some((t) => t.id === v)) tab.value = v
+    if (v && tabs.value.some((t) => t.id === v)) {
+      tab.value = v
+      tabTouched.value = true
+    }
   },
   { immediate: true },
 )
@@ -886,10 +1326,25 @@ async function loadAll() {
     store.loadVoice(),
   ])
   loadStyle()
+  loadTemplatePanel()
+  // 计划是小说写作的主入口：第一次打开自动落在这一页；
+  // 用户点过别的 tab 之后就不再抢。
+  if (!tabs.value.some((t) => t.id === tab.value)) {
+    tab.value = tabs.value[0]?.id || 'sources'
+  } else if (store.isNovel && !tabTouched.value) {
+    tab.value = 'plan'
+  }
+  syncPlanDraft()
 }
 
 // 画像变了就刷新编辑框（重新统计、加/删样本都会走到这里）
 watch(() => store.voice.profile, (v) => { profileDraft.value = v || '' }, { immediate: true })
+// 计划草稿跟节点走；保存后 node 会换成新对象，这里也会重新对齐
+watch(() => store.node?.id, syncPlanDraft, { immediate: true })
+watch(
+  [() => store.node?.plan_json, () => store.node?.summary],
+  syncPlanDraft,
+)
 onMounted(loadAll)
 watch(() => store.activeWorkId, loadAll)
 
@@ -1785,5 +2240,32 @@ defineExpose({ refreshContext })
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+/* 骨架逐节编辑：序号 + 标题 + 字数挤一行，要点折到下一行 */
+.tpl-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--line-soft);
+}
+.tpl-sec:last-of-type {
+  border-bottom: 0;
+}
+.tpl-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tpl-sec-no {
+  width: 18px;
+  flex: none;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.tpl-words {
+  width: 84px;
+  flex: none;
 }
 </style>

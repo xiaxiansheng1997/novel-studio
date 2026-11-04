@@ -1,13 +1,14 @@
 /**
- * 正文编辑器的排版偏好：字号 / 行距 / 段宽 / 字体 / 护眼。
+ * 正文编辑器的排版偏好：字号 / 行距 / 段宽 / 字体 / 护眼 / 专注淡化 / 打字机滚动。
  *
  * 只存 localStorage，不进后端 —— 这是「我在这台机器上看着舒服」，不是作品的属性；
  * 换台电脑打开同一篇，正文一个字不差，只是显示口味回到默认，这样才对。
  *
- * 落地方式：值拼成 --w-* 变量写在编辑器根节点（StudioView 的 .editor）上，
- * 正文样式靠继承读它们，所以 textarea 的 CSS 里只有 var(--w-size) 这种引用，
- * 没有第二份需要跟着改的常量。字体栈本体也不在这里：那里只存档位 id，
- * 对应的 --w-<id> 由 .editor 从 Tailwind theme 里给全。
+ * 落地方式：值拼成 --w-* 变量写在排版根节点（StudioView 的 .editor、
+ * ReadView 的 .read）上，正文样式靠继承读它们，所以 textarea 的 CSS 里只有
+ * var(--w-size) 这种引用，没有第二份需要跟着改的常量。字体栈本体也不在这里：
+ * 那里只存档位 id，对应的 --w-<id> 由两个宿主各自从 Tailwind theme 里给全——
+ * 哪个宿主漏了四个字体变量，那个页面的正文就掉回浏览器默认字体。
  */
 import { computed, ref } from 'vue'
 
@@ -42,6 +43,10 @@ const DEFAULTS = {
   measure: 'std',
   font: 'serif',
   tint: false,
+  // 专注淡化：非当前段压成底纹；打字机：正在写的那行留在纸面偏上处。
+  // 两个都默认关：衬底同步是锦上添花，不该在用户没要求时改变他看到的正文
+  focusDim: false,
+  typewriter: false,
 }
 
 function readNumber(key, allowed, fallback) {
@@ -68,6 +73,8 @@ function load() {
       measure: MEASURES.some((m) => m.id === measure) ? measure : DEFAULTS.measure,
       font: readFont(),
       tint: localStorage.getItem(PREFIX + 'tint') === '1',
+      focusDim: localStorage.getItem(PREFIX + 'focusDim') === '1',
+      typewriter: localStorage.getItem(PREFIX + 'typewriter') === '1',
     }
   } catch {
     // 隐私模式下 localStorage 会抛：排版退回默认值就行，写作不能因此中断
@@ -125,6 +132,16 @@ export function setFont(id) {
 export function setTint(tint) {
   writer.value = { ...writer.value, tint: !!tint }
   persist('tint', tint ? '1' : '0')
+}
+
+export function setFocusDim(on) {
+  writer.value = { ...writer.value, focusDim: !!on }
+  persist('focusDim', on ? '1' : '0')
+}
+
+export function setTypewriter(on) {
+  writer.value = { ...writer.value, typewriter: !!on }
+  persist('typewriter', on ? '1' : '0')
 }
 
 export function resetWriter() {

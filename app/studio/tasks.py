@@ -127,7 +127,7 @@ async def run_beats(ctx: TaskContext) -> dict[str, Any]:
     if not node:
         raise ValueError("beats 任务需要 node_id")
     meta = prompting.work_meta(ctx.work)
-    focus = str(((meta.get("outline") or {}).get(node["id"]) or {}).get("prompt") or "")
+    focus = prompting.node_outline(node, meta).get("prompt") or ""
     prev = await _prev_summary(ctx.store, ctx.work["id"], int(node.get("ordinal") or 0))
     # 已抽出的实体优先：第一章之前图谱为空，那就只靠 focus
     known = [e["name"] for e in await ctx.store.list_entities(ctx.work["id"])]

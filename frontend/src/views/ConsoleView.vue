@@ -66,11 +66,42 @@
             <span class="card-title">Provider 状态</span>
             <span class="card-sub">{{ readyCount }}/{{ providers.length }} 就绪</span>
             <span class="head-spacer"></span>
+            <button class="btn btn-sm" @click="openCompatDialog(null)">新增通道</button>
             <button class="btn btn-sm" @click="openLive()">打开内置浏览器</button>
           </div>
           <div class="card-body">
             <div class="provider-cards">
               <article v-for="p in providers" :key="p.provider" class="provider-card">
+                <!-- 直连通道：没有登录态/profile/浏览器可谈，卡片只报
+                     地址、key 状态、模型与就绪——拿反代那三个点画它全是误导 -->
+                <template v-if="p.compat">
+                  <div class="pc-head">
+                    <div class="pc-name-wrap">
+                      <span class="pc-name">{{ p.display_name || p.provider }}</span>
+                      <span class="pc-key">{{ p.provider }}</span>
+                    </div>
+                    <span class="pill pill--info">直连通道</span>
+                    <span class="pill" :class="p.enabled === false ? 'pill--off' : (p.ready ? 'pill--on' : 'pill--warn')">
+                      {{ p.enabled === false ? '已停用' : (p.ready ? '就绪' : '未就绪') }}
+                    </span>
+                  </div>
+                  <p class="pc-base mono" :title="p.base_url || ''">{{ p.base_url || '没填 base_url' }}</p>
+                  <p class="pc-keyline" :class="{ 'is-bad': p.key_source === 'none' }">{{ keyLine(p) }}</p>
+                  <div class="pc-models">
+                    <span v-for="m in (p.models || [])" :key="m" class="tag mono" :title="m">{{ m }}</span>
+                    <span v-if="!(p.models || []).length" class="pc-no-model">暂无模型</span>
+                  </div>
+                  <div class="pc-actions">
+                    <button class="pc-link" type="button" @click="openCompatDialog(p)">配置</button>
+                    <button class="pc-link" type="button" :disabled="testingProvider === p.provider" @click="testCompat(p)">
+                      {{ testingProvider === p.provider ? '测试中…' : '测试' }}
+                    </button>
+                    <span v-if="compatTestText[p.provider]" class="pc-test-note" :class="{ 'is-bad': compatTestBad[p.provider] }">
+                      {{ compatTestText[p.provider] }}
+                    </span>
+                  </div>
+                </template>
+                <template v-else>
                 <div class="pc-head">
                   <div class="pc-name-wrap">
                     <span class="pc-name">{{ p.display_name || p.provider }}</span>
@@ -116,6 +147,7 @@
                   打开 {{ p.provider }} 浏览器
                   <AppIcon name="chevronRight" :size="13" />
                 </button>
+                </template>
               </article>
               <div v-if="!providers.length" class="empty-block">
                 <AppIcon name="cpu" :size="18" />
@@ -124,6 +156,12 @@
             </div>
           </div>
         </section>
+
+        <CompatDialog
+          v-model:open="compatOpen"
+          :entry="compatEntry"
+          @saved="onCompatSaved"
+        />
 
         <section class="card">
           <div class="card-head">
@@ -151,7 +189,7 @@
               <span class="action-icon"><AppIcon name="database" :size="16" /></span>
               <span class="action-text">
                 <strong>数据与发布台账</strong>
-                <small>删除备份恢复、公众号发布记录</small>
+                <small>生成成本与质量、删除备份恢复、公众号发布记录</small>
               </span>
               <AppIcon name="chevronRight" :size="15" class="action-arrow" />
             </button>
@@ -366,6 +404,146 @@
 
       <!-- ---------- 数据：发布台账 / 备份（批次四从写作台迁入） ---------- -->
       <section v-else-if="tab === 'data'" class="tab-pane" role="tabpanel">
+        <!-- 成本与质量：runs 现算，不另记一份账 -->
+        <section class="card">
+          <div class="card-head">
+            <span class="card-title">生成成本与质量</span>
+            <span class="card-sub">runs 现算：按作品与按节汇总耗时、输出与评分</span>
+            <span class="head-spacer"></span>
+            <span class="card-sub">
+              {{ cqOverall.last_at ? '最近 ' + fmtStamp(cqOverall.last_at) : '还没有生成记录' }}
+            </span>
+          </div>
+          <div class="card-body">
+            <div class="q-stats">
+              <span class="q-stat"><b>{{ cqOverall.runs || 0 }}</b> 次调用</span>
+              <span class="q-stat" :class="{ 'is-bad': cqOverall.failed }">
+                <b>{{ cqOverall.failed || 0 }}</b> 失败
+              </span>
+              <span v-if="cqOverall.running" class="q-stat"><b>{{ cqOverall.running }}</b> 进行中</span>
+              <span class="q-stat"><b>{{ fmtDur(cqOverall.elapsed_ms) }}</b> 总耗时</span>
+              <span class="q-stat"><b>{{ fmtDur(cqOverall.avg_elapsed_ms) }}</b> 每次</span>
+              <span class="q-stat"><b>{{ fmtChars(cqOverall.output_chars) }}</b> 输出</span>
+              <span class="q-stat">
+                <b>{{ fmtScore(cqOverall.avg_score) }}</b> 均分<template v-if="cqOverall.scored">（{{ cqOverall.scored }} 次评分）</template>
+              </span>
+            </div>
+            <!-- 任务分解只在多于一种时才有信息量；只有一种就是上面那一行 -->
+            <div v-if="cqByTask.length > 1" class="q-triage-list cq-tasks">
+              <span v-for="t in cqByTask" :key="t.task_type" class="q-triage-item">
+                {{ t.task_type }} <b>{{ t.runs }}</b> 次 · {{ fmtDur(t.elapsed_ms) }}
+                <template v-if="t.avg_score != null">· 均分 {{ fmtScore(t.avg_score) }}</template>
+              </span>
+            </div>
+            <p v-if="!cqWorks.length" class="hint-line">
+              还没有生成记录：跑过一章或一版改写之后，这里会出现成本账。
+            </p>
+            <p v-else class="hint-line">
+              总耗时是各次跑批 elapsed_ms 之和；「每次」只除已结束的跑批。均分只算打过分的，
+              没打分不计入，也不按 0 分算；「硬告警」只数未处理的 error 级。
+            </p>
+          </div>
+          <div v-if="cqWorks.length" class="table-wrap">
+            <table class="req-table">
+              <thead>
+                <tr>
+                  <th>作品</th>
+                  <th class="col-ms">调用</th>
+                  <th class="col-ms">失败</th>
+                  <th class="col-ms">总耗时</th>
+                  <th class="col-ms">每次</th>
+                  <th class="col-ms">输出</th>
+                  <th class="col-ms">均分</th>
+                  <th class="col-ms">硬告警</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="w in cqWorks" :key="w.work_id">
+                  <td class="path-cell" :title="w.work_id">{{ w.work_title || w.work_id }}</td>
+                  <td class="mono col-ms">{{ w.runs }}</td>
+                  <td class="mono col-ms" :class="{ 'cq-bad': w.failed }">{{ w.failed }}</td>
+                  <td class="mono col-ms">{{ fmtDur(w.elapsed_ms) }}</td>
+                  <td class="mono col-ms">{{ fmtDur(w.avg_elapsed_ms) }}</td>
+                  <td class="mono col-ms">{{ fmtChars(w.output_chars) }}</td>
+                  <td class="mono col-ms">{{ fmtScore(w.avg_score) }}</td>
+                  <td class="mono col-ms" :class="{ 'cq-bad': w.open_errors }">{{ w.open_errors }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="cqNodes.length" class="card-body cq-nodes">
+            <div class="cq-sub">最耗时的节</div>
+            <div class="table-wrap">
+              <table class="req-table">
+                <thead>
+                  <tr>
+                    <th>节</th>
+                    <th>作品</th>
+                    <th class="col-ms">调用</th>
+                    <th class="col-ms">失败</th>
+                    <th class="col-ms">耗时</th>
+                    <th class="col-ms">均分</th>
+                    <th class="col-ms">硬告警</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="n in cqNodes" :key="n.node_id">
+                    <td class="path-cell" :title="n.node_path || n.node_id">{{ n.node_title || n.node_id }}</td>
+                    <td class="path-cell" :title="n.work_id">{{ n.work_title || n.work_id }}</td>
+                    <td class="mono col-ms">{{ n.runs }}</td>
+                    <td class="mono col-ms" :class="{ 'cq-bad': n.failed }">{{ n.failed }}</td>
+                    <td class="mono col-ms">{{ fmtDur(n.elapsed_ms) }}</td>
+                    <td class="mono col-ms">{{ fmtScore(n.avg_score) }}</td>
+                    <td class="mono col-ms" :class="{ 'cq-bad': n.open_errors }">{{ n.open_errors }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="hint-line">
+              只列耗时最长的 {{ cqNodes.length }} 节；全书级任务（大纲、摘要）只进上面的表。
+            </p>
+          </div>
+        </section>
+
+        <!-- 质量反馈环：只讲已经落库的行为——AI 生成被采纳了多少，采纳后活下来多少 -->
+        <section class="card">
+          <div class="card-head">
+            <span class="card-title">质量信号</span>
+            <span class="card-sub">runs + 版本历史现算：采纳率＝生成被点进正文的比例；存活率＝采纳的 AI 版本没被人重写的比例</span>
+          </div>
+          <div class="card-body">
+            <div class="q-stats">
+              <span class="q-stat">
+                采纳率 <b>{{ fmtPct(fbAdopt.rate) }}</b>
+                （{{ fbAdopt.adopted || 0 }}/{{ fbAdopt.total || 0 }} 次）
+              </span>
+              <span class="q-stat">
+                存活率 <b>{{ fmtPct(fbSurvive.rate) }}</b>
+                （{{ fbSurvive.untouched || 0 }}/{{ fbSurvive.checked || 0 }} 版原样）
+              </span>
+            </div>
+            <!-- 分组行多于一种才有意义：只有一个模型时上面的总数就是它的全部 -->
+            <div v-if="fbByModel.length > 1" class="q-triage-list">
+              <span v-for="m in fbByModel" :key="m.model" class="q-triage-item">
+                {{ m.model }} 采纳 <b>{{ fmtPct(m.rate) }}</b> · {{ m.adopted }}/{{ m.total }} 次
+              </span>
+            </div>
+            <div v-if="fbByTask.length > 1" class="q-triage-list">
+              <span v-for="t in fbByTask" :key="t.task_type" class="q-triage-item">
+                {{ t.task_type }} 采纳 <b>{{ fmtPct(t.rate) }}</b> · {{ t.adopted }}/{{ t.total }} 次
+              </span>
+            </div>
+            <p v-if="!fbAdopt.total" class="hint-line">
+              还没有可归因的生成：跑一次再点「采用」，这里就会出信号。
+            </p>
+            <p v-else class="hint-line">
+              大纲与改写候选的采用路径不写版本行，已从分母剔除（{{ feedback.excluded_runs || 0 }} 次）；
+              存活率比对最近 {{ fbSurvive.checked || 0 }} 条 AI 版本与其后第一条手改版，只挪空白算原样。
+              <template v-if="feedback.window_capped">采纳率只统计最近 {{ feedback.window_runs }} 次成功生成。</template>
+            </p>
+          </div>
+        </section>
+
         <section class="card">
           <div class="card-head">
             <span class="card-title">发布台账</span>
@@ -406,6 +584,48 @@
               <AppIcon name="send" :size="18" />
               <span>还没有发布记录：发出去之后在下面「单篇发布记录」里记一条</span>
             </div>
+          </div>
+        </section>
+
+        <section v-if="pubInsight" class="card">
+          <div class="card-head">
+            <span class="card-title">发表效果</span>
+            <span class="card-sub">
+              {{ pubInsight.pubs }} 条记录·阅读靠手填，可能不全
+            </span>
+          </div>
+          <div class="card-body">
+            <p v-if="!pubInsight.pubs" class="hint-line">
+              还没记过发布台账。发完一篇回来补一条阅读/在看，这里才看得出效果。
+            </p>
+            <template v-else>
+              <p class="ins-sum">
+                共 {{ pubInsight.works }} 篇作品 · {{ pubInsight.pubs }} 次发布 · 平均阅读
+                <strong>{{ pubInsight.reads_avg }}</strong> · 平均在看 <strong>{{ pubInsight.likes_avg }}</strong>
+              </p>
+              <p v-if="pubInsight.trend" class="hint-line">{{ trendLine }}。</p>
+              <div v-if="pubInsight.by_subtype.length > 1" class="table-wrap">
+                <table class="req-table">
+                  <thead>
+                    <tr>
+                      <th>文体</th>
+                      <th>篇数</th>
+                      <th>平均阅读</th>
+                      <th>平均在看</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="t in pubInsight.by_subtype" :key="t.subtype">
+                      <td class="path-cell">{{ t.subtype }}</td>
+                      <td class="mono">{{ t.pubs }}</td>
+                      <td class="mono">{{ t.reads_avg }}</td>
+                      <td class="mono">{{ t.likes_avg }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <p class="hint-line">哪类文体读者买账，看平均阅读那一列（样本少时参考就好）。</p>
+              </div>
+            </template>
           </div>
         </section>
 
@@ -508,6 +728,32 @@
             <p v-if="!workBackups.length" class="hint-line">还没有整库副本。</p>
           </div>
         </section>
+
+        <section class="card">
+          <div class="card-head">
+            <span class="card-title">库与快照</span>
+            <span class="card-sub">每天第一次改动后自动落一份整库快照，留最近 {{ snapshotKeep }} 份</span>
+            <span class="head-spacer"></span>
+            <span class="mono card-path">{{ snapshotDir }}</span>
+            <button class="btn btn-sm" :disabled="snapshotBusy" @click="takeSnapshot">
+              {{ snapshotBusy ? '快照中…' : '立即快照' }}
+            </button>
+          </div>
+          <div class="card-body">
+            <p v-if="snapshotNote" class="hint-line">{{ snapshotNote }}</p>
+            <div v-for="s in recentSnapshots" :key="s.name" class="bak-line">
+              <span class="mono bak-name">{{ s.name }}</span>
+              <span class="bak-meta">{{ fmtStamp(s.created_at) }} · {{ fmtBytes(s.bytes) }}</span>
+            </div>
+            <p v-if="!snapshotBackups.length" class="hint-line">
+              还没有快照：写过字之后服务会在半小时内自己取一份，赶时间就点上面的按钮。
+            </p>
+            <p v-else-if="snapshotBackups.length > recentSnapshots.length" class="hint-line">
+              共 {{ snapshotBackups.length }} 份，只列最近 {{ recentSnapshots.length }} 份；
+              要拿某一份盖回去，先停服务再用 `scripts/restore_backup.py`。
+            </p>
+          </div>
+        </section>
       </section>
 
       <!-- ---------- 配置：重载 / 公众号设置 / 内容类型（批次四从写作台迁入） ---------- -->
@@ -584,6 +830,125 @@
             <p v-if="!contentTypes.length" class="hint-line">读不到 content-types.yaml：检查服务端配置目录。</p>
           </div>
         </section>
+
+        <!-- 模板库：模板定骨架，渠道定节奏，文风定语气，三者正交 -->
+        <section class="card">
+          <div class="card-head">
+            <span class="card-title">模板库</span>
+            <span class="card-sub">{{ tplLib.length }} 套 · 模板管「写什么」，渠道与文风另算</span>
+            <span class="head-spacer"></span>
+            <span v-if="tplError" class="log-error">{{ tplError }}</span>
+            <input
+              v-model="tplQ"
+              class="field field--sm tpl-search"
+              placeholder="按名字搜"
+              aria-label="搜模板"
+              @keyup.enter="loadTemplates"
+            />
+            <button class="btn btn-sm" :disabled="tplBusy" @click="startCreateTemplate">新建</button>
+            <button class="btn btn-sm" :disabled="tplBusy" @click="tplFile.click()">导入 JSON</button>
+            <input ref="tplFile" type="file" accept="application/json,.json" hidden @change="onTplFile" />
+          </div>
+          <div class="card-body">
+            <!-- 新建与编辑共用一份表单：字段就是模板表那几列，不另开弹层 -->
+            <div v-if="tplForm.open" class="tpl-form">
+              <div class="tpl-form-row">
+                <label class="tpl-fl">
+                  <span>名字</span>
+                  <input v-model="tplForm.name" class="field field--sm" placeholder="历史专题 · 六段" />
+                </label>
+                <label class="tpl-fl">
+                  <span>文种</span>
+                  <select v-model="tplForm.kind" class="field field--sm" :disabled="Boolean(tplForm.id)">
+                    <option value="article">文档</option>
+                    <option value="novel">长篇</option>
+                  </select>
+                </label>
+                <label class="tpl-fl">
+                  <span>文体</span>
+                  <input v-model="tplForm.subtype" class="field field--sm" placeholder="history / tech，可空" />
+                </label>
+                <label class="tpl-fl">
+                  <span>渠道</span>
+                  <select v-model="tplForm.channel" class="field field--sm">
+                    <option value="">不指定</option>
+                    <option v-for="c in channels" :key="c.id" :value="c.id">{{ c.label }}</option>
+                  </select>
+                </label>
+              </div>
+              <label class="tpl-fl">
+                <span>什么时候用（note）</span>
+                <input v-model="tplForm.note" class="field field--sm"
+                       placeholder="比如：三千字以上的历史深稿，要带史料出处" />
+              </label>
+              <label class="tpl-fl">
+                <span>骨架：每行一节，写成「标题 | 要点 | 目标字数」；已解析 {{ tplFormSections.length }} 节</span>
+                <textarea v-model="tplForm.outlineText" class="field" rows="6"
+                          placeholder="开场：一个具体场景 | 用一个反常识的细节抓人 | 400" />
+              </label>
+              <label class="tpl-fl">
+                <span>文风提示（style_prompt，可空）</span>
+                <textarea v-model="tplForm.stylePrompt" class="field" rows="2" />
+              </label>
+              <div class="tpl-form-act">
+                <button class="btn btn-sm btn-primary" :disabled="tplBusy" @click="saveTemplateForm">
+                  {{ tplForm.id ? '保存修改' : '新建' }}
+                </button>
+                <button class="btn btn-sm" @click="tplForm.open = false">取消</button>
+              </div>
+            </div>
+
+            <div class="table-wrap">
+              <table class="req-table">
+                <thead>
+                  <tr>
+                    <th>名字</th>
+                    <th>文种</th>
+                    <th>渠道</th>
+                    <th>来源</th>
+                    <th class="col-ms">节数</th>
+                    <th class="col-ms">用过</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="t in tplLib" :key="t.id">
+                    <td class="path-cell" :title="t.note || t.name">
+                      <span v-if="t.pinned" class="tpl-star" title="已收藏">*</span>
+                      <span v-if="t.is_default" class="tpl-def">默认</span>
+                      {{ t.name }}
+                    </td>
+                    <td class="mono">
+                      {{ kindText(t.kind) }}<template v-if="t.subtype">/{{ t.subtype }}</template>
+                    </td>
+                    <td>{{ t.channel ? channelText(t.channel) : '—' }}</td>
+                    <td>{{ t.is_builtin ? '内置' : (t.source_work_id ? '来自作品' : '自建') }}</td>
+                    <td class="mono col-ms">{{ (t.outline || []).length }}</td>
+                    <td class="mono col-ms">{{ t.use_count || 0 }}</td>
+                    <td class="act-cell">
+                      <button class="mini-link" @click="duplicateTpl(t)">克隆</button>
+                      <button v-if="!t.is_builtin" class="mini-link" @click="startEditTemplate(t)">编辑</button>
+                      <button class="mini-link" @click="setDefaultTpl(t)">设为默认</button>
+                      <button class="mini-link" @click="togglePin(t)">{{ t.pinned ? '取消收藏' : '收藏' }}</button>
+                      <button v-if="!t.is_builtin" class="mini-link" @click="deleteTpl(t)">删除</button>
+                      <button class="mini-link" @click="exportTpl(t)">导出</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-if="!tplLib.length" class="empty-block">
+                <AppIcon name="layers" :size="18" />
+                <span v-if="tplQ">没有匹配的模板</span>
+                <span v-else>模板库是空的：内置模板由 content-types.yaml 播种，检查服务端能否读到</span>
+              </div>
+            </div>
+            <p v-if="tplNote" class="hint-line">{{ tplNote }}</p>
+            <p class="hint-line">
+              内置模板只读（每次启动按 YAML 覆盖）：要改先「克隆」，改副本。
+              渠道与文风在写作台右栏的「模板 / 文风」页里选，不在这张表里。
+            </p>
+          </div>
+        </section>
       </section>
     </main>
   </div>
@@ -594,8 +959,10 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProviderStore } from '../stores/provider'
 import { apiFetch } from '../utils/api'
+import { decodeTemplate, outlineToText, textToOutline } from '../utils/template'
 import AppNav from '../components/AppNav.vue'
 import AppIcon from '../components/AppIcon.vue'
+import CompatDialog from '../components/CompatDialog.vue'
 import LiveConsole from '../components/LiveConsole.vue'
 
 const TABS = [
@@ -655,7 +1022,13 @@ let tasksTimer = 0
 
 // ---- 数据 ----
 const works = ref([])
+// 生成成本：整块从 /studio/stats/cost-quality 来，不在前端另算一遍
+const costQuality = ref(null)
+// 质量反馈环：采纳率与存活率从 /studio/feedback 现算，跟成本同一条刷新链
+const feedback = ref(null)
 const pubSummary = ref([])
+// 发表效果：同一本台账的聚合视角，与台账同一条刷新链；拉不到就整卡收起
+const pubInsight = ref(null)
 const worksError = ref('')
 const pubWork = ref('')
 const pubs = ref([])
@@ -666,6 +1039,12 @@ const checkBusy = ref(false)
 const nodeBackups = ref([])
 const workBackups = ref([])
 const backupDir = ref('')
+// ---- 库快照：与删除副本同一条保留策略，所以手动按多了会挤掉最旧的 ----
+const snapshotBackups = ref([])
+const snapshotKeep = ref(7)
+const snapshotDir = ref('')
+const snapshotBusy = ref(false)
+const snapshotNote = ref('')
 const restoringBackup = ref(false)
 const dataError = ref('')
 const dataNote = ref('')
@@ -674,13 +1053,84 @@ const dataBusy = ref(false)
 // ---- 配置 ----
 const settings = ref({})
 const contentTypes = ref([])
+// 渠道与文种平级（channels 段）：模板表格里把 wechat 显示成「公众号」
+const channels = ref([])
 const configError = ref('')
 const reloadNote = ref('')
 const reloadBad = ref(false)
 const reloading = ref(false)
 
-const readyCount = computed(() => providers.value.filter(p => p.has_profile).length)
+// ---- 模板库 ----
+// 模板 = 骨架（写什么）；渠道 = 平台节奏。两者正交，这张表只管模板本身
+const tplLib = ref([])
+const tplQ = ref('')
+const tplBusy = ref(false)
+const tplNote = ref('')
+const tplError = ref('')
+const tplFile = ref(null)
+const tplForm = ref({
+  open: false, id: '', kind: 'article', name: '', subtype: '',
+  channel: '', note: '', stylePrompt: '', outlineText: '',
+})
+// 骨架文本实时解析成本数：编辑时看不见「现在几节」，改着改着就删没了
+const tplFormSections = computed(() => textToOutline(tplForm.value.outlineText))
+
+const readyCount = computed(() => providers.value.filter(p => (p.compat ? p.ready : p.has_profile)).length)
 const totalModels = computed(() => providers.value.reduce((n, p) => n + (p.models?.length || 0), 0))
+
+// ---- 直连通道（compat）：卡片展示与配置弹窗 ----
+const compatOpen = ref(false)
+const compatEntry = ref(null)
+const testingProvider = ref('')
+const compatTestText = ref({})
+const compatTestBad = ref({})
+
+// key 状态四档与后端 _compat_brief 的 key_source 对齐；只报掩码与变量名，明文不出后端
+function keyLine(p) {
+  if (p.key_source === 'db') return `key 已配置 ${p.key_masked || ''}`
+  if (p.key_source === 'env') return `环境变量 ${p.key_env} 已设置`
+  if (p.key_source === 'none') return `环境变量 ${p.key_env} 未设置`
+  return '无需 key'
+}
+
+function openCompatDialog(p) {
+  // p 为 null = 新增；卡片来自 /admin/status，字段够弹窗初始化（models 是 id 数组）
+  compatEntry.value = p ? { ...p } : null
+  compatOpen.value = true
+}
+
+async function onCompatSaved() {
+  compatOpen.value = false
+  // 保存即生效（后端已重载配置）：重拉状态与模型列表，对话下拉立刻能看到新模型
+  await Promise.allSettled([loadStatus(), providerStore.fetchModels()])
+  reloadMsg.value = '直连通道已保存并生效'
+  setTimeout(() => (reloadMsg.value = ''), 3000)
+}
+
+async function testCompat(p) {
+  testingProvider.value = p.provider
+  try {
+    const r = await apiFetch('/admin/compat/' + encodeURIComponent(p.provider) + '/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    const j = await r.json().catch(() => null)
+    if (j && j.ok) {
+      compatTestBad.value = { ...compatTestBad.value, [p.provider]: false }
+      compatTestText.value = { ...compatTestText.value, [p.provider]: `通了 · ${j.latency_ms} ms` }
+    } else {
+      const text = j && typeof j.detail === 'string' ? j.detail : 'HTTP ' + r.status
+      compatTestBad.value = { ...compatTestBad.value, [p.provider]: true }
+      compatTestText.value = { ...compatTestText.value, [p.provider]: text }
+    }
+  } catch (e) {
+    compatTestBad.value = { ...compatTestBad.value, [p.provider]: true }
+    compatTestText.value = { ...compatTestText.value, [p.provider]: e.message }
+  } finally {
+    testingProvider.value = ''
+  }
+}
 
 watch(tab, (v) => {
   if (v === 'live') liveOpened.value = true
@@ -992,6 +1442,14 @@ const checkWarn = computed(() => (checkResult.value?.items || []).filter(i => i.
 const checkInfo = computed(() => (checkResult.value?.items || []).filter(i => i.severity !== 'warn').length)
 const checkItems = computed(() => (checkResult.value?.items || []).slice(0, 6))
 const checkMore = computed(() => Math.max(0, (checkResult.value?.items || []).length - 6))
+const cqOverall = computed(() => costQuality.value?.overall || {})
+const cqWorks = computed(() => costQuality.value?.works || [])
+const cqNodes = computed(() => costQuality.value?.nodes || [])
+const cqByTask = computed(() => costQuality.value?.by_task || [])
+const fbAdopt = computed(() => feedback.value?.adopt || {})
+const fbSurvive = computed(() => feedback.value?.survive || {})
+const fbByModel = computed(() => feedback.value?.by_model || [])
+const fbByTask = computed(() => feedback.value?.by_task || [])
 
 function workName(id) {
   if (!id) return '—'
@@ -1002,7 +1460,7 @@ async function refreshData() {
   dataBusy.value = true
   dataError.value = ''
   try {
-    await Promise.all([loadWorks(), loadPubSummary(), loadBackups()])
+    await Promise.all([loadWorks(), loadPubSummary(), loadInsight(), loadBackups(), loadCostQuality(), loadFeedback()])
     // 选着的作品被删了：别把一个过期 id 带到下面的接口里去
     if (pubWork.value && !works.value.some(w => w.id === pubWork.value)) {
       pubWork.value = ''
@@ -1038,6 +1496,49 @@ async function loadPubSummary() {
   }
 }
 
+async function loadInsight() {
+  try {
+    const r = await apiFetch('/studio/publications/insight')
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    pubInsight.value = await r.json()
+  } catch (e) {
+    // 与分析同源的是手填台账：拉不到就只收这一张卡，不挡发布台账主表
+    pubInsight.value = null
+  }
+}
+
+const trendLine = computed(() => {
+  const t = pubInsight.value?.trend
+  if (!t) return ''
+  if (t.prev_avg <= 0) return `最近 5 篇均读 ${t.recent_avg}（此前均读为零，百分比不计）`
+  const pct = Math.round(((t.recent_avg - t.prev_avg) / t.prev_avg) * 100)
+  return `最近 5 篇均读 ${t.recent_avg}，比前 5 篇的 ${t.prev_avg} ${pct >= 0 ? '涨' : '跌'} ${Math.abs(pct)}%`
+})
+
+async function loadCostQuality() {
+  try {
+    const r = await apiFetch('/studio/stats/cost-quality?works=30&nodes=30')
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    costQuality.value = await r.json()
+  } catch (e) {
+    // 拿不到就清空：宁可显示「还没有生成记录」，也不摆一份过期账
+    costQuality.value = null
+    dataError.value = '生成成本不可用：' + e.message
+  }
+}
+
+async function loadFeedback() {
+  try {
+    const r = await apiFetch('/studio/feedback')
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    feedback.value = await r.json()
+  } catch (e) {
+    // 与成本一样：拉不到就清空，不留一份看着真、实则过期的信号
+    feedback.value = null
+    dataError.value = '质量信号不可用：' + e.message
+  }
+}
+
 async function loadBackups() {
   try {
     const r = await apiFetch('/studio/backups')
@@ -1045,9 +1546,36 @@ async function loadBackups() {
     const j = await r.json()
     nodeBackups.value = j.nodes || []
     workBackups.value = j.works || []
+    snapshotBackups.value = j.snapshots || []
+    snapshotKeep.value = j.snapshot_keep || 7
+    snapshotDir.value = j.snapshot_dir || ''
     backupDir.value = j.dir || ''
   } catch (e) {
     dataError.value = '备份列表不可用：' + e.message
+  }
+}
+
+// 列表只给 5 行：这一页要回答的是「最近有没有在取」，不是备份档案室。
+// 真需要翻旧的那一份，`scripts/restore_backup.py --list` 才是完整清单。
+const recentSnapshots = computed(() => snapshotBackups.value.slice(0, 5))
+
+async function takeSnapshot() {
+  snapshotBusy.value = true
+  snapshotNote.value = ''
+  dataError.value = ''
+  try {
+    const r = await apiFetch('/studio/backups/snapshot', { method: 'POST' })
+    if (!r.ok) {
+      dataError.value = await errLine(r, '快照失败')
+      return
+    }
+    const j = await r.json()
+    snapshotNote.value = `已存下 ${j.name}（${fmtBytes(j.bytes)}）`
+    await loadBackups()
+  } catch (e) {
+    dataError.value = '快照失败：' + e.message
+  } finally {
+    snapshotBusy.value = false
   }
 }
 
@@ -1078,7 +1606,7 @@ async function savePub() {
     }
     pubDraft.value = { published_at: '', url: '', reads: 0, likes: 0 }
     dataError.value = ''
-    await Promise.all([loadPubs(), loadPubSummary()])
+    await Promise.all([loadPubs(), loadPubSummary(), loadInsight()])
   } finally {
     pubBusy.value = false
   }
@@ -1091,7 +1619,7 @@ async function removePub(p) {
     dataError.value = await errLine(r, '删除失败')
     return
   }
-  await Promise.all([loadPubs(), loadPubSummary()])
+  await Promise.all([loadPubs(), loadPubSummary(), loadInsight()])
 }
 
 async function runPublishCheck() {
@@ -1142,7 +1670,7 @@ const voicePreview = computed(() => {
 
 async function loadConfig() {
   configError.value = ''
-  await Promise.all([loadSettings(), loadContentTypes()])
+  await Promise.all([loadSettings(), loadContentTypes(), loadTemplates()])
 }
 
 async function loadSettings() {
@@ -1163,6 +1691,8 @@ async function loadContentTypes() {
   }
   const j = await r.json()
   contentTypes.value = j.kinds || []
+  // 渠道与文种平级（新 YAML 的 channels 段），模板表格里要把 wechat 显示成「公众号」
+  channels.value = j.channels || []
 }
 
 async function errLine(r, label) {
@@ -1176,6 +1706,186 @@ async function errLine(r, label) {
   return `${label}：${detail || 'HTTP ' + r.status}`
 }
 
+// ---- 模板库：模板 = 骨架（写什么），渠道与文风是另外两个维度 ----
+
+function kindText(kind) {
+  return kind === 'novel' ? '长篇' : '文档'
+}
+
+function channelText(id) {
+  return channels.value.find((c) => c.id === id)?.label || id
+}
+
+async function loadTemplates() {
+  tplError.value = ''
+  const p = new URLSearchParams()
+  if (tplQ.value.trim()) p.set('q', tplQ.value.trim())
+  const r = await apiFetch('/studio/templates?' + p.toString())
+  if (!r.ok) {
+    tplError.value = await errLine(r, '模板库读取失败')
+    return
+  }
+  tplLib.value = (await r.json()).map(decodeTemplate)
+}
+
+function startCreateTemplate() {
+  tplForm.value = {
+    open: true, id: '', kind: 'article', name: '', subtype: '',
+    channel: '', note: '', stylePrompt: '', outlineText: '',
+  }
+  tplNote.value = ''
+}
+
+function startEditTemplate(t) {
+  tplForm.value = {
+    open: true,
+    id: t.id,
+    kind: t.kind || 'article',
+    name: t.name || '',
+    subtype: t.subtype || '',
+    channel: t.channel || '',
+    note: t.note || '',
+    stylePrompt: t.style_prompt || '',
+    // 骨架折成一行一节：直接编 JSON 容易一个逗号写错整份存不进去
+    outlineText: outlineToText(t.outline),
+  }
+  tplNote.value = ''
+}
+
+async function saveTemplateForm() {
+  const f = tplForm.value
+  if (!f.name.trim()) {
+    tplNote.value = '名字不能为空'
+    return
+  }
+  const outline = textToOutline(f.outlineText)
+  if (!outline.length) {
+    tplNote.value = '骨架不能为空：至少一节，没有骨架时 S0 不出内容'
+    return
+  }
+  tplBusy.value = true
+  try {
+    const payload = {
+      name: f.name.trim(),
+      subtype: f.subtype.trim(),
+      channel: f.channel,
+      note: f.note.trim(),
+      style_prompt: f.stylePrompt.trim(),
+      outline,
+    }
+    // kind 只在新建时发：PATCH 不改文种（换了文种，骨架的字数节奏对不上）
+    if (!f.id) payload.kind = f.kind
+    const r = await apiFetch(f.id ? `/studio/templates/${f.id}` : '/studio/templates', {
+      method: f.id ? 'PATCH' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      tplNote.value = await errLine(r, f.id ? '保存失败' : '新建失败')
+      return
+    }
+    tplNote.value = f.id ? '已保存' : `已新建「${payload.name}」`
+    tplForm.value = { ...tplForm.value, open: false, id: '' }
+    await loadTemplates()
+  } finally {
+    tplBusy.value = false
+  }
+}
+
+async function duplicateTpl(t) {
+  tplBusy.value = true
+  try {
+    const r = await apiFetch(`/studio/templates/${t.id}/duplicate`, { method: 'POST' })
+    if (!r.ok) {
+      tplNote.value = await errLine(r, '克隆失败')
+      return
+    }
+    const got = decodeTemplate(await r.json())
+    tplNote.value = `已克隆为「${got.name}」，改它不影响原模板`
+    await loadTemplates()
+  } finally {
+    tplBusy.value = false
+  }
+}
+
+async function setDefaultTpl(t) {
+  const r = await apiFetch(`/studio/templates/${t.id}/default`, { method: 'POST' })
+  if (!r.ok) {
+    tplNote.value = await errLine(r, '设为默认失败')
+    return
+  }
+  const scope = `${kindText(t.kind)}${t.subtype ? '/' + t.subtype : ''}${t.channel ? '/' + channelText(t.channel) : ''}`
+  tplNote.value = `以后新建 ${scope} 且没指定模板时用它`
+  await loadTemplates()
+}
+
+async function togglePin(t) {
+  const r = await apiFetch(`/studio/templates/${t.id}/pin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pinned: !Number(t.pinned || 0) }),
+  })
+  if (!r.ok) {
+    tplNote.value = await errLine(r, '收藏失败')
+    return
+  }
+  await loadTemplates()
+}
+
+async function deleteTpl(t) {
+  if (!window.confirm(`删掉模板「${t.name}」？引用它的作品会被解绑（作品本身不删），之后按同组默认模板走。`)) return
+  const r = await apiFetch(`/studio/templates/${t.id}`, { method: 'DELETE' })
+  if (!r.ok) {
+    tplNote.value = await errLine(r, '删除失败')
+    return
+  }
+  const got = await r.json()
+  tplNote.value = got.unbound ? `已删除，${got.unbound} 本作品被解绑` : '已删除'
+  await loadTemplates()
+}
+
+async function exportTpl(t) {
+  const r = await apiFetch(`/studio/templates/${t.id}/export`)
+  if (!r.ok) {
+    tplNote.value = await errLine(r, '导出失败')
+    return
+  }
+  // 带口令的下载：fetch 取 blob 再点一个临时 <a>，不能直接 href
+  const url = URL.createObjectURL(await r.blob())
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${t.name || 'template'}.template.json`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+async function onTplFile(ev) {
+  const file = ev.target.files?.[0]
+  ev.target.value = '' // 选同一个文件两次也要能触发 change
+  if (!file) return
+  let data
+  try {
+    data = JSON.parse(await file.text())
+  } catch {
+    tplNote.value = '这不是 JSON 文件：选错了或文件坏了'
+    return
+  }
+  const r = await apiFetch('/studio/templates/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!r.ok) {
+    tplNote.value = await errLine(r, '导入失败')
+    return
+  }
+  const got = decodeTemplate(await r.json())
+  tplNote.value = `已导入「${got.name}」`
+  await loadTemplates()
+}
+
 function fmtStamp(ts) {
   if (!ts) return '—'
   const d = new Date(ts * 1000)
@@ -1187,6 +1897,31 @@ function fmtBytes(n) {
   const v = Number(n) || 0
   if (v >= 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB'
   return Math.max(1, Math.round(v / 1024)) + ' KB'
+}
+
+// 生成账的三种度量：耗时、字符数、评分（null = 没评过，不显示成 0）
+function fmtDur(ms) {
+  const v = Number(ms) || 0
+  if (!v) return '—'
+  if (v < 1000) return v + 'ms'
+  if (v < 60000) return (v / 1000).toFixed(1) + 's'
+  return `${Math.floor(v / 60000)}分${Math.round((v % 60000) / 1000)}秒`
+}
+
+function fmtChars(n) {
+  const v = Number(n) || 0
+  if (!v) return '0'
+  return v >= 10000 ? (v / 10000).toFixed(1) + '万字' : v + '字'
+}
+
+function fmtScore(v) {
+  return v == null ? '—' : Number(v).toFixed(1)
+}
+
+// 采纳率/存活率都是 0~1 的小数，折成百分比看；空值显「—」不当 0% 骗人
+function fmtPct(v) {
+  if (v == null) return '—'
+  return Math.round(Number(v) * 100) + '%'
 }
 
 function fmtTime(ts) {
@@ -1482,6 +2217,48 @@ function alignClass(p) {
 .pc-link:hover {
   color: var(--run-fg);
 }
+/* 直连通道卡片：地址、key 状态、操作行——都是信息行不是链接，字号对齐既有 pc-* 惯例 */
+.pc-base {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-keyline {
+  margin: 0 0 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.pc-keyline.is-bad {
+  color: var(--danger-fg);
+}
+.pc-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: auto;
+}
+.pc-actions .pc-link {
+  margin-top: 0;
+}
+.pc-link:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.pc-test-note {
+  font-size: 11px;
+  color: var(--run-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.pc-test-note.is-bad {
+  color: var(--danger-fg);
+}
 
 /* 快捷操作 */
 .actions {
@@ -1693,6 +2470,23 @@ function alignClass(p) {
   max-width: 220px;
 }
 
+/* ---------- 生成成本与质量 ---------- */
+.cq-tasks {
+  margin-top: 10px;
+}
+.cq-bad {
+  color: var(--danger-fg);
+}
+.cq-nodes {
+  border-top: 1px solid var(--line-soft);
+}
+.cq-sub {
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
 /* ---------- 任务 ---------- */
 .q-stats {
   display: flex;
@@ -1883,6 +2677,15 @@ function alignClass(p) {
   font-size: 12px;
   color: var(--text-muted);
 }
+.ins-sum {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.ins-sum strong {
+  font-family: theme('fontFamily.mono');
+  color: var(--text);
+}
 .pub-line-date {
   min-width: 92px;
   color: var(--text-faint);
@@ -1992,6 +2795,53 @@ function alignClass(p) {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
+}
+
+/* ---------- 模板库 ---------- */
+.tpl-search {
+  width: 140px;
+}
+.tpl-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--panel-2);
+}
+.tpl-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tpl-form-row .tpl-fl {
+  flex: 1 1 120px;
+}
+.tpl-fl {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.tpl-form-act {
+  display: flex;
+  gap: 8px;
+}
+/* 收藏与默认是行上两个标记：挤在名字前面，扫一眼就知道哪套在用 */
+.tpl-star {
+  margin-right: 4px;
+  color: var(--warn-fg);
+}
+.tpl-def {
+  margin-right: 4px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(var(--run-rgb), 0.16);
+  color: var(--run-fg);
+  font-size: 10.5px;
 }
 
 @media (max-width: 1100px) {

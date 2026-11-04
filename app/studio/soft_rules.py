@@ -1,4 +1,4 @@
-"""软规则：称呼漂移、设定冲突、绝对化表述、数字无出处。
+"""软规则：称呼漂移、设定冲突、绝对化表述、数字无出处、自我重复。
 
 与硬规则（`consistency.py`）的分工：
 
@@ -14,7 +14,7 @@
 原设计写的是「软规则需 LLM 二次确认才报」，实现时改成**人确认**：
 零调用成本，且报出来的措辞永远是「请确认是不是同一人」而不是「你写错了」。
 
-四条规则的取舍（都为了压误报，宁可漏报）：
+五条规则的取舍（都为了压误报，宁可漏报）：
 
 1. `address_drift`：不用 NER，改为**用已有实体反查**。只对「已知人物的姓/名 + 常见称谓」
    这个封闭集合做字面匹配，所以报出来的串必然与某个已有角色同姓同名根，不会把
@@ -25,10 +25,14 @@
 3. `absolute_claim`：模板里早就引用了这条（tpl_lifestyle），一直没实现。
 4. `number_unsourced`：正文里的具体数字，在本作品的素材/事实卡里一个字符都对不上。
    素材库为空时整条跳过——没登记素材就报「全部数字无出处」只会让人关掉告警。
+5. `phrase_repeat`：同一句字面在跨节反复出现。只有整本检查跑得出来（单节内看不出复用，
+   而节内排比是正当修辞）。5 字起才报——四字以内大多是成语、叠词和专名，真实语料里
+   三条命中全是这类；人物/道具/地点/组织的名字、术语、节标题也全部排除在外。
 """
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any, Optional
 
@@ -516,10 +520,201 @@ async def check_number_unsourced(store, work: dict, node: dict, content: str,
     return out
 
 
+# ==================== 5. 自我重复 ====================
+
+CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]{5,}")
+CJK_ONLY_RE = re.compile(r"[\u4e00-\u9fff]")
+# 5 字起才报：四字以内撞车太容易——成语、叠词（「一字一字」）、服饰道具名
+# （「青布直裰」）都是正当复用，真实语料里三条命中全是这类，没有一条是句式偷懒。
+PHRASE_MIN_LEN, PHRASE_MAX_LEN = 5, 8
+PHRASE_MIN_NODES = 3      # 小样本保护：三节的语料里复用两次不算毛病
+PHRASE_RATIO = 0.2
+OPENING_LEN = 12          # 开头比对的前 12 个汉字
+OPENING_MIN_NODES = 3
+KEEP_GRAM_CAP = 3000      # 高频 4 字串的上限：再多就只扫最高的这些
+TOP_SCAN_ROWS = 40        # 只在前 40 条里做「去包含」：最后报出去的只有 3 条
+
+
+def _cjk_runs(text: str) -> list[str]:
+    """正文里的连续汉字串（5 字起）。
+
+    标点、数字、字母、代码都把它们切断，所以候选天然是「纯中文且不含数字」，
+    而报出来的串必然是连着的一句话，不会是两个句子被拼起来的假短语。
+    """
+    return CJK_RUN_RE.findall(_strip_code(text))
+
+
+def _proper_names(entities: list[dict], cards: list[dict]) -> set[str]:
+    """设定库里所有专名：人物、道具、地点、组织、卡片，不分 kind。
+
+    称呼漂移只关心人物，自我重复怕的却是任何一种专名：「三号暗格」每节提五次
+    是设定在起作用，不是句子在偷懒。两字也收：双名主角（「林昭」）每节都会
+    出现，同样不是句式偷懒。
+    """
+    names: set[str] = set()
+    for row in [*entities, *cards]:
+        for nm in [row.get("name") or "", *_json_list(row.get("aliases"))]:
+            nm = nm.strip()
+            if len(nm) >= 2:
+                names.add(nm)
+    return names
+
+
+def _mask_known(text: str, names: set[str]) -> str:
+    """把专名整段换成换行，让它们不参与「连续汉字串」。
+
+    只做排除过滤是不够的：真名被排除后，它身后的半截会变成新的候选——
+    术语「灰烬之城」一挡，「烬之城的城门」就冒出来了，报出去是一句没主语的
+    半截话。把名字换成边界，这类拼接连候选都不会产生。
+    """
+    if not names:
+        return text
+    pat = re.compile("|".join(re.escape(n) for n in sorted(names, key=len, reverse=True)))
+    return pat.sub("\n", text)
+
+
+def _frequent_prefixes(runs_per_node: list[list[str]], min_nodes: int) -> set[str]:
+    """先只统计 4 字串落在几节里。
+
+    更长的复用必然含一个同样复用的 4 字前缀，所以这一步无损，却能把候选集砍掉
+    几个数量级——一百万字的库也扫得动。
+    """
+    freq: dict[str, int] = {}
+    for runs in runs_per_node:
+        for gram in {r[i:i + 4] for r in runs for i in range(len(r) - 3)}:
+            freq[gram] = freq.get(gram, 0) + 1
+    kept = sorted((g for g, c in freq.items() if c >= min_nodes), key=lambda g: -freq[g])
+    return set(kept[:KEEP_GRAM_CAP])
+
+
+def _repeat_phrases(runs_per_node: list[tuple[int, list[str]]],
+                    min_nodes: int) -> list[tuple[str, list[int], int]]:
+    """返回 [(短语, 出现过的节序, 总次数)]，按「覆盖节数、总次数」从多到少。"""
+    prefixes = _frequent_prefixes([r for _, r in runs_per_node], min_nodes)
+    if not prefixes:
+        return []
+    cover: dict[str, set[int]] = {}
+    total: dict[str, int] = {}
+    for ordinal, runs in runs_per_node:
+        for run in runs:
+            for i in range(len(run) - PHRASE_MIN_LEN + 1):
+                if run[i:i + 4] not in prefixes:
+                    continue
+                for length in range(PHRASE_MIN_LEN, min(PHRASE_MAX_LEN, len(run) - i) + 1):
+                    cand = run[i:i + length]
+                    seen = cover.get(cand)
+                    if seen is None:
+                        cover[cand] = {ordinal}
+                        total[cand] = 1
+                    else:
+                        seen.add(ordinal)
+                        total[cand] += 1
+    rows = [(cover[g], total[g], g) for g in cover if len(cover[g]) >= min_nodes]
+    rows.sort(key=lambda r: (-len(r[0]), -r[1], r[2]))
+    # 只报长的那一个：「嘴角上扬」与「嘴角微微上扬」一起报就是两条废话
+    final: list[tuple[set[int], int, str]] = []
+    for ords, cnt, cand in rows[:TOP_SCAN_ROWS]:
+        if any(cand in other and len(other) > len(cand) for _, _, other in final):
+            continue
+        final = [(o, c, t) for o, c, t in final
+                 if not (t in cand and len(cand) > len(t) and o <= ords)]
+        final.append((ords, cnt, cand))
+    return [(cand, sorted(ords), cnt) for ords, cnt, cand in final]
+
+
+def _opening_key(content: str) -> str:
+    """本节首个非空段落的前 OPENING_LEN 个汉字（标点与空白不算）。
+
+    凑不满就不比对：两三个字的开头撞上了也说明不了什么。
+    """
+    for para in _strip_code(content).split("\n"):
+        text = para.strip()
+        if not text:
+            continue
+        chars = "".join(CJK_ONLY_RE.findall(text))
+        return chars[:OPENING_LEN] if len(chars) >= OPENING_LEN else ""
+    return ""
+
+
+async def check_phrase_repeat(store, work: dict) -> list[dict]:
+    """跨节的字面复用：同一句话换个标点又出现五次。
+
+    只在整本检查跑：单节内看不出来，而节内排比是正当修辞。两条子判据各封顶
+    MAX_PER_RULE（短语复用、开头雷同），整条规则封顶 MAX_PER_RULE * 3。
+    """
+    readable = await store.list_readable(work["id"])
+    sections: list[dict[str, Any]] = []
+    for item in readable:
+        node = await store.get_node(item["id"])
+        if not node:
+            continue
+        content = (node.get("content") or "").strip()
+        if not content:
+            continue
+        sections.append({"ordinal": int(node.get("ordinal") or 0), "id": node["id"],
+                         "title": node.get("title") or "", "content": content})
+    if len(sections) < PHRASE_MIN_NODES:
+        return []
+
+    # 全部专名（不只人物）都排除：道具、地点、组织跨节重复是设定，不是复沓
+    excluded = _proper_names(await store.list_entities(work["id"]),
+                             await store.list_cards(work["id"]))
+    excluded |= {t.get("term") or "" for t in await store.list_terms(work["id"])}
+    excluded |= {s["title"] for s in sections}
+    excluded = {n.strip() for n in excluded if len(n.strip()) >= 2}
+
+    min_nodes = max(PHRASE_MIN_NODES, math.ceil(len(readable) * PHRASE_RATIO))
+    by_ordinal = {s["ordinal"]: s for s in sections}
+    out: list[dict] = []
+
+    for phrase, ords, cnt in _repeat_phrases(
+            [(s["ordinal"], _cjk_runs(_mask_known(s["content"], excluded)))
+             for s in sections], min_nodes)[:MAX_PER_RULE]:
+        last = by_ordinal[ords[-1]]
+        head = "、".join(f"第 {o} 节" for o in ords[:6])
+        out.append({
+            "rule": "phrase_repeat", "severity": "info",
+            "message": (f"「{phrase}」在 {len(ords)} 节里出现了 {cnt} 次"
+                        f"（{head}{'…' if len(ords) > 6 else ''}）。"
+                        "请确认是刻意的复沓，还是同一句懒得换个说法"),
+            "evidence": _snippet(last["content"], max(last["content"].find(phrase), 0), phrase),
+            "location": str(ords[-1]), "node_id": last["id"],
+        })
+
+    groups: dict[str, list[int]] = {}
+    for s in sections:
+        key = _opening_key(s["content"])
+        if key:
+            groups.setdefault(key, []).append(s["ordinal"])
+    opening_hits = 0
+    for key, ords in sorted(groups.items(), key=lambda kv: kv[1][0]):
+        if len(ords) < OPENING_MIN_NODES:
+            continue
+        for ordinal in ords[1:]:
+            if opening_hits >= MAX_PER_RULE:
+                break
+            node = by_ordinal[ordinal]
+            opening_hits += 1
+            out.append({
+                "rule": "phrase_repeat", "severity": "info",
+                "message": (f"第 {ords[0]} 节与第 {ordinal} 节的开头前 {OPENING_LEN} 个字一模一样"
+                            f"（{key}）。连着几节同一个起手式，读者会以为在看同一章——"
+                            "除非是刻意的排比，换一个开场"),
+                "evidence": next((p.strip() for p in node["content"].split("\n")
+                                  if p.strip()), "")[:160],
+                "location": str(ordinal), "node_id": node["id"],
+            })
+        if opening_hits >= MAX_PER_RULE:
+            break
+    return out[:MAX_PER_RULE * 3]
+
+
 # ==================== 入口 ====================
 
 NOVEL_SOFT = ("address_drift", "setting_conflict")
 DOC_SOFT = ("absolute_claim", "number_unsourced")
+# 跨节才报得出来的那一条：小说与文档都开——系列文档「同一句式复用二十讲」同样成立
+BOOK_SOFT = ("phrase_repeat",)
 
 
 async def check_node(store, work: dict, node: dict, content: str, ordinal: int,
@@ -541,7 +736,15 @@ async def check_node(store, work: dict, node: dict, content: str, ordinal: int,
 
 
 async def check_whole_book(store, work: dict, rules: set[str]) -> list[dict]:
-    """整本才跑得起的软规则（跨节年龄对账）。"""
-    if (work.get("kind") or "article") != "novel" or "setting_conflict" not in rules:
-        return []
-    return await check_age_across_nodes(store, work)
+    """整本才跑得起的软规则（跨节年龄对账、跨节自我重复）。
+
+    按 rules 累加，不再一进门就 return：自我重复对文档同样成立，
+    而 `novel` 那道门禁把它连带挡在了系列文档外面。
+    """
+    is_novel = (work.get("kind") or "article") == "novel"
+    out: list[dict] = []
+    if is_novel and "setting_conflict" in rules:
+        out += await check_age_across_nodes(store, work)
+    if "phrase_repeat" in rules:
+        out += await check_phrase_repeat(store, work)
+    return out

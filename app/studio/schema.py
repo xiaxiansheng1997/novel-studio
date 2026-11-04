@@ -14,13 +14,22 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS templates (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,               -- novel / article
-    subtype TEXT DEFAULT '',          -- tech/history/politics/lifestyle/report/course
+    subtype TEXT DEFAULT '',          -- 内容领域：tech/history/politics/lifestyle/report/general
+    -- 渠道与 subtype 正交：同一套骨架既可以发公众号，也可以发知乎。
+    -- 老库缺这一列，由 store._migrate() 补，别指望 CREATE TABLE IF NOT EXISTS。
+    channel TEXT DEFAULT '',          -- wechat/zhihu/xiaohongshu/toutiao/blog/official/''
     name TEXT NOT NULL,
     outline_json TEXT NOT NULL,       -- [{heading, prompt, target_words}]
     style_prompt TEXT DEFAULT '',
     checks_json TEXT DEFAULT '[]',
+    tags_json TEXT DEFAULT '[]',      -- 自由标签：干货/长文/带货…
+    note TEXT DEFAULT '',             -- 什么时候用这一套
+    is_default INTEGER DEFAULT 0,     -- 同 kind+subtype+channel 下的默认模板
+    pinned INTEGER DEFAULT 0,         -- 收藏，排在最前
+    source_work_id TEXT DEFAULT '',   -- 从哪本作品沉淀来的（空 = 不是沉淀的）
     is_builtin INTEGER DEFAULT 0,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    updated_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS works (
@@ -28,6 +37,9 @@ CREATE TABLE IF NOT EXISTS works (
     kind TEXT NOT NULL,               -- novel / article
     scale TEXT DEFAULT 'single',      -- article 专用：single / series
     subtype TEXT DEFAULT '',
+    -- 发布渠道，与 subtype 正交（历史 + 公众号 是一种合法组合）。
+    -- 老库缺这一列，由 store._migrate() 补。
+    channel TEXT DEFAULT '',
     title TEXT NOT NULL,
     premise TEXT DEFAULT '',
     status TEXT DEFAULT 'active',     -- active / paused / archived
@@ -56,6 +68,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     word_count INTEGER DEFAULT 0,
     content_hash TEXT DEFAULT '',
     summary TEXT DEFAULT '',
+    plan_json TEXT DEFAULT '{}',      -- 本节计划：prompt / target_words / pov / time / place
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -125,6 +138,7 @@ CREATE TABLE IF NOT EXISTS issues (
     evidence TEXT DEFAULT '',
     location TEXT DEFAULT '',
     resolved INTEGER DEFAULT 0,
+    resolution_note TEXT DEFAULT '',  -- 人为什么忽略它；下次看见同一条能少纠结一次
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_issues_node ON issues(node_id, resolved);
@@ -373,6 +387,7 @@ BUILTIN_TEMPLATES: list[dict] = [
         "id": "tpl_tech",
         "kind": "article",
         "subtype": "tech",
+        "channel": "",
         "name": "技术方案 / 踩坑记录",
         "outline": [
             {"heading": "背景与问题", "prompt": "要解决什么问题、现状痛点是什么", "target_words": 600},
@@ -388,6 +403,7 @@ BUILTIN_TEMPLATES: list[dict] = [
         "id": "tpl_history",
         "kind": "article",
         "subtype": "history",
+        "channel": "",
         "name": "历史专题",
         "outline": [
             {"heading": "时代背景", "prompt": "政治/经济/社会背景，交代清楚时间坐标", "target_words": 800},
@@ -403,6 +419,7 @@ BUILTIN_TEMPLATES: list[dict] = [
         "id": "tpl_politics",
         "kind": "article",
         "subtype": "politics",
+        "channel": "",
         "name": "时政分析",
         "outline": [
             {"heading": "事实陈述", "prompt": "已确认的事实，标注来源与日期", "target_words": 600},
@@ -417,6 +434,7 @@ BUILTIN_TEMPLATES: list[dict] = [
         "id": "tpl_lifestyle",
         "kind": "article",
         "subtype": "lifestyle",
+        "channel": "",
         "name": "生活推荐",
         "outline": [
             {"heading": "场景切入", "prompt": "什么情况下会遇到这个问题", "target_words": 400},
@@ -431,6 +449,7 @@ BUILTIN_TEMPLATES: list[dict] = [
         "id": "tpl_general",
         "kind": "article",
         "subtype": "general",
+        "channel": "",
         "name": "通用文章",
         "outline": [
             {"heading": "引言", "prompt": "提出问题，给读者一个继续读的理由", "target_words": 400},
@@ -444,6 +463,7 @@ BUILTIN_TEMPLATES: list[dict] = [
         "id": "tpl_report",
         "kind": "article",
         "subtype": "report",
+        "channel": "",
         "name": "行业报告 / 白皮书",
         "outline": [
             {"heading": "摘要", "prompt": "核心结论 3 条，每条一句话", "target_words": 400},
@@ -459,6 +479,7 @@ BUILTIN_TEMPLATES: list[dict] = [
         "id": "tpl_novel",
         "kind": "novel",
         "subtype": "",
+        "channel": "",
         "name": "长篇小说",
         "outline": [
             {"heading": "全书主线", "prompt": "一句话核心冲突 + 三幕结构", "target_words": 600},

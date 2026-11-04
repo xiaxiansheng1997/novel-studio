@@ -116,8 +116,23 @@ class Gateway:
 
 
 def pick_model(registry: Registry, preferred: Optional[str] = None) -> str:
-    """选一个当前可路由的模型：优先指定值，其次 deepseek，最后任意一个。"""
-    candidates = [preferred, DEFAULT_MODEL]
+    """选一个当前可路由的模型：优先指定值，其次直连通道，再次 deepseek，最后任意一个。
+
+    直连（compat）优先是迭代 C 的口径：官方 API / Ollama 没有风控也没有滑块，
+    挂批量最稳；网页端反代降为 fallback——配了照旧能用，只是默认不先选它。
+    只挑已启用且已就绪的 compat：enabled=false 的示范条目、base_url 没填、
+    api_key_env 指了个取不到值的变量，都不该把默认模型拐进必死通道（审查 M2）。
+    """
+    candidates = [preferred]
+    for adapter in registry.adapters.values():
+        if not (getattr(adapter.cfg, "compat", False) and adapter.cfg.models):
+            continue
+        ready = getattr(adapter, "ready", None)
+        if callable(ready) and not ready():
+            continue
+        candidates.append(adapter.cfg.models[0].id)
+        break
+    candidates.append(DEFAULT_MODEL)
     for name in candidates:
         if not name:
             continue

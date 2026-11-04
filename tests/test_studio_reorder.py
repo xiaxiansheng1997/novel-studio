@@ -238,14 +238,55 @@ async def test_move_never_crosses_parents(store) -> None:
     assert [n["title"] for n in await store.list_readable(work["id"])] == ["A1", "A2", "B1"]
 
 
-async def test_container_and_unknown_node_are_refused(store) -> None:
+async def test_unknown_node_and_bad_direction_are_refused(store) -> None:
     work_id, nodes = await three_chapters(store)
-    vol_id = (await store.list_summaries(work_id, "container"))[0]["ref_id"]
 
-    assert await store.move_node(vol_id, "up") == {"moved": False, "reason": "容器节点不参与排序"}
     assert await store.move_node("n_不存在", "up") == {"moved": False, "reason": "节点不存在"}
     with pytest.raises(ValueError):
         await store.move_node(nodes[0]["id"], "left")
+
+
+# ==================== 卷也能上下移 ====================
+
+async def two_volumes_with_chapters(store) -> dict:
+    work = await store.create_work(kind="novel", title="搬卷的书", scale="series")
+    v1 = await store.create_node(work_id=work["id"], kind="volume", title="第一卷")
+    v2 = await store.create_node(work_id=work["id"], kind="volume", title="第二卷")
+    a1 = await store.create_node(work_id=work["id"], kind="chapter", parent_id=v1["id"],
+                                 title="A1", content="甲" * 100, ordinal=1)
+    a2 = await store.create_node(work_id=work["id"], kind="chapter", parent_id=v1["id"],
+                                 title="A2", content="乙" * 100, ordinal=2)
+    b1 = await store.create_node(work_id=work["id"], kind="chapter", parent_id=v2["id"],
+                                 title="B1", content="丙" * 100, ordinal=3)
+    return {"work_id": work["id"], "v1": v1, "v2": v2, "a1": a1, "a2": a2, "b1": b1}
+
+
+async def test_container_move_swaps_whole_subtrees(store) -> None:
+    """第二卷上移：交换的是整棵子树的 path 前缀，章节 parent 不变、全书章号重排。"""
+    f = await two_volumes_with_chapters(store)
+
+    r = await store.move_node(f["v2"]["id"], "up")
+
+    assert r["moved"] is True and r["swapped_with_title"] == "第一卷"
+    rows = {n["id"]: n for n in await store.list_tree(f["work_id"])}
+    assert rows[f["v2"]["id"]]["path"] == f["v1"]["path"]
+    assert rows[f["v1"]["id"]]["path"] == f["v2"]["path"]
+    assert rows[f["b1"]["id"]]["parent_id"] == f["v2"]["id"]
+    assert rows[f["b1"]["id"]]["path"].startswith(rows[f["v2"]["id"]]["path"] + ".")
+    assert rows[f["b1"]["id"]]["depth"] == 1
+    assert [n["title"] for n in await store.list_tree(f["work_id"])] == [
+        "第二卷", "B1", "第一卷", "A1", "A2"]
+    assert [n["title"] for n in await store.list_readable(f["work_id"])] == ["B1", "A1", "A2"]
+    assert await chapter_of(store, f["work_id"]) == {"B1": 1, "A1": 2, "A2": 3}
+
+
+async def test_container_move_at_boundary_changes_nothing(store) -> None:
+    f = await two_volumes_with_chapters(store)
+    before = [(n["id"], n["path"], n["ordinal"]) for n in await store.list_tree(f["work_id"])]
+
+    assert await store.move_node(f["v1"]["id"], "up") == {"moved": False, "reason": "已到边界"}
+    assert await store.move_node(f["v2"]["id"], "down") == {"moved": False, "reason": "已到边界"}
+    assert [(n["id"], n["path"], n["ordinal"]) for n in await store.list_tree(f["work_id"])] == before
 
 
 # ==================== 接口层冒烟 ====================

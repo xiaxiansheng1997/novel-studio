@@ -18,6 +18,15 @@ def _adapter_classes() -> dict[str, type[ProviderAdapter]]:
     return {"qwen": QwenAdapter, "doubao": DoubaoAdapter, "deepseek": DeepSeekAdapter}
 
 
+def _pick_class(pcfg) -> Optional[type[ProviderAdapter]]:
+    """compat 条目走直连适配器（key 随意取，不进反代类表）；其余按 key 查表。"""
+    if getattr(pcfg, "compat", False):
+        from app.providers.openai_compat import OpenAICompatAdapter
+
+        return OpenAICompatAdapter
+    return _adapter_classes().get(pcfg.key)
+
+
 class Registry:
     def __init__(self, config: AppConfig, ctx: AppContext):
         self.config = config
@@ -25,11 +34,10 @@ class Registry:
         self.adapters: dict[str, ProviderAdapter] = {}
         self.throttles: dict[str, ProviderThrottle] = {}
 
-        classes = _adapter_classes()
         for key, pcfg in config.providers.items():
             if not pcfg.enabled:
                 continue
-            cls = classes.get(key)
+            cls = _pick_class(pcfg)
             if cls is None:
                 continue
             self.adapters[key] = cls(pcfg, ctx)
@@ -41,8 +49,22 @@ class Registry:
             )
 
     def route(self, model: str) -> ProviderAdapter:
+        # 三段式：直连显式声明 > 反代显式声明 > 前缀猜测。
+        # 不能单遍「谁先 matches 谁赢」：反代的宽前缀（deepseek-）会把直连
+        # 通道显式声明的模型 id（deepseek-flash）拦路劫走——本该走 API 的
+        # 请求去拉了浏览器（真机实测栽过）。同名 id 两边都声明时直连赢，
+        # 合「直连优先、反代兜底」的产品口径。
+        rp_exact: Optional[ProviderAdapter] = None
         for adapter in self.adapters.values():
-            if adapter.matches(model):
+            if not adapter.matches_exact(model):
+                continue
+            if getattr(adapter.cfg, "compat", False):
+                return adapter
+            rp_exact = rp_exact or adapter
+        if rp_exact is not None:
+            return rp_exact
+        for adapter in self.adapters.values():
+            if adapter.cfg.model_prefix and model.startswith(adapter.cfg.model_prefix):
                 return adapter
         raise ModelNotFound(model)
 
@@ -58,9 +80,9 @@ class Registry:
         """
         self.config = config
         self.ctx.config = config
-        classes = _adapter_classes()
         desired = {
-            key: pcfg for key, pcfg in config.providers.items() if pcfg.enabled and key in classes
+            key: pcfg for key, pcfg in config.providers.items()
+            if pcfg.enabled and _pick_class(pcfg) is not None
         }
         added: list[str] = []
         updated: list[str] = []
@@ -68,8 +90,10 @@ class Registry:
 
         for key, pcfg in desired.items():
             adapter = self.adapters.get(key)
-            if adapter is None:
-                self.adapters[key] = classes[key](pcfg, self.ctx)
+            cls = _pick_class(pcfg)
+            if adapter is None or type(adapter) is not cls:
+                # 包括反代↔compat 中途翻转：类都换了，重建才不留一个拿着新配置的旧机制
+                self.adapters[key] = cls(pcfg, self.ctx)
                 added.append(key)
             else:
                 adapter.cfg = pcfg

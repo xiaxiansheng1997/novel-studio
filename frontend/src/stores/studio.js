@@ -1,18 +1,33 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import { decodeTemplate } from '../utils/template'
 
 /** 写作台的模型选择单独存一份 key：和聊天页的 w2a_model 互不干扰 */
 const STUDIO_MODEL_KEY = 'w2a_studio_model'
 
-/** 后端错误体是 FastAPI 的 `{detail: "..."}`，删除被备份拦住那句就在里面 */
+/** 后端错误体是 FastAPI 的 `{detail: "..."}`；定稿闸门那种给的是一个对象，取里面的 message */
 async function errDetail(r, fallback) {
   try {
     const j = await r.json()
-    return typeof j.detail === 'string' ? j.detail : fallback
+    if (typeof j.detail === 'string') return j.detail
+    if (j.detail && typeof j.detail.message === 'string') return j.detail.message
+    return fallback
   } catch {
     return fallback
   }
+}
+
+/** 带口令的下载：fetch 取 blob 再点一个临时 <a>，不能直接 href */
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
 }
 
 /**
@@ -39,6 +54,9 @@ export const useStudioStore = defineStore('studio', () => {
   // 选题池是全局的；写作统计只有一份（按天净增字数，从版本表现算）
   const ideas = ref([])
   const dailyWrites = ref({ days: [], today: 0, saves_today: 0, streak: 0, total: 0 })
+  // 连载节奏（存稿还能日更几天）：和 dailyWrites 同屏展示但分开拉，接口轻、失败不拖累日历。
+  // 名字带 Stats 收尾：`pipeline` 已经被批量生成跑批的状态占了（L1251）
+  const pipelineStats = ref(null)
 
   const loading = ref(false)
   const saving = ref(false)
@@ -110,12 +128,201 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function loadTemplates(kind, subtype) {
+  async function loadTemplates(kind, subtype, channel = '') {
     const q = new URLSearchParams()
     if (kind) q.set('kind', kind)
     if (subtype) q.set('subtype', subtype)
+    if (channel) q.set('channel', channel)
     const r = await apiFetch('/studio/templates?' + q.toString())
-    if (r.ok) templates.value = await r.json()
+    if (r.ok) templates.value = (await r.json()).map(decodeTemplate)
+  }
+
+  /**
+   * 库里的 outline_json / checks_json / tags_json 都是 JSON 文本，
+   * 界面要的是数组。解析在 utils/template.js：控制台也要用同一份，
+   * 两边各写一份的话，总有一处忘 try/catch 把一个坏模板变成白屏。
+   */
+
+  // ==================== 模板库（完整 CRUD） ====================
+
+  // 模板库与控制台共用一份：与 `templates`（按当前作品筛过的）分开，
+  // 否则在控制台改完一个模板，写作台下拉框会莫名其妙少几项
+  const templateLib = ref([])
+  const templateBusy = ref(false)
+  const templateNote = ref('')
+
+  /** 模板库列表。四个筛选项全可空（空 = 不过滤） */
+  async function loadTemplateLib({ kind = '', subtype = '', channel = '', q = '' } = {}) {
+    const p = new URLSearchParams()
+    if (kind) p.set('kind', kind)
+    if (subtype) p.set('subtype', subtype)
+    if (channel) p.set('channel', channel)
+    if (q) p.set('q', q)
+    const r = await apiFetch('/studio/templates?' + p.toString())
+    if (!r.ok) {
+      error.value = await errDetail(r, '读模板库失败')
+      return []
+    }
+    templateLib.value = (await r.json()).map(decodeTemplate)
+    return templateLib.value
+  }
+
+  async function createTemplate(payload) {
+    templateNote.value = ''
+    const r = await apiFetch('/studio/templates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '新建模板失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    templateLib.value = [got, ...templateLib.value]
+    return got
+  }
+
+  async function updateTemplate(id, patch) {
+    templateNote.value = ''
+    const r = await apiFetch(`/studio/templates/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '改模板失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    const i = templateLib.value.findIndex((t) => t.id === got.id)
+    if (i >= 0) templateLib.value[i] = got
+    if (work.value?.template_id === got.id) await loadTemplates(work.value.kind || 'article')
+    return got
+  }
+
+  /**
+   * 取单条模板（当前作品用的那套）。
+   * 不能指望它就在 `templates` 里：那份列表是按文种/文体筛过的，
+   * 换过文种的作品会拿着一套筛不出来的模板，界面上就变成「无模板」。
+   */
+  async function loadTemplate(id) {
+    if (!id) return null
+    const r = await apiFetch(`/studio/templates/${id}`)
+    if (!r.ok) return null
+    return decodeTemplate(await r.json())
+  }
+
+  /** 删模板。返回解绑了几本作品（服务端会把引用改回 NULL，作品不删） */
+  async function deleteTemplate(id) {
+    const r = await apiFetch(`/studio/templates/${id}`, { method: 'DELETE' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '删模板失败')
+      return null
+    }
+    const got = await r.json()
+    templateLib.value = templateLib.value.filter((t) => t.id !== id)
+    if (work.value?.template_id === id && work.value) {
+      work.value = { ...work.value, template_id: null }
+      await loadTemplates(work.value.kind || 'article')
+    }
+    return got
+  }
+
+  /** 复制一份可改的副本：这是改内置模板的唯一入口 */
+  async function duplicateTemplate(id) {
+    const r = await apiFetch(`/studio/templates/${id}/duplicate`, { method: 'POST' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '复制模板失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    templateLib.value = [got, ...templateLib.value]
+    return got
+  }
+
+  async function setDefaultTemplate(id) {
+    const r = await apiFetch(`/studio/templates/${id}/default`, { method: 'POST' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '设为默认失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    // 同组其它行的 is_default 被服务端清零了，本地同步一份
+    templateLib.value = templateLib.value.map((t) => {
+      if (t.id === got.id) return got
+      if (t.kind === got.kind && (t.subtype || '') === (got.subtype || '')
+        && (t.channel || '') === (got.channel || '')) return { ...t, is_default: 0 }
+      return t
+    })
+    return got
+  }
+
+  async function pinTemplate(id, pinned = null) {
+    const r = await apiFetch(`/studio/templates/${id}/pin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(pinned === null ? {} : { pinned }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '收藏失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    const i = templateLib.value.findIndex((t) => t.id === got.id)
+    if (i >= 0) templateLib.value[i] = got
+    return got
+  }
+
+  /** 从作品沉淀模板：本作品的节标题与节拍卡就是最好的骨架模板 */
+  async function templateFromWork(workId, payload = {}) {
+    templateNote.value = ''
+    const r = await apiFetch(`/studio/templates/from-work/${workId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '沉淀模板失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    templateLib.value = [got, ...templateLib.value]
+    return got
+  }
+
+  /** 导出单条模板：与作品包一样走 fetch + blob，不能直接 href */
+  async function exportTemplate(id, name = 'template') {
+    const r = await apiFetch(`/studio/templates/${id}/export`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '导出模板失败')
+      return false
+    }
+    saveBlob(await r.blob(), `${name}.template.json`)
+    return true
+  }
+
+  /** 导入模板文件：一律新建，不覆盖同 id */
+  async function importTemplate(text) {
+    let data
+    try {
+      data = JSON.parse(text)
+    } catch {
+      error.value = '这不是 JSON 文件：选错了或文件坏了'
+      return null
+    }
+    const r = await apiFetch('/studio/templates/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '导入模板失败')
+      return null
+    }
+    const got = decodeTemplate(await r.json())
+    templateLib.value = [got, ...templateLib.value]
+    return got
   }
 
   async function fetchWorks(kind = '') {
@@ -206,6 +413,11 @@ export const useStudioStore = defineStore('studio', () => {
   async function loadDailyWrites(days = 30) {
     const r = await apiFetch(`/studio/stats/daily?days=${days}`)
     if (r.ok) dailyWrites.value = await r.json()
+  }
+
+  async function loadPipeline() {
+    const r = await apiFetch('/studio/stats/pipeline')
+    if (r.ok) pipelineStats.value = await r.json()
   }
 
   async function createWork(payload) {
@@ -318,28 +530,56 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   /**
+   * 乐观锁撞出来的冲突：装的是服务端那一份完整节点，null 表示没冲突。
+   * 写作台的冲突条消费它；重取或强存之后由 saveNode 清掉。
+   */
+  const saveConflict = ref(null)
+
+  /**
    * 写回一节。返回是否真的落库——自动保存靠这个返回值决定显示「已保存」还是
    * 「保存失败」。以前失败就地吞掉，界面照样写「已保存」，关掉页面那段字就没了。
    */
-  async function saveNode(patch, { snapshot = false, source = '' } = {}) {
+  async function saveNode(patch, { snapshot = false, source = '', force = false, runId = '', ignoreConflict = false } = {}) {
     if (!node.value) return false
     saving.value = true
     // 只有「采用 AI 结果」才带来源：历史页要分得清哪一版是模型写的，
     // 手改那一侧不传，由后端落成 human
     const body = { ...patch, snapshot }
     if (snapshot && source) body.snapshot_source = source
+    // 采用归因：把那次生成的 run_id 带到版本行上，反馈统计的采纳率认这根线
+    if (snapshot && runId) body.run_id = runId
+    // 定稿闸门：看过告警仍要定稿时传 force，后端才会放行
+    if (force) body.force = true
+    // 乐观锁：改正文的写入带上自己那份的时间戳。库里比它新时后端 409，
+    // 双开/异地/跑批的改动不会被我们悄悄盖掉；只改标题状态的不带，不拦
+    if (patch.content !== undefined && node.value.updated_at != null) {
+      body.base_updated_at = Number(node.value.updated_at)
+    }
+    // 冲突条上点过「就存我这份」再发时带这道放行
+    if (ignoreConflict) body.ignore_conflict = true
     try {
       const r = await apiFetch(`/studio/nodes/${node.value.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
+      if (r.status === 409) {
+        // 冲突不是「保存失败」：服务端整份在 detail 里，交给冲突条定夺；
+        // 定稿闸那路 409 没有 conflict 键，照旧落回 errDetail
+        const j = await r.json().catch(() => null)
+        if (j?.detail?.conflict) {
+          saveConflict.value = j.detail.server
+          error.value = ''
+          return false
+        }
+      }
       if (!r.ok) {
         error.value = await errDetail(r, '保存失败')
         return false
       }
       const saved = await r.json()
       node.value = saved
+      saveConflict.value = null   // 落库成功即翻页：手里的版本已是最新
       // 同步树上的字数与标题，避免侧栏显示旧值
       const t = tree.value.find((n) => n.id === saved.id)
       if (t) {
@@ -358,6 +598,19 @@ export const useStudioStore = defineStore('studio', () => {
     } finally {
       saving.value = false
     }
+  }
+
+  /**
+   * 定稿前预检：这一节还有几条没处理的硬告警。只读接口，不写库。
+   * 与 saveNode 带 force 那一下是同一份判断，这里只是为了把规则摆进 confirm。
+   */
+  async function finalGate(nodeId) {
+    const r = await apiFetch(`/studio/nodes/${nodeId}/final-gate`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '读定稿检查失败')
+      return null
+    }
+    return await r.json()
   }
 
   async function createNode(payload) {
@@ -423,6 +676,24 @@ export const useStudioStore = defineStore('studio', () => {
     return { created, failed, firstId }
   }
 
+  /**
+   * 传一份 .docx 给后端解成纯文本：不写库，解出来的文本填进导入弹层继续预览。
+   * 收原始字节（octet-stream），后端不需要 multipart。
+   */
+  async function docxToText(file) {
+    try {
+      const r = await apiFetch('/studio/import/docx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      })
+      if (!r.ok) return { ok: false, reason: await errDetail(r, 'docx 解析失败') }
+      return { ok: true, ...(await r.json()) }
+    } catch (e) {
+      return { ok: false, reason: `文件没传上去：${String(e?.message || e)}` }
+    }
+  }
+
   /** 删节点连同子树。备份写不成时后端会拒绝删除，这里把原因带到 error 上 */
   async function deleteNode(id) {
     const r = await apiFetch(`/studio/nodes/${id}`, { method: 'DELETE' })
@@ -460,6 +731,141 @@ export const useStudioStore = defineStore('studio', () => {
       tree.value = await (await apiFetch(`/studio/works/${work.value.id}/tree`)).json()
       if (node.value?.id === id) await selectNode(id)
     }
+    return res
+  }
+
+  /**
+   * 跨卷拖拽：把一节挂到另一卷末尾（`parentId` 为 null 表示顶层），
+   * 或插到某个兄弟节点之前（`beforeId` 非空时优先）。
+   *
+   * 搬完按树序把全书章号重排，树必须整棵重拉；当前节即便不是被搬的那一节，
+   * 它的 ordinal 也可能变了，所以只要还选着节点就重新 select 一次把章号带回。
+   * 同一 id 重新 select 不会触发视图重灌草稿（watch 盯的是 id），编辑器里的字还在。
+   * 失败把接口那句人话带到 error 上，由调用方当提示显示。
+   */
+  async function reparentNode(id, parentId, beforeId = '') {
+    const r = await apiFetch(`/studio/nodes/${id}/reparent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parent_id: parentId || null, before_id: beforeId || '' }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '移动失败')
+      return { moved: false, reason: error.value }
+    }
+    const res = await r.json()
+    if (res.moved && work.value) {
+      tree.value = await (await apiFetch(`/studio/works/${work.value.id}/tree`)).json()
+      const current = node.value?.id
+      if (current) await selectNode(current)
+    }
+    return res
+  }
+
+  /**
+   * 结构操作后的统一收尾：树重拉 + 把「当前还选着的那一节」重新 select 一次带回新章号。
+   * 与 reparent 同一个口径：章号重排是全 book 的，不只动被操作的那一节。
+   * `focusId` 非空时改为选中新节（复制/拆分要跳到产物）；传入已删节的 id 时自动退回。
+   */
+  async function afterStructureChange(focusId = '') {
+    if (!work.value) return
+    tree.value = await (await apiFetch(`/studio/works/${work.value.id}/tree`)).json()
+    const target = focusId || node.value?.id
+    // 当前节被合掉/删掉了：不退回就会停在一片空草稿上
+    if (target && !tree.value.some((x) => x.id === target)) {
+      if (node.value?.id === target) node.value = null
+    } else if (target) {
+      await selectNode(target)
+    }
+    const st = await apiFetch(`/studio/works/${work.value.id}/stats`)
+    if (st.ok) stats.value = await st.json()
+  }
+
+  /** 复制一节连子树到原节之后。成功返回新节 id，失败带 reason */
+  async function duplicateNode(id) {
+    const r = await apiFetch(`/studio/nodes/${id}/duplicate`, { method: 'POST' })
+    if (!r.ok) {
+      error.value = await errDetail(r, '复制失败')
+      return { ok: false, reason: error.value }
+    }
+    const res = await r.json()
+    error.value = ''
+    await afterStructureChange(res.new_node_id)
+    return res
+  }
+
+  /** 按光标位置把一节切成若干节（第 1 段留在原节，其余紧跟其后） */
+  async function splitNode(id, offsets) {
+    const r = await apiFetch(`/studio/nodes/${id}/split`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ offsets }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '拆分失败')
+      return { ok: false, reason: error.value }
+    }
+    const res = await r.json()
+    error.value = ''
+    if (res.split) await afterStructureChange()
+    return res
+  }
+
+  /** 从这一节起往后合并 count 节（含自己）：正文拼进第一节，其余节后端先落备份再删 */
+  async function mergeNodes(id, count = 2) {
+    const r = await apiFetch(`/studio/nodes/${id}/merge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '合并失败')
+      return { ok: false, reason: error.value }
+    }
+    const res = await r.json()
+    error.value = ''
+    // 手里正看着被合掉的那一节：先改指到留下来的那一节，afterStructureChange
+    // 才不会把当前节退回 null（后端已把正文拼进第一节，内容没丢）
+    if (node.value?.id && node.value.id !== res.node_id
+      && !tree.value.some((x) => x.id === node.value.id)) {
+      node.value = null
+      await selectNode(res.node_id)
+    } else {
+      await afterStructureChange()
+    }
+    return res
+  }
+
+  /**
+   * 全作品（或某一节）查找替换。`dry_run: true` 那一次一个字都不写，界面拿它做预览。
+   *
+   * 真替换完要把树、字数、术语一起拉齐：树上的字数、术语表里同名的那一条、右栏
+   * 摘要的「待重算」都是跟着正文变的，漏掉哪一样，界面就会显示一个和库里不一致的旧值。
+   * 当前那一节的正文交给调用方重拉（StudioView 收到 done 之后比对草稿），
+   * store 不碰编辑器里那份——那一份是人的手上一动，刷回去就是丢字。
+   */
+  async function replaceText(payload) {
+    if (!work.value) return null
+    const r = await apiFetch(`/studio/works/${work.value.id}/replace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '替换失败')
+      return null
+    }
+    const res = await r.json()
+    error.value = ''
+    if (res.dry_run || !res.replaced_nodes) return res
+    const tr = await apiFetch(`/studio/works/${work.value.id}/tree`)
+    if (tr.ok) tree.value = await tr.json()
+    const st = await apiFetch(`/studio/works/${work.value.id}/stats`)
+    if (st.ok) stats.value = await st.json()
+    await loadTerms()
+    // 记忆状态也得重拉：右栏那句「N 份已过期」是索引与摘要台账算出来的，
+    // 而它只在进工作台时读一次——不刷新的话替换完屏幕上永远看不到待重算
+    await loadIndexStatus()
     return res
   }
 
@@ -716,7 +1122,8 @@ export const useStudioStore = defineStore('studio', () => {
       ? (node.value.content ? node.value.content.replace(/\s+$/, '') + '\n\n' + body : body)
       : body
     // 写库失败就留着预览：清掉的话这段生成结果连重试的机会都没有
-    if (!(await saveNode({ content: next }, { snapshot: true, source }))) return false
+    // run_id 从 SSE meta 里取：逐段部分采用也归因到同一次生成，采纳率不漏点按钮这条路
+    if (!(await saveNode({ content: next }, { snapshot: true, source, runId: genMeta.value?.run_id || '' }))) return false
     genText.value = ''
     genMeta.value = null
     return true
@@ -786,15 +1193,24 @@ export const useStudioStore = defineStore('studio', () => {
   // ==================== 内容类型（content-types.yaml） ====================
 
   const contentTypes = ref([])
+  // 渠道与文种正交，单独一列：同一套骨架可以发公众号也可以发知乎
+  const channels = ref([])
   const contentTypeError = ref('')
 
-  /** 新增文种只改 YAML，这里只负责取回来渲染下拉框 */
+  /** 新增文种/渠道只改 YAML，这里只负责取回来渲染下拉框 */
   async function loadContentTypes() {
     const r = await apiFetch('/studio/content-types')
     if (!r.ok) return
     const j = await r.json()
     contentTypes.value = j.kinds || []
+    channels.value = j.channels || []
     contentTypeError.value = j.error || ''
+  }
+
+  /** 渠道 id → 显示名。模板卡片、作品卡片都要说「公众号」而不是「wechat」 */
+  function channelLabel(id) {
+    if (!id) return ''
+    return channels.value.find((c) => c.id === id)?.label || id
   }
 
   // ==================== 大纲 ====================
@@ -843,7 +1259,7 @@ export const useStudioStore = defineStore('studio', () => {
    * 逐节生成。用 fetch 读流（EventSource 不支持 POST），
    * 每节完成就刷一次树，用户能看到进度而不是干等。
    */
-  async function runPipeline({ only_empty = true, limit = 0, instruction = '', model = genModel.value } = {}) {
+  async function runPipeline({ only_empty = true, limit = 0, instruction = '', model = genModel.value, ignore_budget = false } = {}) {
     if (!work.value || pipeline.value.running) return null
     pipeline.value = {
       running: true, total: 0, index: 0, title: '', chars: 0,
@@ -854,7 +1270,7 @@ export const useStudioStore = defineStore('studio', () => {
       const resp = await apiFetch(`/studio/works/${work.value.id}/pipeline`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ only_empty, limit, instruction, model }),
+        body: JSON.stringify({ only_empty, limit, instruction, model, ignore_budget }),
       })
       if (!resp.ok) {
         let msg = `HTTP ${resp.status}`
@@ -1005,26 +1421,90 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  /** 导出要带口令，不能直接 <a href>，否则 401 */
-  async function downloadExport({ includeEmpty = false } = {}) {
-    if (!work.value) return null
-    const r = await apiFetch(
-      `/studio/works/${work.value.id}/export?include_empty=${includeEmpty ? 'true' : 'false'}`,
-    )
+  /** 整本阅读模式的数据：按全序的节列表；显式传 id，阅读页可以直接从 URL 进入 */
+  async function fetchReading(id) {
+    const wid = id || work.value?.id
+    if (!wid) return null
+    const r = await apiFetch(`/studio/works/${wid}/reading`)
     if (!r.ok) {
-      error.value = `导出失败：HTTP ${r.status}`
+      error.value = await errDetail(r, '阅读数据读取失败')
       return null
     }
+    return await r.json()
+  }
+
+  /**
+   * 导出要带口令，不能直接 <a href>，否则 401。
+   * 格式交给后端拼：md 存档、txt/docx/epub 是成稿；author 只进 docx/epub 元数据。
+   */
+  async function downloadExport({ includeEmpty = false, format = 'md', author = '' } = {}) {
+    if (!work.value) return false
+    const qs = new URLSearchParams({
+      format,
+      include_empty: includeEmpty ? 'true' : 'false',
+    })
+    if (author) qs.set('author', author)
+    const r = await apiFetch(`/studio/works/${work.value.id}/export?${qs}`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '导出失败')
+      return false
+    }
     const blob = await r.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${work.value.title || 'draft'}.md`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(url)
+    saveBlob(blob, `${work.value.title || 'draft'}.${format}`)
     return true
+  }
+
+  /**
+   * 作品包导出：树、版本、素材与图谱都在一个 JSON 里。
+   * 只取不写，导出之后书架上的东西一点不变。
+   */
+  async function exportBundle(w) {
+    if (!w?.id) return false
+    const r = await apiFetch(`/studio/works/${w.id}/bundle`)
+    if (!r.ok) {
+      error.value = await errDetail(r, '导出作品包失败')
+      return false
+    }
+    saveBlob(await r.blob(), `${w.title || 'work'}.bundle.json`)
+    return true
+  }
+
+  /** 整库导出：每本书一个包，外面套一层书目；换机时导这一个就够 */
+  async function exportLibrary() {
+    const r = await apiFetch('/studio/library/bundle')
+    if (!r.ok) {
+      error.value = await errDetail(r, '导出整库失败')
+      return false
+    }
+    saveBlob(await r.blob(), 'novel-studio-library.bundle.json')
+    return true
+  }
+
+  /**
+   * 导入作品包：整库包与单本包都认。
+   * 每本都落成新书（id 重发），导完把书架重拉；返回接口结果供调用方报数。
+   */
+  async function importBundle(text) {
+    let data
+    try {
+      data = JSON.parse(text)
+    } catch {
+      error.value = '这不是 JSON 文件：选错了或文件坏了'
+      return null
+    }
+    const r = await apiFetch('/studio/works/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '导入失败')
+      return null
+    }
+    const res = await r.json()
+    await fetchWorks()
+    error.value = ''
+    return res
   }
 
   /**
@@ -1199,7 +1679,8 @@ export const useStudioStore = defineStore('studio', () => {
   const transforming = ref(false)
   const transformResult = ref(null)
 
-  async function transform({ text, action, candidates = 1, instruction = '', lang = '英文' }) {
+  async function transform({ text, action, candidates = 1, instruction = '', lang = '英文',
+    context = '', models = [] }) {
     if (transforming.value) return null
     transforming.value = true
     transformResult.value = null
@@ -1210,6 +1691,8 @@ export const useStudioStore = defineStore('studio', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text, action, candidates, instruction, lang,
+          // context：选区前后的窗口，让加工不脱离全节语境；models：跨模型对比
+          context, models,
           model: genModel.value,
           work_id: work.value?.id || '',
         }),
@@ -1286,13 +1769,13 @@ export const useStudioStore = defineStore('studio', () => {
     return true
   }
 
-  async function addCard({ kind, name, summary, dataJson = '{}', aliases = [] }) {
+  async function addCard({ id = '', kind, name, summary, dataJson = '{}', aliases = [] }) {
     if (!work.value) return false
     const r = await apiFetch(`/studio/works/${work.value.id}/cards`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        kind, name, summary, data_json: dataJson, aliases, pinned: true,
+        id, kind, name, summary, data_json: dataJson, aliases, pinned: true,
       }),
     })
     if (!r.ok) {
@@ -1306,6 +1789,54 @@ export const useStudioStore = defineStore('studio', () => {
   async function deleteCard(id) {
     await apiFetch(`/studio/cards/${id}`, { method: 'DELETE' })
     await loadGraph({ refresh: true })
+  }
+
+  /** 作者改实体：改名 / 补别名 / 改类型 / 改状态。图谱缓存由后端失效。 */
+  async function updateEntity(id, patch) {
+    const r = await apiFetch(`/studio/entities/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (!r.ok) {
+      graphNote.value = `改实体失败：HTTP ${r.status} ${(await r.text()).slice(0, 160)}`
+      return false
+    }
+    await loadGraph({ refresh: true })
+    return true
+  }
+
+  /** 手动回收 / 弃用伏笔；ordinal 不传时后端用它当初埋下的节号。 */
+  async function resolveForeshadow(id, status = 'resolved', ordinal = 0) {
+    const r = await apiFetch(`/studio/foreshadows/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, ordinal }),
+    })
+    if (!r.ok) {
+      graphNote.value = `伏笔更新失败：HTTP ${r.status} ${(await r.text()).slice(0, 160)}`
+      return false
+    }
+    await loadGraph({ refresh: true })
+    return true
+  }
+
+  /** 重抽本节节拍卡（章纲）。返回 beats 文本，同时把本地 node.summary 同步过去。 */
+  async function generateBeats({ focus = '', model = genModel.value } = {}) {
+    if (!node.value) return null
+    const nodeId = node.value.id
+    const r = await apiFetch(`/studio/nodes/${nodeId}/beats`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ focus, model }),
+    })
+    if (!r.ok) {
+      error.value = await errDetail(r, '重抽节拍失败')
+      return null
+    }
+    const j = await r.json()
+    if (node.value?.id === nodeId) node.value = { ...node.value, summary: j.beats }
+    return j
   }
 
   /** 一致性检查：纯本地结构化比对，点一下就能跑。 */
@@ -1331,8 +1862,12 @@ export const useStudioStore = defineStore('studio', () => {
     }
   }
 
-  async function resolveIssue(id) {
-    const r = await apiFetch(`/studio/issues/${id}/resolve`, { method: 'POST' })
+  async function resolveIssue(id, note = '') {
+    const r = await apiFetch(`/studio/issues/${id}/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    })
     if (!r.ok) return false
     issues.value = issues.value.filter((i) => i.id !== id)
     await loadIssueSummary()
@@ -1361,6 +1896,7 @@ export const useStudioStore = defineStore('studio', () => {
   async function enqueueBatch({
     taskType = 'draft', onlyEmpty = true, limit = 0, nodeIds = [],
     instruction = '', priority = 9, triageEvery = 0, model = genModel.value,
+    ignoreBudget = false,
   } = {}) {
     if (!work.value || queueBusy.value) return null
     queueBusy.value = true
@@ -1371,6 +1907,7 @@ export const useStudioStore = defineStore('studio', () => {
         body: JSON.stringify({
           task_type: taskType, only_empty: onlyEmpty, limit,
           node_ids: nodeIds, instruction, priority, triage_every: triageEvery, model,
+          ignore_budget: ignoreBudget,
         }),
       })
       if (!r.ok) {
@@ -1392,16 +1929,58 @@ export const useStudioStore = defineStore('studio', () => {
     return Boolean(q.current) || (q.counts?.queued || 0) > 0
   })
 
+  // ==================== 批量前成本预估（迭代 C） ====================
+
+  /** 开跑前看一眼要花多少：与 pipeline 同一套选节口径，纯读不开跑。 */
+  async function estimatePipeline({ only_empty = true, limit = 0, model = genModel.value } = {}) {
+    if (!work.value) return null
+    try {
+      const r = await apiFetch(`/studio/works/${work.value.id}/pipeline/estimate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ only_empty, limit, model }),
+      })
+      if (!r.ok) return null
+      return await r.json()
+    } catch {
+      return null
+    }
+  }
+
+  async function getBudget() {
+    try {
+      const r = await apiFetch('/studio/budget')
+      return r.ok ? (await r.json()).limit : 0
+    } catch {
+      return 0
+    }
+  }
+
+  async function setBudget(limit) {
+    try {
+      const r = await apiFetch('/studio/budget', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: Number(limit) || 0 }),
+      })
+      return r.ok
+    } catch {
+      return false
+    }
+  }
+
   return {
     works, work, tree, node, stats, templates, sources, facts, terms, issues,
-    loading, saving, error,
+    loading, saving, error, saveConflict,
     generating, genText, genMeta, genError, genStopped, stopGenerate,
     genModel, genModelLabel, modelGroups, allGenModels, setGenModel, loadGenModels,
     activeWorkId, activeNodeId, template,
     loadTemplates, fetchWorks, createWork, updateWork, setWorkStatus, globalSearch,
-    ideas, dailyWrites, loadIdeas, addIdea, useIdea, deleteIdea, loadDailyWrites,
+    ideas, dailyWrites, pipelineStats, loadIdeas, addIdea, useIdea, deleteIdea, loadDailyWrites, loadPipeline,
     selectWork, selectNode, deleteWork,
-    saveNode, createNode, importNodes, deleteNode, moveNode,
+    saveNode, finalGate, createNode, importNodes, docxToText, deleteNode, moveNode, reparentNode, replaceText,
+    // 迭代 B：结构操作与统一收尾（批量操作也走 afterStructureChange 重拉树）
+    duplicateNode, splitNode, mergeNodes, afterStructureChange,
     loadSources, addSource, loadSource, searchSources, extractFacts, deleteSource, updateSource,
     loadFacts, addFact, deleteFact, updateFact,
     loadTerms, addTerm, deleteTerm, updateTerm,
@@ -1413,10 +1992,15 @@ export const useStudioStore = defineStore('studio', () => {
     indexStatus, indexing, summarizing, memoryNote,
     loadIndexStatus, reindex, runSummarize,
     // M1 尾款
-    contentTypes, contentTypeError, loadContentTypes,
+    contentTypes, channels, channelLabel, contentTypeError, loadContentTypes,
+    // 模板库
+    templateLib, templateBusy, templateNote, decodeTemplate,
+    loadTemplateLib, loadTemplate, createTemplate, updateTemplate, deleteTemplate, duplicateTemplate,
+    setDefaultTemplate, pinTemplate, templateFromWork, exportTemplate, importTemplate,
     outlineBusy, generateOutline,
     pipeline, runPipeline,
-    assembling, assembleDoc, downloadExport, exportHtml, publishCheck, writeDigest,
+    assembling, assembleDoc, fetchReading, downloadExport, exportBundle, exportLibrary, importBundle,
+    exportHtml, publishCheck, writeDigest,
     // 公众号第二轮：文风 / 设置 / 标题 / 转发语
     voice, settings,
     loadVoice, addVoiceSample, deleteVoiceSample, analyzeVoice, saveVoiceProfile,
@@ -1425,9 +2009,12 @@ export const useStudioStore = defineStore('studio', () => {
     // M3 图谱与一致性
     graphData, graphBusy, graphNote, checking, issueSummary, isNovel,
     loadGraph, extractGraph, clearGraph, addCard, deleteCard,
+    updateEntity, resolveForeshadow, generateBeats,
     runCheck, resolveIssue, loadIssueSummary,
     // M4 任务队列：写作台只靠这三个画一行进度；明细与控制走控制台的接口
     queue, queueBusy, queueActive,
     loadQueue, enqueueBatch,
+    // 迭代 C：批量前的成本预估与预算上限
+    estimatePipeline, getBudget, setBudget,
   }
 })
