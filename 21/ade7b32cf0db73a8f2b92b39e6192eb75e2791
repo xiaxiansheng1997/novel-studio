@@ -1,0 +1,33 @@
+frontend/tests/WriterEditor.spec.js
+  s_c7df7c295a4159::t_6b66d811ebee34 68
+  s_c7df7c295a4159::t_1401291dbb3740 75,78-79
+  s_c7df7c295a4159::t_986acdd9da63e7 1-50,52-54,64-67,70-71,76-77,80-82,84-95,97-103,105-110,113-122
+  s_c7df7c295a4159::t_1b9de5aac8368f 51,55-63,69,72-74,83,96,104,111-112
+frontend/src/components/WriterEditor.vue
+  s_c7df7c295a4159::t_1c5c253eaf0bc7 91
+  s_c7df7c295a4159::t_fbc62461519d56 1-90,92-257
+frontend/src/utils/paras.js
+  s_c7df7c295a4159::t_8820891f1b8b40 1-3,8,10-12,14-15,18,28,31,34,52
+  s_c7df7c295a4159::t_d6389c9fde57c0 4-7,9,13,16-17,19-27,29-30,32-33,35-51
+frontend/src/utils/writer.js
+  s_c7df7c295a4159::t_0904a40ddb1a58 2,46-49,76-77,137-146
+frontend/src/views/StudioView.vue
+  s_c7df7c295a4159::t_e7607be2df2dbd 219-254,342,347-348,571,589-590
+  s_c7df7c295a4159::t_cbb33521c1d62d 345,2297-2298,2623,2642
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "21ade7b32cf0db73a8f2b92b39e6192eb75e2791",
+  "prompts": {},
+  "sessions": {
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
