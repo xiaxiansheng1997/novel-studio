@@ -1,0 +1,38 @@
+frontend/src/components/ShelfView.vue
+  s_c7df7c295a4159::t_1a05c174ec167a 510
+  s_c7df7c295a4159::t_abd29832e69662 60-68,72-73,499-500,502-503,505-508,511-529,531-534,536-542,674-701
+  s_c7df7c295a4159::t_57a0681f0d6f2e 69-71,501,504,509,530,535
+frontend/src/views/StudioView.vue
+  s_c7df7c295a4159::t_3e6e2d02fed41e 1005,1250,1252
+frontend/tests/studioPipeline.spec.js
+  s_c7df7c295a4159::t_7571a1163f09c8 38-39,46
+  s_c7df7c295a4159::t_4cf54070757756 1-37,40-45,47-65
+app/api/studio_routes.py
+  s_c7df7c295a4159::t_cb46e81a883192 836-871,2337-2339,2592-2597
+tests/test_studio_pipeline.py
+  s_c7df7c295a4159::t_29a7a0304a4ec4 1-146
+frontend/src/stores/studio.js
+  s_c7df7c295a4159::t_c10e6afa578937 57-59,420,1979
+  s_c7df7c295a4159::t_72b6aebf34883e 418-419,421-422
+app/studio/store.py
+  s_c7df7c295a4159::t_d250504e09c159 2528-2572,2664-2688
+frontend/src/views/ConsoleView.vue
+  s_c7df7c295a4159::t_8c59373a1a07c7 552-560,562-567,569-593,1414-1415,1424,2548,2553
+  s_c7df7c295a4159::t_6e17768d532b9f 561,568,991-992,1370,1406-1413,1416-1423,1516,1529,2545-2547,2549-2552
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "881c769a51bce2501c993b78162babdeedbcd8e1",
+  "prompts": {},
+  "sessions": {
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
