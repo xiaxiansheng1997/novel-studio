@@ -1,0 +1,21 @@
+tests/test_studio_pipeline.py
+  s_c7df7c295a4159::t_5cad8f50a715f7 60-63,149-159
+app/api/studio_routes.py
+  s_c7df7c295a4159::t_e206901b985b69 852-854,862-865,871,874
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c7e3246f87787a2ba2247368fa2a09a93e9d9d7e",
+  "prompts": {},
+  "sessions": {
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
