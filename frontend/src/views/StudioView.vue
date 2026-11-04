@@ -95,8 +95,8 @@
             <span v-if="store.template" class="pill pill--info">{{ store.template.name }}</span>
             <span
               class="ed-save"
-              :class="{ 'is-bad': saveState === 'error' }"
-              :title="saveState === 'error' ? '没存上，点一下重试（正文还在页面上）' : ''"
+              :class="{ 'is-bad': saveState === 'error' || saveState === 'conflict' }"
+              :title="saveState === 'error' ? '没存上，点一下重试（正文还在页面上）' : (saveState === 'conflict' ? '别处改过这一节，在下方冲突条里选一下' : '')"
               @click="saveState === 'error' && flushSave()"
             >{{ saveLabel }}</span>
             <button
@@ -344,6 +344,17 @@
               <button class="mini" title="关闭（Esc）" @click="closeFind">
                 <AppIcon name="x" :size="12" />
               </button>
+            </div>
+
+            <!-- 乐观锁撞出的冲突：库里这一节比你手里的新（双开/异地/跑批动的）。
+                 改动留在页面上不丢，但自动保存已停住——不先让人选就反复撞闸 -->
+            <div v-if="store.saveConflict" class="conflict-bar">
+              <AppIcon name="alert" :size="13" />
+              <span class="conflict-msg">
+                这一节被别处改过了（服务端 {{ store.saveConflict.word_count || 0 }} 字），你页面上这份还没存。
+              </span>
+              <button class="btn btn-sm" @click="resolveConflictReload">取对方版本</button>
+              <button class="btn btn-sm btn-primary" @click="resolveConflictForce">就存我这份</button>
             </div>
 
             <div class="ed-body">
@@ -801,6 +812,7 @@ const saveLabel = computed(() => {
   if (!store.node) return ''
   // 失败要显眼：以前无论成功失败都写「已保存」，关页面前一秒才发现白写了
   if (saveState.value === 'error') return '保存失败'
+  if (saveState.value === 'conflict') return '冲突·未保存'
   if (store.saving || saveState.value === 'saving') return '保存中…'
   if (saveState.value === 'dirty') return '未保存'
   return '已保存'
@@ -1174,6 +1186,7 @@ onUnmounted(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   stopQueuePoll()
+  stopMetaWatch()
   clearTimeout(noticeTimer)
 })
 
@@ -1215,6 +1228,8 @@ async function enterWork(id) {
     // 队列可能在关页面期间一直在跑，回来先把状态拉齐（一行进度要能显示出来）
     await store.loadQueue()
     if (store.queueActive) startQueuePoll()
+    // 双开探测的常驻轮询：写台开着就每 10 秒摸一次当前节的时间戳
+    startMetaWatch()
     // 默认选中第一个有正文的节点，省一次点击；从全库搜索跳进来时先认 ?node=
     const wanted = typeof route.query.node === 'string' ? route.query.node : ''
     const first = (wanted && store.tree.find((n) => n.id === wanted))
@@ -1230,6 +1245,7 @@ async function backToShelf() {
   const ok = await flushSave()
   if (!ok && !window.confirm('这一节还没存上，回书架会丢掉这段改动。仍要离开吗？')) return
   focus.value = false
+  stopMetaWatch()
   // 刚写完的字要立刻反映到书架上的「今天字数 / 连续天」
   store.loadDailyWrites().catch(() => {})
   router.replace('/studio')
@@ -1511,6 +1527,12 @@ async function onBatch(act, ids, opts = {}) {
 }
 
 function onInput() {
+  // 冲突没定夺前不再排自动保存：改动留在页面上等冲突条的按钮，
+  // 带着旧 base 反复去撞闸只会每 800ms 吃一个 409
+  if (store.saveConflict || saveState.value === 'conflict') {
+    saveState.value = 'conflict'
+    return
+  }
   saveState.value = 'dirty'
   clearTimeout(saveTimer)
   saveTimer = setTimeout(flushSave, 800)
@@ -1525,6 +1547,11 @@ async function flushSave() {
   saveState.value = 'saving'
   const ok = await store.saveNode({ content: contentDraft.value })
   if (!ok) {
+    if (store.saveConflict) {
+      // 冲突不是网络问题，重试不会自愈：停住自动保存，等人在冲突条里选
+      saveState.value = 'conflict'
+      return false
+    }
     saveState.value = 'error'
     // 自动保存每 800ms 会再试一次；服务端挂着的时候不该每敲一个字弹一遍
     if (!wasError) showNotice(store.error || '保存失败：正文还在页面上，先别关', true)
@@ -1826,12 +1853,75 @@ async function fetchNodeQuietly(id) {
   }
 }
 
-/** 队列写完后把正文换成服务端版本（只在本地没有未保存修改时） */
+/** 队列写完后把正文换成服务端版本（只在本地没有未保存修改时）；返回有没有换 */
 function applyRemoteContent(node) {
-  if (saveState.value === 'dirty' || store.saving) return
+  if (saveState.value === 'dirty' || store.saving) return false
   contentDraft.value = node.content || ''
   store.node = node
   saveState.value = 'saved'
+  return true
+}
+
+// ---- 双开与异地探测（缺口 5）：轻轮询摸时间戳，事前提示 + 保存时 409 拦 ----
+let metaTimer = 0
+
+function startMetaWatch() {
+  if (metaTimer) return
+  metaTimer = setInterval(checkRemoteMeta, 10000)
+}
+
+function stopMetaWatch() {
+  if (metaTimer) clearInterval(metaTimer)
+  metaTimer = 0
+}
+
+/**
+ * 每 10 秒摸一次当前节的 updated_at（只拿五个字段，不拖全文）。
+ * 库里比手里新就是别处写过：本地已存过就直接换成服务端版并知会一声；
+ * 还有没存上的字就不碰——那一份只有人知道要不要丢，交给保存时的 409 闸与冲突条。
+ * 跑批期间队列轮询每 3 秒已经在拉全文，不叠一份重复的。
+ */
+async function checkRemoteMeta() {
+  const id = store.node?.id
+  if (!id || store.queueActive || store.saveConflict || store.saving) return
+  let meta = null
+  try {
+    const r = await apiFetch(`/studio/nodes/${id}/meta`)
+    if (!r.ok) return
+    meta = await r.json()
+  } catch {
+    return   // 网络抖一下不值得打扰写作
+  }
+  if (Number(meta.updated_at) - Number(store.node.updated_at || 0) <= 1e-6) return
+  if (saveState.value === 'dirty' || saveState.value === 'conflict') return
+  const full = await fetchNodeQuietly(id)
+  if (full && applyRemoteContent(full)) showNotice('这一节被别处更新了，已换成最新版')
+}
+
+/**
+ * 冲突条「取对方版本」：页面里那份未存的改动会被丢弃——所以先 confirm。
+ * 用的是 409 带回的那一整份，不再补一次 GET；base 随之刷新，下一次自动保存正常走。
+ */
+function resolveConflictReload() {
+  const server = store.saveConflict
+  if (!server) return
+  if (!window.confirm('取对方版本会丢弃你页面上还没存上的改动，继续吗？')) return
+  store.saveConflict = null
+  contentDraft.value = server.content || ''
+  store.node = server
+  saveState.value = 'saved'
+  showNotice('已取对方版本；你那份未存的改动没有落库，找不回了')
+}
+
+/** 冲突条「就存我这份」：带放行重发，盖掉的对面那份若没留过版本就真没了，提示实话实说 */
+async function resolveConflictForce() {
+  if (!(await store.saveNode({ content: contentDraft.value }, { ignoreConflict: true }))) {
+    saveState.value = store.saveConflict ? 'conflict' : 'error'
+    if (!store.saveConflict) showNotice(store.error || '强存也没落上，先别关页面', true)
+    return
+  }
+  saveState.value = 'saved'
+  showNotice('已存上你这版；对方刚才写的改动若没留过版本，会被盖掉')
 }
 
 function gotoConsole() {
@@ -2339,6 +2429,23 @@ async function applyTitle(text, target) {
   width: min(var(--w-measure, 646px), calc(100% - 64px));
   margin: 0 auto;
   padding-bottom: 8px;
+}
+/* 冲突条：与正文同宽、压在 ed-head 下方——它拦的是这一节的保存，不该像全局弹窗 */
+.conflict-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(var(--w-measure, 646px), calc(100% - 64px));
+  margin: 0 auto;
+  padding: 6px 10px;
+  border: 1px solid var(--danger-fg);
+  border-radius: 6px;
+  color: var(--danger-fg);
+  font-size: 12px;
+}
+.conflict-msg {
+  flex: 1;
+  min-width: 0;
 }
 .find-input {
   flex: 1;

@@ -145,6 +145,11 @@ class NodeUpdate(BaseModel):
     # 采用归因：前端把生成 SSE meta 里的 run_id 带回来，版本行认这根线，
     # 反馈统计才知道哪次生成真的进了正文
     run_id: Optional[str] = None
+    # 乐观锁：前端手里那一份的 updated_at。改正文的写入若比库里旧，
+    # 说明取到存之间有别处动过（双开/异地/跑批），409 拦下而不是悄悄盖掉
+    base_updated_at: Optional[float] = None
+    # 看过冲突提示仍要「就存我这份」：只放行上面那道闸，与定稿闸的 force 各管各的
+    ignore_conflict: bool = False
     # 定稿闸门：这一节有未处理的硬告警时，要人看过并明确「就这样定」才放行
     force: bool = False
 
@@ -872,6 +877,8 @@ async def update_node(node_id: str, body: NodeUpdate, request: Request):
     force = bool(payload.pop("force", False))
     # nodes 表没有 run_id 列，必须自己 pop 掉——留在 payload 里会随 **fields 进 UPDATE
     run_id = payload.pop("run_id", None)
+    payload.pop("base_updated_at", None)
+    payload.pop("ignore_conflict", None)
     if source and source not in _VERSION_SOURCES:
         raise HTTPException(
             status_code=400,
@@ -884,6 +891,17 @@ async def update_node(node_id: str, body: NodeUpdate, request: Request):
     node = await store.get_node(node_id)
     if not node:
         raise HTTPException(status_code=404, detail="节点不存在")
+    # 冲突闸：只拦改正文的写入，而且只拦带 base 的调用方——没带 base 的（服务端
+    # 内部写入、旧调用）无从判断对方见过哪一份，维持原行为。
+    # 比的是秒级浮点戳：取到存之间库里被别处写过就 409，把服务端整份带回去
+    # 让调用方选重取还是强存；last-write-wins 会把另一边的改动吞得无声无息。
+    if ("content" in payload and body.base_updated_at is not None
+            and not body.ignore_conflict
+            and float(node.get("updated_at") or 0) - body.base_updated_at > 1e-6):
+        raise HTTPException(status_code=409, detail={
+            "conflict": True,
+            "server": node,
+        })
     # 定稿闸门：只拦「硬告警」（severity=error），提醒与提示不挡路。
     # 这里不写库、不改状态——前端拿到 409 里那几条，弹一句确认再带 force 重试；
     # 告警本身不会随定稿自动消掉，人在「告警」里点「已处理」才消。
@@ -909,6 +927,18 @@ async def update_node(node_id: str, body: NodeUpdate, request: Request):
             }
             await store.update_work(work["id"], meta_json=json.dumps(meta, ensure_ascii=False))
     return await store.get_node(node_id)
+
+
+@router.get("/studio/nodes/{node_id}/meta", dependencies=[Depends(verify_key)])
+async def node_meta(node_id: str, request: Request):
+    """只报时间戳与字数的轻接口：写作台每十几秒摸一次，探「别处有没有动过这一节」。
+
+    一节正文可能几万字，拿全文轮询太贵；这一份够前端判断要不要再去拉全文。
+    """
+    node = await _store(request).get_node(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    return {k: node.get(k) for k in ("id", "title", "word_count", "status", "updated_at")}
 
 
 @router.post("/studio/nodes/{node_id}/beats", dependencies=[Depends(verify_key)])

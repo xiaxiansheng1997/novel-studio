@@ -522,10 +522,16 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   /**
+   * 乐观锁撞出来的冲突：装的是服务端那一份完整节点，null 表示没冲突。
+   * 写作台的冲突条消费它；重取或强存之后由 saveNode 清掉。
+   */
+  const saveConflict = ref(null)
+
+  /**
    * 写回一节。返回是否真的落库——自动保存靠这个返回值决定显示「已保存」还是
    * 「保存失败」。以前失败就地吞掉，界面照样写「已保存」，关掉页面那段字就没了。
    */
-  async function saveNode(patch, { snapshot = false, source = '', force = false, runId = '' } = {}) {
+  async function saveNode(patch, { snapshot = false, source = '', force = false, runId = '', ignoreConflict = false } = {}) {
     if (!node.value) return false
     saving.value = true
     // 只有「采用 AI 结果」才带来源：历史页要分得清哪一版是模型写的，
@@ -536,18 +542,36 @@ export const useStudioStore = defineStore('studio', () => {
     if (snapshot && runId) body.run_id = runId
     // 定稿闸门：看过告警仍要定稿时传 force，后端才会放行
     if (force) body.force = true
+    // 乐观锁：改正文的写入带上自己那份的时间戳。库里比它新时后端 409，
+    // 双开/异地/跑批的改动不会被我们悄悄盖掉；只改标题状态的不带，不拦
+    if (patch.content !== undefined && node.value.updated_at != null) {
+      body.base_updated_at = Number(node.value.updated_at)
+    }
+    // 冲突条上点过「就存我这份」再发时带这道放行
+    if (ignoreConflict) body.ignore_conflict = true
     try {
       const r = await apiFetch(`/studio/nodes/${node.value.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
+      if (r.status === 409) {
+        // 冲突不是「保存失败」：服务端整份在 detail 里，交给冲突条定夺；
+        // 定稿闸那路 409 没有 conflict 键，照旧落回 errDetail
+        const j = await r.json().catch(() => null)
+        if (j?.detail?.conflict) {
+          saveConflict.value = j.detail.server
+          error.value = ''
+          return false
+        }
+      }
       if (!r.ok) {
         error.value = await errDetail(r, '保存失败')
         return false
       }
       const saved = await r.json()
       node.value = saved
+      saveConflict.value = null   // 落库成功即翻页：手里的版本已是最新
       // 同步树上的字数与标题，避免侧栏显示旧值
       const t = tree.value.find((n) => n.id === saved.id)
       if (t) {
@@ -1939,7 +1963,7 @@ export const useStudioStore = defineStore('studio', () => {
 
   return {
     works, work, tree, node, stats, templates, sources, facts, terms, issues,
-    loading, saving, error,
+    loading, saving, error, saveConflict,
     generating, genText, genMeta, genError, genStopped, stopGenerate,
     genModel, genModelLabel, modelGroups, allGenModels, setGenModel, loadGenModels,
     activeWorkId, activeNodeId, template,
