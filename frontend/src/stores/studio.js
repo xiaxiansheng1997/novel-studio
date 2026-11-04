@@ -1644,7 +1644,8 @@ export const useStudioStore = defineStore('studio', () => {
   const transforming = ref(false)
   const transformResult = ref(null)
 
-  async function transform({ text, action, candidates = 1, instruction = '', lang = '英文' }) {
+  async function transform({ text, action, candidates = 1, instruction = '', lang = '英文',
+    context = '', models = [] }) {
     if (transforming.value) return null
     transforming.value = true
     transformResult.value = null
@@ -1655,6 +1656,8 @@ export const useStudioStore = defineStore('studio', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text, action, candidates, instruction, lang,
+          // context：选区前后的窗口，让加工不脱离全节语境；models：跨模型对比
+          context, models,
           model: genModel.value,
           work_id: work.value?.id || '',
         }),

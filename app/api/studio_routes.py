@@ -2551,8 +2551,17 @@ class TransformRequest(BaseModel):
     lang: str = "英文"
     candidates: int = 1
     model: str = ""
+    # 跨模型对比：每家各出一条（至多 3），给了就接管 candidates——
+    # 同一家抽第二稿的差异，往往不如换一家的手感大。
+    # 不在 schema 卡 max_length：去重后可能不足 3，截断交给路由里的 want[:3]
+    models: list[str] = Field(default_factory=list)
+    # 选区前后的正文（前端组好的窗口）：只用来对齐语气、称谓与时态，不输出
+    context: str = Field(default="", max_length=20000)
     mode: str = "quick"
     work_id: str = ""
+
+# 上下文只取窗口不取全节：几万字的前后文既撑爆 prompt，模型也抓不住重点
+CONTEXT_MAX = 4000
 
 
 @router.post("/studio/transform", dependencies=[Depends(verify_key)])
@@ -2593,35 +2602,49 @@ async def transform(body: TransformRequest, request: Request):
     user_parts = [f"<task>{brief}</task>"]
     if body.instruction:
         user_parts.append(f"<extra>{body.instruction}</extra>")
+    ctx = (body.context or "").strip()
+    if ctx:
+        # 不声明这句话，模型会把前后文一起复述出来甚至顺手改掉，写回时变成双重替换
+        system += ("\n<context> 是选区前后的正文，只用来对齐语气、称谓与时态；"
+                   "不要输出它，也不要改动它。")
+        user_parts.append(f"<context>\n{ctx[:CONTEXT_MAX]}\n</context>")
     user_parts.append(f"<text>\n{body.text}\n</text>")
     user = "\n\n".join(user_parts)
 
     n = max(1, min(int(body.candidates or 1), 3))
+    # 对比模型去重保序；空串不算。没给 models 才按 candidates 抽同一家多稿
+    want: list[str] = []
+    for m in body.models:
+        m = (m or "").strip()
+        if m and m not in want:
+            want.append(m)
+    targets = list(enumerate(want[:3])) if want else [(i, model) for i in range(n)]
     results: list[dict[str, Any]] = []
     errors: list[str] = []
-    for i in range(n):
+    for i, m in targets:
         run_id = await store.start_run(
             work_id=body.work_id or "transform",
             node_id=None,
             task_type=f"transform:{body.action}",
-            model=model,
-            provider=gateway.resolve(model)[0],
+            model=m,
+            provider=gateway.resolve(m)[0],
             prompt_chars=len(system) + len(user),
             variant=i,
         )
         started = time.perf_counter()
         try:
-            res = await gateway.complete(model=model, system=system, prompt=user, mode=body.mode or "quick")
+            res = await gateway.complete(model=m, system=system, prompt=user, mode=body.mode or "quick")
         except Exception as exc:  # noqa: BLE001
             elapsed = int((time.perf_counter() - started) * 1000)
             await store.finish_run(run_id, status="failed", error=str(exc), elapsed_ms=elapsed)
-            errors.append(f"候选 {i + 1} 失败：{exc}")
+            errors.append(f"候选 {i + 1}（{m}）失败：{exc}")
             continue
         elapsed = int((time.perf_counter() - started) * 1000)
         await store.finish_run(run_id, status="ok", output_chars=len(res.text), elapsed_ms=elapsed)
         results.append({
             "variant": i,
             "run_id": run_id,
+            "model": m,
             "text": res.text.strip(),
             "chars": len(res.text.strip()),
             "elapsed_ms": elapsed,

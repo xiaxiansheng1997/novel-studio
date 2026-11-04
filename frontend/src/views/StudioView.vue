@@ -468,6 +468,7 @@
       v-model:open="transformOpen"
       :text="contentDraft"
       :selection="selectedText"
+      :context="transformCtx"
       :instruction="instruction"
       @adopt="onTransformAdopt"
     />
@@ -592,6 +593,8 @@ const kinds = computed(() =>
 )
 const transformOpen = ref(false)
 const selectedText = ref('')
+// 选区前后的正文窗口：加工时随请求发给模型对齐语气称谓（见 TransformDialog）
+const transformCtx = ref('')
 // 查找替换：开着的状态属于这一屏，不进 store（切作品要收起，见下面的 watch）
 const replaceOpen = ref(false)
 // 排版弹层：开着的状态属于这一屏，不进 store（切作品要收起，见下面的 watch）
@@ -1742,8 +1745,15 @@ function openTransform() {
   if (!store.node) return
   const el = editorEl.value
   let sel = ''
+  transformCtx.value = ''
   if (el && el.selectionStart !== el.selectionEnd) {
-    sel = contentDraft.value.slice(el.selectionStart, el.selectionEnd)
+    const s = el.selectionStart
+    const e = el.selectionEnd
+    sel = contentDraft.value.slice(s, e)
+    // 前后各取 800 字：再远就不是「选区语境」而是重读整节了，prompt 也撑
+    const before = contentDraft.value.slice(Math.max(0, s - 800), s)
+    const after = contentDraft.value.slice(e, e + 800)
+    transformCtx.value = [before, after].filter((x) => x.trim()).join('\n【……选区略……】\n')
   }
   selectedText.value = sel
   transformOpen.value = true
