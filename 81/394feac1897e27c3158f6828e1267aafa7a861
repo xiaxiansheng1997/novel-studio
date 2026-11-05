@@ -1,0 +1,79 @@
+tests/test_deai.py
+  s_c7df7c295a4159::t_9b05117adce56d 64,72,80,84-95,97,101,104-125,187,189-212
+  s_c7df7c295a4159::t_cf0a5f52a35c2b 188
+  s_c7df7c295a4159::t_7b2cf808b92aae 1-63,65-71,73-79,81-83,96,98,103,126-186
+  s_c7df7c295a4159::t_000034764670bb 99-100,102
+app/studio/sampling.py
+  s_c7df7c295a4159::t_2c9ca26d0c450d 20-21,30-32,49-50
+frontend/src/stores/studio.js
+  s_c7df7c295a4159::t_b06165485fdea0 2021-2029,2162
+app/studio/schema.py
+  s_c7df7c295a4159::t_b0372d9a21078a 84
+tests/test_aivoice.py
+  s_c7df7c295a4159::t_4f94dec61bd69a 2-25,29-104,132-176
+  s_c7df7c295a4159::t_ad1199f1e9c939 1,26-28,105-131
+tests/test_sampling.py
+  s_c7df7c295a4159::t_149e97a192bab9 40-45,52-53
+app/api/studio_routes.py
+  s_c7df7c295a4159::t_93139030905853 573,3278,3314,3333,3345-3346
+app/studio/aivoice.py
+  s_c7df7c295a4159::t_a4f21a54e83474 15-17
+  s_c7df7c295a4159::t_f8a84a3cf25f7f 259-276,279-291,294,337-338
+  s_c7df7c295a4159::t_91e1ee15faa725 296-321
+  s_c7df7c295a4159::t_166c3f28cef26a 328-330
+  s_c7df7c295a4159::t_aaa098218b274d 1,32-37,60-61
+  s_c7df7c295a4159::t_374646fcd73336 2-14,18-31,38-59,65-85,93-122,138-148,150-210,212-225,227-238,240-253,255-258,292-293,295,322-327,331-336,339-340
+  s_c7df7c295a4159::t_771eb08b2fddeb 62-64,277-278
+  s_c7df7c295a4159::t_d3616270b409d0 86-92,123-137,149,211,226,239,254
+frontend/src/components/VersionDiff.vue
+  s_c7df7c295a4159::t_3d431b95943832 78
+app/studio/jobs.py
+  s_c7df7c295a4159::t_9fc09a80d4e9e3 40-42,58
+app/studio/prompting.py
+  s_c7df7c295a4159::t_6e52cd15aff30f 279-283,285-286,288-330
+  s_c7df7c295a4159::t_247db8bd004dcc 284,287
+frontend/src/views/StudioView.vue
+  s_c7df7c295a4159::t_9fbfcff1db82bc 534,1840-1863,1877-1881
+app/studio/consistency.py
+  s_c7df7c295a4159::t_c71398422f2f94 1-2,21,376-378
+app/studio/tasks.py
+  s_c7df7c295a4159::t_ea0aea64c0721d 27,246-248,385,387-396,398,408-409
+  s_c7df7c295a4159::t_a33dee0e1167cc 268-302,304-305,307-309,314-315,318,322-327,329-330,333-334,337-338,340
+  s_c7df7c295a4159::t_ede3bca5828371 243-245,249-267,303,306,310-313,316-317,319-321,328,331-332,335-336,339,341-384,386,397,399-407,410-411
+  s_c7df7c295a4159::t_5c9b4f048e8112 18,24-25,460
+app/studio/store.py
+  s_c7df7c295a4159::t_124e0024e80f7c 209-211
+  s_c7df7c295a4159::t_157836df626e59 4265
+app/studio/voice.py
+  s_c7df7c295a4159::t_a7370dd4cd616e 154-158,160,164-165,204,209
+  s_c7df7c295a4159::t_e185fb838b128a 159
+frontend/src/components/StudioPanel.vue
+  s_c7df7c295a4159::t_3caa0f1ab800f0 710-712,715-716,1173,1220-1227
+  s_c7df7c295a4159::t_7ede70669826a2 1212-1214,1228
+  s_c7df7c295a4159::t_5a5c8e87099112 1215
+  s_c7df7c295a4159::t_940b6d65ae880f 713-714,783
+app/studio/assembler.py
+  s_c7df7c295a4159::t_475b2800764242 44-48
+  s_c7df7c295a4159::t_49f4c907223584 370-372,374,379-381,412
+  s_c7df7c295a4159::t_9217af2080d00c 285-290,297-300,302,309,383-386
+  s_c7df7c295a4159::t_4382281d1ff9f5 17,279-284,291-296,301,303-308,310-311,373,378,382,411
+content-types.yaml
+  s_c7df7c295a4159::t_4f8102ccfdff71 96-99,107-111
+  s_c7df7c295a4159::t_f5255f0784d1d1 94-95,102-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "81394feac1897e27c3158f6828e1267aafa7a861",
+  "prompts": {},
+  "sessions": {
+    "s_c7df7c295a4159": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bda3d5e6-34b3-4d17-bd2e-b6f927105951",
+        "model": "unknown"
+      },
+      "human_author": "xiaxiansheng1997 <xiaxiansheng1997@users.noreply.github.com>"
+    }
+  }
+}
