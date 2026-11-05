@@ -570,7 +570,7 @@ _SNAPSHOT_FAILED = "快照没写成，详见服务端日志"
 # node_versions.source 的取值集合，与前端 SOURCE_LABEL 一一对应。
 # 放开成任意字符串的话，历史页会出现「未知」这种没人看得懂的行，回滚前不敢点。
 # `bulk_replace` 是「全作品替换」单独开的那一档：替换不是今天新写的字，不该刷高日历。
-_VERSION_SOURCES = {"human", "ai_draft", "ai_polish", "bulk_replace"}
+_VERSION_SOURCES = {"human", "ai_draft", "ai_polish", "ai_deai", "bulk_replace"}
 
 
 # ==================== 作品 ====================
@@ -3275,7 +3275,7 @@ async def issues_summary(work_id: str, request: Request):
 # ==================== 任务队列（M4） ====================
 
 class BatchRequest(BaseModel):
-    task_type: Literal["draft", "beats", "polish", "check", "summarize", "extract"] = "draft"
+    task_type: Literal["draft", "beats", "polish", "deai", "check", "summarize", "extract"] = "draft"
     node_ids: list[str] = Field(default_factory=list)  # 空 = 按 only_empty 选
     only_empty: bool = True
     limit: int = 0            # 0 = 不限
@@ -3311,7 +3311,7 @@ async def enqueue_batch(work_id: str, body: BatchRequest, request: Request):
         raise HTTPException(status_code=503, detail="任务队列未启动")
 
     is_novel = (work.get("kind") or "article") == "novel"
-    if body.task_type in ("extract", "beats") and not is_novel:
+    if body.task_type in ("extract", "beats", "deai") and not is_novel:
         raise HTTPException(status_code=400, detail="该任务只用于小说")
 
     # 选节点：指定优先，否则按「有没有正文」筛
@@ -3330,7 +3330,7 @@ async def enqueue_batch(work_id: str, body: BatchRequest, request: Request):
             has_text = bool((node.get("content") or "").strip())
             if body.only_empty and has_text:
                 continue
-            if body.task_type in ("polish", "check", "extract", "summarize") and not has_text:
+            if body.task_type in ("polish", "deai", "check", "extract", "summarize") and not has_text:
                 continue
             nodes.append(node)
     nodes.sort(key=lambda n: int(n.get("ordinal") or 0))
@@ -3342,7 +3342,8 @@ async def enqueue_batch(work_id: str, body: BatchRequest, request: Request):
     # 预算闸门：凡是要调模型的任务类型都估都拦——beats/polish/extract 这些
     # 单笔比写正文小，但走的也是计钱通道，积起来一样烧预算（审查 m14）。
     # check 是纯本地规则不花钱，不在名单里。
-    if body.task_type in ("draft", "article_draft", "beats", "polish", "extract", "summarize"):
+    if body.task_type in ("draft", "article_draft", "beats", "polish", "deai",
+                          "extract", "summarize"):
         model = pick_model(request.app.state.registry, body.model or None)
         est = await cost.estimate_pipeline(
             store, request.app.state.registry, work_id=work_id,

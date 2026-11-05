@@ -531,6 +531,7 @@
           @locate="locateEvidence"
           @goto-node="onSelectNode"
           @restore="onRestoreVersion"
+          @deai="onPanelDeai"
         />
       </template>
     </div>
@@ -1836,6 +1837,30 @@ async function onBatchEstConfirm({ ignoreBudget = false } = {}) {
   await store.runPipeline({ ...batchEstParams.value, ignore_budget: ignoreBudget })
 }
 
+/**
+ * 检查栏的「按 N 条问题改写本节」：先存再入队，然后接上队列轮询。
+ *
+ * 存这一步不能省：deai 改的是库里那份正文，页面上没存的改动没进去，
+ * 改完轮询回来又因为本地是 dirty 而不换正文——用户看到的是「什么都没变」。
+ */
+async function onPanelDeai() {
+  if (!store.node) return
+  if (!(await flushSave())) {
+    showNotice('正文没存上，先别让队列改它', true)
+    return
+  }
+  // 只改当前这一节：整本去味是另一个量级的开销，得由人在队列页显式发起
+  const j = await store.enqueueBatch({
+    taskType: 'deai', onlyEmpty: false, nodeIds: [store.node.id],
+  })
+  if (!j) {
+    showNotice(store.error || '入队失败（可能是超预算被拦）', true)
+    return
+  }
+  startQueuePoll()
+  showNotice('已入队：这一节跑完会自动换成新稿')
+}
+
 // ---- 队列（M4） ----
 let queueTimer = 0
 
@@ -1849,7 +1874,11 @@ function startQueuePoll() {
     // 它还挂在别的节上时，本节的写手可能正在另一路里跑，刷早了会读到旧稿。
     if (!queueRunning.value && store.node) {
       const r = await fetchNodeQuietly(store.node.id)
-      if (r && r.content !== contentDraft.value) applyRemoteContent(r)
+      if (r && r.content !== contentDraft.value && applyRemoteContent(r)) {
+        // 正文是后台换的（生成 / 去味）：检查与评分也重算过了，
+        // 不重拉的话面板上还挂着改掉的那几条告警
+        await store.reloadNodeIssues()
+      }
     }
   }, 3000)
 }

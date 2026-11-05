@@ -75,7 +75,7 @@ const emit = defineEmits(['update:open', 'restore'])
 
 const store = useStudioStore()
 
-const SOURCE_LABEL = { ai_draft: 'AI 草稿', ai_polish: 'AI 润色', human: '手改' }
+const SOURCE_LABEL = { ai_draft: 'AI 草稿', ai_polish: 'AI 润色', ai_deai: 'AI 去味', human: '手改' }
 const sourceLabel = computed(() => SOURCE_LABEL[props.version?.source] || props.version?.source || '未知')
 
 const diff = computed(() => diffText(props.current, props.version?.content || ''))

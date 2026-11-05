@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS node_versions (
     node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     version_no INTEGER NOT NULL,
     content TEXT NOT NULL,
-    source TEXT NOT NULL,             -- ai_draft / ai_polish / human
+    source TEXT NOT NULL,             -- ai_draft / ai_polish / ai_deai / human / bulk_replace
     run_id TEXT,
     created_at REAL NOT NULL,
     UNIQUE(node_id, version_no)

@@ -151,12 +151,18 @@ def traits(stats: dict[str, Any]) -> list[str]:
     return out[:3]
 
 
-def profile_text(stats: dict[str, Any], *, samples: int = 0) -> str:
-    """把数字写成一段能直接塞进 prompt 的画像。没有样本时返回空串。"""
+def profile_text(stats: dict[str, Any], *, samples: int = 0,
+                 noun: str = "篇旧文") -> str:
+    """把数字写成一段能直接塞进 prompt 的画像。没有样本时返回空串。
+
+    `noun` 要跟样本来源对得上：用户贴的旧文是「篇旧文」，
+    用本书已写章节兜底时是「节正文」——说错了模型会以为这是外部范文。
+    """
     if not stats or not stats.get("chars") or not stats.get("sentences"):
         return ""
     chars = int(stats["chars"])
-    head = f"文风画像（{samples} 篇旧文 / {chars} 字）" if samples else f"文风画像（{chars} 字）"
+    head = (f"文风画像（{samples} {noun} / {chars} 字）" if samples
+            else f"文风画像（{chars} 字）")
     # 0 的项不写：画像会整段进 S1，凑字数的「破折号 0.0 个」只是噪音
     long_ratio = float(stats.get("long_ratio") or 0)
     sent_line = (
@@ -195,9 +201,9 @@ def profile_text(stats: dict[str, Any], *, samples: int = 0) -> str:
     return "\n".join(lines)
 
 
-def build(texts: Iterable[str]) -> str:
+def build(texts: Iterable[str], *, noun: str = "篇旧文") -> str:
     """一步到位：若干篇正文 → 画像文本。空输入返回空串。"""
     items = [t for t in texts if (t or "").strip()]
     if not items:
         return ""
-    return profile_text(analyze(items), samples=len(items))
+    return profile_text(analyze(items), samples=len(items), noun=noun)

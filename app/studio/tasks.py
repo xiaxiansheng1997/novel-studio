@@ -15,14 +15,16 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 from loguru import logger
 
 from app.core.errors import HumanVerifyRequired, NeedsLogin, ProviderBlocked, W2AError
-from app.studio import consistency, craft, graph, indexer, prompting, sampling, scoring, summarizer
+from app.studio import (aivoice, consistency, content_types, craft, graph, indexer,
+                        prompting, sampling, scoring, summarizer)
 from app.studio.assembler import assemble, record_used_sources
+from app.studio.proofread import PARA_SPLIT, _paragraphs
 
 # 这些错误说明「人不在」，重试没有意义：必须暂停整条队列
 FATAL_ERRORS = (NeedsLogin, HumanVerifyRequired, ProviderBlocked)
@@ -238,6 +240,175 @@ async def run_polish(ctx: TaskContext) -> dict[str, Any]:
             "issues": steps.get("issues") or []}
 
 
+# deai 一次最多改这么多段：再多的话 prompt 会比原文还长，而且模型改到后面
+# 几段时已经开始走神（同一批里前几段的质量明显高于后几段）。
+DEAI_MAX_PARAS = 6
+# 短于这个字数的段落改长度校验改用绝对容差：一句「她转身。」扩成一句描写
+# 是合法的，比例却早就超线了。
+DEAI_SHORT_PARA = 40
+
+
+def _deai_targets(content: str, hits: list[dict]) -> list[tuple[int, str]]:
+    """把命中清单还原成「要改哪几段」。命中条数多的段优先，最后按段号排。"""
+    by_idx = dict(_paragraphs(content))
+    weight: dict[int, int] = {}
+    for hit in hits:
+        rule = hit.get("rule") or ""
+        idxs = aivoice.paragraphs_with(content, rule)
+        loc = str(hit.get("location") or "").strip()
+        if loc.isdigit():
+            idxs = idxs + [int(loc)]
+        for idx in idxs:
+            if idx in by_idx:
+                weight[idx] = weight.get(idx, 0) + 1
+    ranked = sorted(weight.items(), key=lambda kv: (-kv[1], kv[0]))[:DEAI_MAX_PARAS]
+    return [(idx, by_idx[idx]) for idx in sorted(k for k, _ in ranked)]
+
+
+def _para_spans(content: str) -> dict[int, tuple[int, int]]:
+    """段号 → (起点, 终点)，口径与 `proofread._paragraphs` 完全一致。
+
+    贴回必须按区间改，不能按 text 找：`content.find(old)` 只保证「找到一段
+    一样的文字」，不保证是第 idx 段。目标段之前若有一模一样（或包含它）的
+    段落，找到的是前一处——用户没让改的段被静默改写，还报「已改 1 段」。
+    而 `_deai_targets` 只挑权重最高的 6 段，「重复段里只选中后一处」是常态。
+    """
+    spans: dict[int, tuple[int, int]] = {}
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for m in PARA_SPLIT.finditer(content):
+        bounds.append((start, m.start()))
+        start = m.end()
+    bounds.append((start, len(content)))
+    idx = 0
+    for lo, hi in bounds:
+        block = content[lo:hi]
+        body = block.strip()
+        if not body:
+            continue
+        idx += 1
+        head = lo + len(block) - len(block.lstrip())
+        spans[idx] = (head, head + len(body))
+    return spans
+
+
+def _deai_size_ok(old: str, new: str) -> bool:
+    """长度失控就拒。短段落不比比例：5 字的句子扩到 13 字是合法改写，
+    比例 2.6 却会超线——误拒比放过安全，但拒光了整次任务就白跑了。"""
+    if len(old) < DEAI_SHORT_PARA:
+        return len(new) <= len(old) * 4 + 20
+    return 0.4 <= len(new) / len(old) <= 2.0
+
+
+def _deai_apply(content: str, rewrites: dict[int, str],
+                by_idx: dict[int, str]) -> tuple[str, list[int], list[int], list[int]]:
+    """把改写贴回原文。返回（新正文，换掉的段号，被拒的段号，照抄没动的段号）。
+
+    按段号取字符区间替换，并用 delta 修正前面段落改短改长带来的偏移。
+    替换前先核对区间里的原文是否就是这一段：段号口径若漂移（例如正文里有
+    代码块，`check_node` 是在去代码后的文本上算的段号），这里会拒而不是改错。
+
+    拆段与长度失控一律拒绝：改坏一段比不改更糟，而且它不报错。
+    """
+    out = content
+    spans = _para_spans(content)
+    delta = 0
+    done: list[int] = []
+    rejected: list[int] = []
+    same: list[int] = []
+    for idx in sorted(rewrites):
+        old = by_idx.get(idx) or ""
+        new = (rewrites[idx] or "").strip()
+        if not old or not new:
+            continue
+        if new == old:
+            # 模型原样抄回：不是改坏，但也不能算改成。混进 rejected 会让
+            # 「全被拒」和「全照抄」两个完全不同的原因落进同一句报错。
+            same.append(idx)
+            continue
+        span = spans.get(idx)
+        if not span:
+            rejected.append(idx)
+            continue
+        start, end = span[0] + delta, span[1] + delta
+        if out[start:end] != old or "\n" in new or not _deai_size_ok(old, new):
+            rejected.append(idx)
+            continue
+        out = out[:start] + new + out[end:]
+        delta += len(new) - (end - start)
+        done.append(idx)
+    return out, done, rejected, same
+
+
+async def run_deai(ctx: TaskContext) -> dict[str, Any]:
+    """去 AI 味：只重写命中的那几段，情节与对白内容一概不动。
+
+    为什么不做整篇润色：`polish` 的指令是「只改错别字病句」，模型看到
+    「去 AI 味」这四个字会顺手把情节也改了；按段定位改写，改坏的范围
+    最多是一段，回滚成本低，也让人能逐段看改得对不对。
+    """
+    store, work, node = ctx.store, ctx.work, ctx.node
+    if not node or not (node.get("content") or "").strip():
+        raise ValueError("deai 任务需要已有正文")
+    if (work.get("kind") or "article") != "novel":
+        raise ValueError("deai 只用于小说")
+
+    source = node["content"]
+    hits = aivoice.check_node(source, int(node.get("ordinal") or 0))
+    if not hits:
+        return {"chars": len(source), "rewritten": 0, "hits": [],
+                "skipped": "没有命中任何 AI 味规则"}
+
+    targets = _deai_targets(source, hits)
+    if not targets:
+        return {"chars": len(source), "rewritten": 0, "hits": hits,
+                "skipped": "命中的问题需要对白层面的改动，逐段改写做不到"}
+
+    requirements = content_types.requirements_text(ctx.resolved)
+    system, user = prompting.deai_prompt(targets, hits, requirements)
+    run_id = await store.start_run(
+        work_id=work["id"], node_id=node["id"], task_type="deai",
+        model=ctx.model, provider=ctx.gateway.resolve(ctx.model)[0],
+        prompt_chars=len(system) + len(user),
+    )
+    started = time.perf_counter()
+    try:
+        res = await ctx.gateway.complete(model=ctx.model, system=system, prompt=user,
+                                        mode=ctx.mode, **sampling.for_task("deai"))
+    except Exception as exc:  # noqa: BLE001
+        elapsed = int((time.perf_counter() - started) * 1000)
+        await store.finish_run(run_id, status="failed", error=str(exc), elapsed_ms=elapsed)
+        raise
+    elapsed = int((time.perf_counter() - started) * 1000)
+
+    rewrites = prompting.parse_deai(res.text)
+    text, done, rejected, same = _deai_apply(source, rewrites, dict(targets))
+    if not done:
+        # 三种失败原因要分开报：都写成「段号对不上或长度异常」时，看日志的人
+        # 分不清是该改提示词（全照抄）还是该查粘贴逻辑（段号对不上）。
+        if same and not rejected:
+            why = f"模型把 {len(same)} 段原文照抄了回来，没有改写"
+        elif rejected:
+            why = (f"改写结果无法贴回原文：{len(rejected)} 段被拒"
+                   f"（段号对不上、拆成了多段，或长度偏离过大）")
+        else:
+            why = "模型没有按【段号】格式返回改写结果"
+        await store.finish_run(run_id, status="failed", error=why,
+                               output_chars=len(res.text or ""), elapsed_ms=elapsed)
+        raise ValueError(why)
+
+    await store.update_node(node["id"], content=text, snapshot=True,
+                            snapshot_source="ai_deai", run_id=run_id)
+    # 情节没动，重新抽设定纯属浪费；索引、摘要、检查、打分都要重跑
+    light = replace(ctx, payload={**ctx.payload, "extract": False})
+    steps = await _post_process(light, node, text)
+    await store.finish_run(run_id, status="ok", output_chars=len(text), elapsed_ms=elapsed,
+                           score=(steps.get("score") or {}).get("score"))
+    return {"chars": len(text), "rewritten": len(done), "paragraphs": done,
+            "rejected": rejected, "untouched": same, "hits": hits,
+            "elapsed_ms": elapsed, "issues": steps.get("issues") or []}
+
+
 async def run_check(ctx: TaskContext) -> dict[str, Any]:
     """只跑一致性检查并重算分数（不调模型）。"""
     node = ctx.node
@@ -286,6 +457,7 @@ REGISTRY = {
     "beats": run_beats,
     "draft": run_draft,
     "polish": run_polish,
+    "deai": run_deai,
     "check": run_check,
     "summarize": run_summarize,
     "extract": run_extract,

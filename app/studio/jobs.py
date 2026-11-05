@@ -37,6 +37,9 @@ ETA_PER_TASK = {
     "draft": 30.0,
     "beats": 7.0,
     "polish": 20.0,
+    # deai 与 polish 同档：一次模型调用 + 索引/摘要/检查/打分全套后处理。
+    # 不给它估个准确值，整本去味时进度条会一直跳得很乐观。
+    "deai": 20.0,
     "check": 2.0,
     "summarize": 8.0,
     "extract": 8.0,
@@ -52,6 +55,7 @@ ETA_PER_TASK_FAST = {
     "draft": 12.0,
     "beats": 4.0,
     "polish": 10.0,
+    "deai": 10.0,
     "check": 2.0,
     "summarize": 4.0,
     "extract": 4.0,

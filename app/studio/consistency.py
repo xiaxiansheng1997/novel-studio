@@ -1,4 +1,5 @@
-"""一致性检查：小说 5 条硬规则 + 文档 4 条硬规则（软规则见 `soft_rules.py`，审校见 `proofread.py`）。
+"""一致性检查：小说 5 条硬规则 + 文档 4 条硬规则（软规则见 `soft_rules.py`，审校见
+`proofread.py`，小说的 AI 味见 `aivoice.py`）。
 
 为什么不调 LLM：
 
@@ -17,7 +18,7 @@ import re
 from datetime import date
 from typing import Any, Optional
 
-from app.studio import proofread, soft_rules
+from app.studio import aivoice, proofread, soft_rules
 
 NOVEL_RULES = ("dead_character", "item_conflict", "time_regression",
                "location_destroyed", "foreshadow_overdue")
@@ -372,6 +373,9 @@ async def run_checks(
             found += await soft_rules.check_node(store, work, node, content, ordinal, rules)
             # 审校是排印底线，不随文种/渠道的 checks 开关走（见 proofread 模块头）
             found += proofread.check_node(content, ordinal)
+            # AI 味只量小说：说明文与公文本来就该有总结句与排比，量了只会逼人关告警
+            if is_novel:
+                found += aivoice.check_node(content, ordinal)
         for item in found:
             item["node_id"] = node["id"]
     else:

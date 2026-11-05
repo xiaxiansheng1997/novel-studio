@@ -206,8 +206,9 @@ def _dice_bigrams(a: str, b: str) -> float:
 BUNDLE_FORMAT = "novel-studio/work"
 LIBRARY_FORMAT = "novel-studio/library"
 BUNDLE_VERSION = 1
-# 版本来源白名单与路由侧 `_VERSION_SOURCES` 同一份口径
-BUNDLE_SOURCES = {"human", "ai_draft", "ai_polish", "bulk_replace"}
+# 版本来源白名单与路由侧 `_VERSION_SOURCES` 同一份口径。
+# ai_deai 是去 AI 味改写：与 ai_polish 分开记，才看得出「这一版是润色还是重写」。
+BUNDLE_SOURCES = {"human", "ai_draft", "ai_polish", "ai_deai", "bulk_replace"}
 # 一份手改坏的包不该把库撑爆：单本两万节已经远超实际长篇
 _MAX_BUNDLE_NODES = 20000
 _MAX_LIBRARY_WORKS = 200
@@ -4261,7 +4262,7 @@ class StudioStore:
                 "SELECT v.node_id, v.version_no, v.content, n.content "
                 "FROM node_versions v JOIN nodes n ON n.id = v.node_id "
                 "WHERE v.run_id IS NOT NULL AND v.run_id <> '' "
-                "AND v.source IN ('ai_draft', 'ai_polish') "
+                "AND v.source IN ('ai_draft', 'ai_polish', 'ai_deai') "
                 "ORDER BY v.created_at DESC LIMIT ?", (sample,),
             )
             ai_rows = [tuple(r) for r in await cur.fetchall()]

@@ -707,6 +707,13 @@
         <!-- 软规则：字面模式猜出来的，只提醒不参与扣分，所以单独一组，别和硬错误混在一起 -->
         <template v-if="softIssues.length">
           <p class="g-kind">待确认（不扣分）</p>
+          <!-- AI 味那组才有可执行动作：它命中的是「哪几段像机器写的」，
+               按段改写才安全；其它软规则是「与设定不符」，得人自己判断 -->
+          <div v-if="aiVoiceIssues.length" class="issue-act">
+            <button class="btn btn-sm" :disabled="store.queueBusy" @click="emit('deai')">
+              按 {{ aiVoiceIssues.length }} 条问题改写本节
+            </button>
+          </div>
           <div v-for="i in softIssues" :key="i.id" class="item issue soft">
             <div class="item-main">
               <span class="item-title">{{ i.message }}</span>
@@ -773,7 +780,7 @@ const props = defineProps({
   // /chat/:id 老链接带过来的会话
   initialConv: { type: String, default: '' },
 })
-const emit = defineEmits(['locate', 'restore', 'goto-node'])
+const emit = defineEmits(['locate', 'restore', 'goto-node', 'deai'])
 
 const store = useStudioStore()
 const tab = ref('sources')
@@ -1163,7 +1170,7 @@ const thumbLinks = computed(() =>
 // 来源标签必须与库里的 source 枚举对齐：都是 ai_draft，作者得分清哪条是模型抽风
 // bulk_replace 单独一档：整本书换名那一趟不是人一个字一个字敲的，也不该算进今天的字数
 const SOURCE_LABEL = {
-  ai_draft: 'AI 草稿', ai_polish: 'AI 润色', human: '手改', bulk_replace: '批量替换',
+  ai_draft: 'AI 草稿', ai_polish: 'AI 润色', ai_deai: 'AI 去味', human: '手改', bulk_replace: '批量替换',
 }
 const diffOpen = ref(false)
 const diffVersion = ref(null)
@@ -1202,9 +1209,22 @@ const RULE_LABEL = {
   halfwidth_punct: '半角标点', punct_unbalanced: '符号不配对', punct_cluster: '标点连用',
   char_repeat: '叠字残留', long_sentence: '超长单句', de_density: '的字堆叠',
   long_paragraph: '超长段落',
+  // AI 味（aivoice）：全 info，进待确认栏；只对小说跑
+  dash_explain: '破折号过多', parallel_triplet: '排比堆叠', tail_summary: '段尾总结',
+  emotion_label: '情绪直述', hedge_stack: '模糊词过多', sensory_cliche: '万能意象',
+  filler_adverb: '副词过多', transition_filler: '转场套话', dialogue_ratio: '对白过少',
 }
 const hardIssues = computed(() => store.issues.filter((i) => i.severity !== 'info'))
 const softIssues = computed(() => store.issues.filter((i) => i.severity === 'info'))
+
+// 与 app/studio/aivoice.py 的 AVOICE_RULES 同一份名单：这几条能被按段改写，
+// 别的 info（超长段落、称呼漂移）只能人工判断，不给按钮
+const AI_VOICE_RULES = new Set([
+  'dash_explain', 'parallel_triplet', 'tail_summary', 'emotion_label',
+  'hedge_stack', 'sensory_cliche', 'filler_adverb', 'transition_filler',
+  'dialogue_ratio',
+])
+const aiVoiceIssues = computed(() => store.issues.filter((i) => AI_VOICE_RULES.has(i.rule)))
 
 function ruleLabel(rule) {
   return RULE_LABEL[rule] || rule

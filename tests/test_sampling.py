@@ -37,12 +37,19 @@ def test_unknown_task_gets_nothing() -> None:
     assert sampling.for_task("something_new") == {}
 
 
+def test_deai_sits_between_creative_and_strict() -> None:
+    """改写要真换说法（0.2 时模型会原句照抄），但不能改事（0.9 时会顺手改情节）。"""
+    assert sampling.TEMP_STRICT < sampling.TEMP_REWRITE < sampling.TEMP_CREATIVE
+    assert sampling.for_task("deai") == {"temperature": sampling.TEMP_REWRITE}
+
+
 def test_every_queued_task_type_is_classified() -> None:
     """新增任务类型必须在这张表里表态。
 
     漏配不会报错，只会静默地用上游默认温度——这类「不失败的退化」最难查，
     所以拿队列的 REGISTRY 反向对账，而不是靠人记得住。
     """
-    known = set(sampling.CREATIVE) | set(sampling.STRICT) | {"beats"}
+    known = (set(sampling.CREATIVE) | set(sampling.STRICT)
+             | set(sampling.REWRITE) | {"beats"})
     missing = set(tasks.REGISTRY) - known
     assert not missing, f"任务类型没配采样档位：{sorted(missing)}"

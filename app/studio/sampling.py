@@ -17,6 +17,8 @@ from typing import Any
 CREATIVE = ("draft", "article_draft", "polish")
 # 结构化产出：要收敛。JSON 合法性和事实准确比文采重要
 STRICT = ("summarize", "extract", "check", "craft")
+# 改写：换说法要一点自由度，但情节一点都不该动
+REWRITE = ("deai",)
 
 # 创作档：0.9 是「有变化但不失控」的经验值。想更稳就在页面把模型换成
 # 反代的 think 模式，或在这里调低——这里是唯一一处，改完全部任务跟着变
@@ -25,6 +27,9 @@ TEMP_CREATIVE = 0.9
 TEMP_BEATS = 0.7
 # 严格档：留一点改写余地（0.0 会让部分端点直接拒绝请求）
 TEMP_STRICT = 0.2
+# 改写档：去 AI 味要真换说法（0.2 时模型会原句照抄），但不能改事（
+# 0.9 时它会顺手把情节也重写）。0.5 是两边都拧得动的位置。
+TEMP_REWRITE = 0.5
 
 
 def for_task(task_type: str) -> dict[str, Any]:
@@ -41,6 +46,8 @@ def for_task(task_type: str) -> dict[str, Any]:
         return out
     if task_type in CREATIVE:
         return {"temperature": TEMP_CREATIVE}
+    if task_type in REWRITE:
+        return {"temperature": TEMP_REWRITE}
     if task_type == "beats":
         return {"temperature": TEMP_BEATS}
     return {}

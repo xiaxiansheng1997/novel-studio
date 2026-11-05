@@ -2018,6 +2018,15 @@ export const useStudioStore = defineStore('studio', () => {
     if (r.ok) issueSummary.value = await r.json()
   }
 
+  /** 只重拉当前节的检查结果，不重跑检查。
+   *  后台任务（生成/去味）改过正文后，检查栏不跟着换就还是旧告警。 */
+  async function reloadNodeIssues(nodeId = '') {
+    const id = nodeId || node.value?.id
+    if (!work.value || !id) return
+    const r = await apiFetch(`/studio/works/${work.value.id}/issues?node_id=${id}`)
+    if (r.ok) issues.value = await r.json()
+  }
+
   // ==================== 任务队列（M4） ====================
 
   const queue = ref(null)
@@ -2150,7 +2159,7 @@ export const useStudioStore = defineStore('studio', () => {
     graphData, graphBusy, graphNote, checking, issueSummary, isNovel,
     loadGraph, extractGraph, clearGraph, addCard, deleteCard,
     updateEntity, resolveForeshadow, generateBeats,
-    runCheck, resolveIssue, loadIssueSummary,
+    runCheck, resolveIssue, loadIssueSummary, reloadNodeIssues,
     // M4 任务队列：写作台只靠这三个画一行进度；明细与控制走控制台的接口
     queue, queueBusy, queueActive,
     loadQueue, enqueueBatch,
