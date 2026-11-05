@@ -37,10 +37,12 @@ const errJson = (detail, status = 400) => ({
 
 /** watch(open) false→true 才初始化草稿：直接 open:true 挂载拿不到 entry 回填。
  *  弹窗本体挂在 Teleport 里，wrapper 只剩两个注释桩——把 Teleport  stub 成
- *  透传组件，内容回到 wrapper 内，w.find 才拿得到真实 DOM。 */
+ *  透传组件，内容回到 wrapper 内，w.find 才拿得到真实 DOM。
+ *  props 里要收掉 to：不然每个用例都刷一条「Extraneous non-props attributes」，
+ *  真警告就被埋在这片噪声里。 */
 const mountOpts = {
   global: {
-    stubs: { Teleport: { render() { return this.$slots.default?.() } } },
+    stubs: { Teleport: { props: ['to'], render() { return this.$slots.default?.() } } },
   },
 }
 
@@ -156,4 +158,100 @@ it('测试不通：ok=false 也走红色提示，转述上游原话', async () =
   await flushPromises()
   expect(apiFetch.mock.calls[0][1].body).toBe('{}')
   expect(w.find('.cd-msg.is-bad').text()).toContain('上游返回 401')
+})
+
+// ==================== 从上游取模型 ====================
+
+const MODELS = { ok: true, models: ['deepseek-chat', 'deepseek-reasoner', 'text-embedding-3'], total: 3, truncated: false, detail: '上游报了 3 个' }
+
+/** 只接住取模型那一条，其余请求一律 404：多打一条少打一条都该被看见 */
+function onlyModels(body = MODELS, status = 200) {
+  apiFetch.mockImplementation(async (url, opts = {}) => {
+    if (String(url).endsWith('/models')) return { ok: status === 200, status, json: async () => body }
+    return errJson(`没 mock 的请求：${opts?.method || 'GET'} ${url}`, 404)
+  })
+}
+
+const pickBox = (w, id) => w.findAll('.cd-pick-row').find((r) => r.text().includes(id))
+
+it('取模型：表单里没保存的 base_url 与 key 一起递上去，路径用当前 key', async () => {
+  onlyModels()
+  const w = await openDialog(null)
+  // 新建态多一个 key 输入框：顺序是 key、显示名、base_url、api_key
+  await w.get('.cd-field input').setValue('Kimi-API')
+  await w.findAll('.cd-field input')[2].setValue('https://api.moonshot.cn/v1')
+  await w.findAll('.cd-field input')[3].setValue('sk-moon')
+  await w.get('.cd-mini').trigger('click')
+  await flushPromises()
+
+  const [url, opts] = apiFetch.mock.calls[0]
+  expect(url).toBe('/admin/compat/kimi-api/models')
+  expect(opts.method).toBe('POST')
+  expect(opts.headers).toEqual({ 'Content-Type': 'application/json' })
+  expect(JSON.parse(opts.body)).toEqual({ base_url: 'https://api.moonshot.cn/v1', api_key: 'sk-moon' })
+  expect(w.findAll('.cd-pick-row').map((r) => r.text())).toContain('deepseek-chat')
+})
+
+it('默认只列对话模型：embedding 这类藏起来，取消勾选就能看到', async () => {
+  onlyModels()
+  const w = await openDialog(yamlEntry())
+  await w.get('.cd-label-row .cd-mini').trigger('click')
+  await flushPromises()
+  expect(w.findAll('.cd-pick-row')).toHaveLength(2)
+  expect(w.text()).not.toContain('text-embedding-3')
+
+  await w.get('.cd-pick-toggle input').setValue(false)
+  expect(w.findAll('.cd-pick-row')).toHaveLength(3)
+  expect(w.text()).toContain('text-embedding-3')
+})
+
+it('填入选中：textarea 换成勾选的那几个，手填而清单里没有的留着', async () => {
+  onlyModels()
+  const w = await openDialog(yamlEntry())
+  await w.get('textarea').setValue('gpt-4o-preview')   // 上游清单里没有的手填项
+  await w.get('.cd-label-row .cd-mini').trigger('click')
+  await flushPromises()
+
+  await pickBox(w, 'deepseek-chat').get('input').setValue(true)
+  await w.get('.cd-pick-foot .cd-mini').trigger('click')
+  await flushPromises()
+  expect(w.get('textarea').element.value).toBe('deepseek-chat\ngpt-4o-preview')
+  expect(w.find('.cd-msg').text()).toContain('留着')
+  expect(w.find('.cd-pick').exists()).toBe(false)   // 收起来，不占地方
+})
+
+it('取一次不该把已有选择重置成全选：清单里与表单重的那几个预先勾上', async () => {
+  onlyModels()
+  const w = await openDialog(yamlEntry())
+  await w.get('textarea').setValue('deepseek-reasoner')
+  await w.get('.cd-label-row .cd-mini').trigger('click')
+  await flushPromises()
+  expect(w.findAll('.cd-pick-row input').map((i) => i.element.checked)).toEqual([false, true])
+  expect(w.find('.cd-pick-count').text()).toContain('1 / 2')
+})
+
+it('上游不开放 /models：说清原因，textarea 不动，也不拦保存', async () => {
+  onlyModels({ ok: false, models: [], detail: '上游的清单是空的（有些站点不开放 /models，模型 id 得手填）' })
+  const w = await openDialog(yamlEntry())
+  await w.get('textarea').setValue('本地模型')
+  await w.get('.cd-label-row .cd-mini').trigger('click')
+  await flushPromises()
+  expect(w.find('.cd-pick .cd-msg.is-bad').text()).toContain('不开放 /models')
+  expect(w.get('textarea').element.value).toBe('本地模型')
+
+  apiFetch.mockClear()
+  apiFetch.mockResolvedValue(okJson({ ok: true }))
+  await w.get('.cd-btn.primary').trigger('click')
+  await flushPromises()
+  expect(apiFetch.mock.calls[0][0]).toBe('/admin/compat/openai')
+  expect(JSON.parse(apiFetch.mock.calls[0][1].body).models).toEqual(['本地模型'])
+})
+
+it('新建态连 key 都没输：不发请求，直接说下一步', async () => {
+  onlyModels()
+  const w = await openDialog(null)
+  await w.get('.cd-mini').trigger('click')
+  await flushPromises()
+  expect(apiFetch).not.toHaveBeenCalled()
+  expect(w.find('.cd-pick .cd-msg.is-bad').text()).toContain('先给通道起个 key')
 })

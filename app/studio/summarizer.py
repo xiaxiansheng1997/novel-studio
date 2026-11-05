@@ -21,6 +21,8 @@ from typing import Any, Optional
 
 from loguru import logger
 
+from app.studio import sampling
+
 # 口径必须与 `nodes.content_hash` 完全一致（同样 sha1 取前 16 位，且不 strip）。
 # 自己另写一个或者先 strip 再算，会让每一节都被判过期，等于每次都在重跑摘要。
 from app.studio.store import _hash
@@ -96,7 +98,7 @@ async def summarize_node(
             model=model,
             system=SUMMARY_SYSTEM,
             prompt=SUMMARY_USER.format(title=node.get("title") or "", content=snippet),
-            mode="quick",
+            mode="quick", **sampling.for_task("summarize"),
         )
     except Exception as exc:  # noqa: BLE001 - 摘要失败不能影响主流程
         logger.warning(f"[studio] 摘要生成失败 node={node['id']}: {exc}")
@@ -152,7 +154,7 @@ async def summarize_container(
             model=model,
             system=MERGE_SYSTEM,
             prompt=MERGE_USER.format(label=label, parts=merged_src),
-            mode="quick",
+            mode="quick", **sampling.for_task("summarize"),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[studio] 容器摘要失败 node={container['id']}: {exc}")
@@ -192,7 +194,7 @@ async def summarize_work(
             model=model,
             system=MERGE_SYSTEM,
             prompt=MERGE_USER.format(label="全书", parts=merged_src),
-            mode="quick",
+            mode="quick", **sampling.for_task("summarize"),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[studio] 全书概要失败 work={work_id}: {exc}")

@@ -17,11 +17,15 @@ from typing import Any, Optional
 import aiosqlite
 from loguru import logger
 
-from app.studio import content_types
+from app.studio import content_types, tokenize
 from app.studio.schema import BUILTIN_TEMPLATES, SCHEMA
 
 # 单次列表查询的上限，防止误传巨大 limit 把内存打满
 _MAX_LIMIT = 500
+
+# 一次批量落节点的上限：200 节按每节 3000 字算是 60 万字，再大就是把整本书
+# 塞进一个请求。前端按块发（`importNodes`），这条是服务端那道闸。
+MAX_BATCH_SECTIONS = 200
 
 # work_id 上没有 REFERENCES works(id) 的表（这几张建得早，外键是后来补的）。
 # 删作品时手动清，历史遗留的孤儿行由 sweep_orphans 兜底。
@@ -45,6 +49,15 @@ _ORPHAN_WHERE = {
         "OR work_id NOT IN (SELECT id FROM works)"
     ),
     "summaries": "scope IN ('node', 'container') AND ref_id NOT IN (SELECT id FROM nodes)",
+    # 判定必须与上一行的 summaries 同源：sweep_orphans 先删 summaries 再删本表，
+    # 若只判「摘要行还在不在」，同一轮里刚被删掉的那些倒排行就查不出源头，
+    # 要多跑一轮才清干净，返回的计数也和 orphan_counts 对不上。
+    "summaries_fts": (
+        "summary_id NOT IN (SELECT id FROM summaries) "
+        "OR summary_id IN (SELECT id FROM summaries WHERE scope IN ('node', 'container') "
+        "AND ref_id NOT IN (SELECT id FROM nodes)) "
+        "OR work_id NOT IN (SELECT id FROM works)"
+    ),
     "publications": "work_id NOT IN (SELECT id FROM works)",
 }
 
@@ -365,10 +378,59 @@ class StudioStore:
             await self._db.commit()
             logger.info("[studio] issues 已补 resolution_note 列（忽略原因）")
 
+        # `summaries_fts` 是虚拟表，老库升级时由 SCHEMA 新建为空表。不回填的话，
+        # 历史摘要在倒排里一条都没有——摘要通道等于没开，而界面上看不出区别
+        # （正文块照常召回，只是几十章前的伏笔再也想不起来）。
+        # 只补「表全空」这一种：部分缺失是人为改库，下一次整书重建会覆盖。
+        cur = await self._db.execute("SELECT COUNT(*) AS c FROM summaries_fts")
+        if int((await cur.fetchone())["c"]) == 0:
+            cur = await self._db.execute(
+                "SELECT id, work_id, content FROM summaries ORDER BY work_id")
+            rows = await cur.fetchall()
+            # 先把每本书的术语表灌进 jieba，再切词：不灌的话回填写进去的是
+            # 「青云 / 宗」，而查询切出来的是「青云宗」，专名永远命中不了——
+            # 而这恰恰是最重要的那类线索（人名/地名/器物名）。
+            # 取词在锁外做：`list_terms` 自己会加锁。
+            glossaries = {
+                w: [t["term"] for t in await self.list_terms(w)]
+                for w in {r["work_id"] for r in rows}
+            }
+            written = 0
+            active = ""
+            async with self._lock:
+                for r in rows:
+                    if r["work_id"] != active:
+                        active = r["work_id"]
+                        if glossaries.get(active):
+                            tokenize.add_words(glossaries[active])
+                    if await self._write_summary_fts_locked(
+                            r["id"], r["work_id"], r["content"] or ""):
+                        written += 1
+                if written:
+                    await self._db.commit()
+                    logger.info(f"[studio] summaries_fts 已回填 {written} 条历史摘要")
+
     async def close(self) -> None:
         if self._db is not None:
             await self._db.close()
             self._db = None
+
+    async def commit(self) -> None:
+        """显式收尾当前事务：批量重建索引时由调用方决定提交边界。
+
+        为什么需要这个口子：`replace_chunks` 默认自己提交，而 Windows 上一次
+        提交实测约 7ms（刷盘）——2000 章逐章提交，光这一项就 14 秒，比分词
+        本身还贵。重建索引是派生数据的整批重算，每几十个单元提交一次就够。
+        """
+        assert self._db is not None
+        async with self._lock:
+            await self._db.commit()
+
+    async def rollback(self) -> None:
+        """丢掉未提交的写入：批量路径中途抛错时，不能把半截索引留给下一次提交。"""
+        assert self._db is not None
+        async with self._lock:
+            await self._db.rollback()
 
     async def _seed_templates(self) -> None:
         """模板以 content-types.yaml 为准。
@@ -734,6 +796,7 @@ class StudioStore:
             for table in _NO_FK_TABLES:
                 await self._db.execute(f"DELETE FROM {table} WHERE work_id = ?", (work_id,))
             await self._db.execute("DELETE FROM chunks_fts WHERE work_id = ?", (work_id,))
+            await self._db.execute("DELETE FROM summaries_fts WHERE work_id = ?", (work_id,))
             cur = await self._db.execute("DELETE FROM works WHERE id = ?", (work_id,))
             await self._db.commit()
         return (cur.rowcount or 0) > 0
@@ -769,24 +832,55 @@ class StudioStore:
     # ==================== 节点树 ====================
 
     async def _next_seq(self, work_id: str, parent_id: Optional[str]) -> int:
-        """同级下一个序号：从 path 最后一段解析（单书节点数 < 10000，4 位足够）。"""
+        """同级下一个序号：从 path 最后一段取最大值 +1。
+
+        交给 SQL 而不是把同级所有 path 捞进 Python 逐条 int()：单书几千节时
+        后者每次插入都要重扫一遍同级（实测 1800 个同级节点下 5.8ms），逐节
+        导入一本书就变成 O(N²)。这里只回一个数。
+        取 CAST 而不是 `MAX(path)`：序号宽到五位（一万节以上）时字符串比较会
+        把 "9999" 当成比 "10000" 大，序号撞车直接撞 UNIQUE(work_id, path)。
+        末段不是数字的老数据 CAST 成 0，与原实现「解析失败就跳过」同一口径。
+        """
         assert self._db is not None
+        parent_path = ""
+        if parent_id:
+            cur = await self._db.execute("SELECT path FROM nodes WHERE id = ?", (parent_id,))
+            row = await cur.fetchone()
+            # path 末段固定在父级前缀之后，前缀长度决定从第几个字符开始取序号
+            parent_path = f"{row['path']}." if row else ""
+        start = len(parent_path) + 1
         if parent_id:
             cur = await self._db.execute(
-                "SELECT path FROM nodes WHERE work_id = ? AND parent_id = ?", (work_id, parent_id)
+                "SELECT MAX(CAST(SUBSTR(path, ?) AS INTEGER)) AS m FROM nodes "
+                "WHERE work_id = ? AND parent_id = ?", (start, work_id, parent_id)
             )
         else:
             cur = await self._db.execute(
-                "SELECT path FROM nodes WHERE work_id = ? AND parent_id IS NULL", (work_id,)
+                "SELECT MAX(CAST(SUBSTR(path, ?) AS INTEGER)) AS m FROM nodes "
+                "WHERE work_id = ? AND parent_id IS NULL", (start, work_id)
             )
-        rows = await cur.fetchall()
-        seqs = []
-        for r in rows:
-            try:
-                seqs.append(int(str(r[0]).rsplit(".", 1)[-1]))
-            except ValueError:
-                continue
-        return (max(seqs) + 1) if seqs else 1
+        row = await cur.fetchone()
+        return int(row["m"] or 0) + 1
+
+    async def _insert_node_locked(
+        self, *, nid: str, work_id: str, kind: str, title: str, content: str,
+        parent_id: Optional[str], path: str, depth: int,
+        ordinal: Optional[int], now: float,
+    ) -> None:
+        """写一行 nodes（连带字数与内容哈希）。
+
+        **调用方必须已持有 self._lock，并负责 commit**。
+        单独抽出来只为一件事：单节的 `create_node` 与批量的 `create_nodes_batch`
+        必须算出同一套 path / ordinal / word_count / content_hash——两处各写一遍
+        INSERT，早晚会漂移成「批量导的章节和手敲的章节不一样」。
+        """
+        await self._db.execute(
+            "INSERT INTO nodes(id, work_id, parent_id, path, depth, ordinal, kind, title, content, "
+            "status, word_count, content_hash, summary, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,'draft',?,?,'',?,?)",
+            (nid, work_id, parent_id, path, depth, ordinal, kind, title, content,
+             _count_words(content), _hash(content) if content else "", now, now),
+        )
 
     async def create_node(
         self,
@@ -826,17 +920,94 @@ class StudioStore:
                 row = await cur.fetchone()
                 ordinal = int(row["m"]) + 1
 
-            await self._db.execute(
-                "INSERT INTO nodes(id, work_id, parent_id, path, depth, ordinal, kind, title, content, "
-                "status, word_count, content_hash, summary, created_at, updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,'draft',?,?,'',?,?)",
-                (nid, work_id, parent_id, path, depth, ordinal, kind, title, content,
-                 _count_words(content), _hash(content) if content else "", now, now),
-            )
+            await self._insert_node_locked(
+                nid=nid, work_id=work_id, kind=kind, title=title, content=content,
+                parent_id=parent_id, path=path, depth=depth, ordinal=ordinal, now=now)
             await self._db.execute("UPDATE works SET updated_at = ? WHERE id = ?", (now, work_id))
             await self._db.commit()
 
         return await self.get_node(nid)  # type: ignore[return-value]
+
+    async def create_nodes_batch(
+        self, *, work_id: str, kind: str, sections: list[Any],
+        parent_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """一次事务落一批同级节点，返回 `{created, failed, first_id}`。
+
+        为什么要这一条：导入旧稿原来逐节 POST `/nodes`，实测 2000 章要 39 秒，
+        而且每节都得重扫同级算序号、单独 commit 一次（一次 fsync）。这里把
+        两件事各做一次：起点序号查一次、后面在内存里递增，最后一次性提交。
+        导入的正文照旧不计入「今天写的字」——`create_node` 本来也不记。
+
+        标题为空的节跳过并把原因报回去（坏一节不该让整本导不进来）；标题超 120 字
+        截断而不是整批拒绝，与 `import_work` 同一口径。
+        """
+        assert self._db is not None
+        if kind not in ("volume", "chapter", "section"):
+            raise ValueError(f"节点类型不认: {kind}")
+        if not sections:
+            raise ValueError("没有要导入的节")
+        if len(sections) > MAX_BATCH_SECTIONS:
+            raise ValueError(f"一次最多 {MAX_BATCH_SECTIONS} 节，请分批发（前端已按块发）")
+
+        first_id = ""
+        created = 0
+        failed: list[dict[str, Any]] = []
+        now = _now()
+        async with self._lock:
+            try:
+                parent_path = ""
+                depth = 0
+                if parent_id:
+                    cur = await self._db.execute(
+                        "SELECT path, depth FROM nodes WHERE id = ? AND work_id = ?",
+                        (parent_id, work_id)
+                    )
+                    row = await cur.fetchone()
+                    if not row:
+                        raise ValueError(f"父节点不存在: {parent_id}")
+                    parent_path = row["path"] + "."
+                    depth = int(row["depth"]) + 1
+
+                seq = await self._next_seq(work_id, parent_id)
+                # 全序只起一次头：容器（卷/篇）不进全序，与 create_node 同一判断
+                ordinal: Optional[int] = None
+                if kind in ("chapter", "section"):
+                    cur = await self._db.execute(
+                        "SELECT COALESCE(MAX(ordinal),0) AS m FROM nodes WHERE work_id = ?",
+                        (work_id,)
+                    )
+                    ordinal = int((await cur.fetchone())["m"]) + 1
+
+                for index, item in enumerate(sections):
+                    if not isinstance(item, dict):
+                        failed.append({"index": index, "title": "", "reason": "这一条不是对象"})
+                        continue
+                    title = str(item.get("title") or "").strip()[:120]
+                    if not title:
+                        failed.append({"index": index, "title": "", "reason": "标题为空"})
+                        continue
+                    nid = _new_id("n_")
+                    await self._insert_node_locked(
+                        nid=nid, work_id=work_id, kind=kind,
+                        title=title, content=str(item.get("content") or ""),
+                        parent_id=parent_id, path=f"{parent_path}{seq:04d}",
+                        depth=depth, ordinal=ordinal, now=now)
+                    seq += 1
+                    if ordinal is not None:
+                        ordinal += 1
+                    created += 1
+                    first_id = first_id or nid
+
+                if created:
+                    await self._db.execute(
+                        "UPDATE works SET updated_at = ? WHERE id = ?", (now, work_id))
+                await self._db.commit()
+            except Exception:
+                await self._db.rollback()
+                raise
+
+        return {"created": created, "failed": failed, "first_id": first_id}
 
     async def list_tree(self, work_id: str) -> list[dict[str, Any]]:
         """整棵树的轻量视图（不带正文），按 path 排序，前端自行组装。"""
@@ -1675,6 +1846,11 @@ class StudioStore:
             f"DELETE FROM index_units WHERE ref_kind = ? AND ref_id IN ({marks})",
             [ref_kind, *ref_ids])
         if ref_kind == "node":
+            # 倒排必须先删：summaries 一删，summary_id 就查不出来了
+            await self._db.execute(
+                "DELETE FROM summaries_fts WHERE summary_id IN "
+                "(SELECT id FROM summaries WHERE scope IN ('node', 'container') "
+                f"AND ref_id IN ({marks}))", list(ref_ids))
             await self._db.execute(
                 "DELETE FROM summaries WHERE scope IN ('node', 'container') "
                 f"AND ref_id IN ({marks})", list(ref_ids))
@@ -2801,11 +2977,13 @@ class StudioStore:
         texts: list[dict[str, Any]],
         node_id: Optional[str] = None,
         source_id: Optional[str] = None,
+        commit: bool = True,
     ) -> int:
         """整段替换某个节点/素材的块与 FTS 行。
 
         `texts` 里每项 {seq, text, text_tok, start, end}。
         先删旧块再插新块，保证不会出现“旧版本还在被检索到”。
+        `commit=False` 只给批量重建用：由调用方按批提交（见 `reindex_work`）。
         """
         assert self._db is not None
         where, value = ("node_id", node_id) if node_id else ("source_id", source_id)
@@ -2842,11 +3020,14 @@ class StudioStore:
                 "chunk_count=excluded.chunk_count, updated_at=excluded.updated_at",
                 (ref_kind, ref_id, work_id, content_hash, len(texts), now),
             )
-            await self._db.commit()
+            if commit:
+                await self._db.commit()
         return len(texts)
 
-    async def drop_index_unit(self, *, ref_kind: str, ref_id: str, node_id: Optional[str] = None,
-                              source_id: Optional[str] = None) -> None:
+    async def drop_index_unit(
+        self, *, ref_kind: str, ref_id: str, node_id: Optional[str] = None,
+        source_id: Optional[str] = None, commit: bool = True,
+    ) -> None:
         assert self._db is not None
         where, value = ("node_id", node_id) if node_id else ("source_id", source_id)
         if not value:
@@ -2859,7 +3040,8 @@ class StudioStore:
             await self._db.execute(
                 "DELETE FROM index_units WHERE ref_kind = ? AND ref_id = ?", (ref_kind, ref_id)
             )
-            await self._db.commit()
+            if commit:
+                await self._db.commit()
 
     async def clear_chunks(self, work_id: str) -> None:
         """整书重建前清空，避免残留已删节点的块。"""
@@ -2900,7 +3082,10 @@ class StudioStore:
             cur = await self._db.execute(
                 "SELECT chunk_id, bm25(chunks_fts) AS rank FROM chunks_fts "
                 "WHERE chunks_fts MATCH ? AND work_id = ? ORDER BY rank LIMIT ?",
-                (match_expr, work_id, cap * 2),
+                # 候选窗口取 cap*4：纯 OR 的长 query 里排在后面几名的块，
+                # 换一个近因/摘要权重就可能进前 top_k。窗口只有 cap*2 时，
+                # 排第 20 名的精确命中永远进不了 top8（长库实测过）。
+                (match_expr, work_id, cap * 4),
             )
             hits = await cur.fetchall()
             if not hits:
@@ -3455,21 +3640,48 @@ class StudioStore:
 
     # ==================== 摘要 ====================
 
+    async def _write_summary_fts_locked(
+        self, summary_id: str, work_id: str, content: str,
+    ) -> bool:
+        """把一条摘要写进倒排（先删旧再写新），返回有没有真的写进去。
+
+        **调用方必须已持有 self._lock**。三个入口共用（回填 / upsert / 重建）：
+        切词口径一旦分家，「写进去的」和「查出来的」就对不上，而这种不一致
+        在界面上看不出来——只是某几段前情再也搜不到。
+        """
+        assert self._db is not None
+        await self._db.execute("DELETE FROM summaries_fts WHERE summary_id = ?", (summary_id,))
+        tok = tokenize.tokenize(content or "")
+        if not tok:
+            return False
+        await self._db.execute(
+            "INSERT INTO summaries_fts(summary_id, work_id, text_tok) VALUES(?,?,?)",
+            (summary_id, work_id, tok),
+        )
+        return True
+
     async def upsert_summary(
         self, work_id: str, *, scope: str, ref_id: str, content: str,
         ref_ordinal: int = 0, model: str = "", ref_hash: str = "",
     ) -> None:
         assert self._db is not None
         async with self._lock:
+            # 冲突时 id 不变：倒排行得跟着用同一个 id，否则重建时旧行删不掉
+            cur = await self._db.execute(
+                "SELECT id FROM summaries WHERE scope = ? AND ref_id = ?", (scope, ref_id))
+            row = await cur.fetchone()
+            sid = row["id"] if row else _new_id("sm_")
             await self._db.execute(
                 "INSERT INTO summaries(id, work_id, scope, ref_id, ref_ordinal, content, "
                 "ref_hash, model, created_at) VALUES(?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(scope, ref_id) DO UPDATE SET "
                 "content=excluded.content, ref_ordinal=excluded.ref_ordinal, "
                 "ref_hash=excluded.ref_hash, model=excluded.model, created_at=excluded.created_at",
-                (_new_id("sm_"), work_id, scope, ref_id, int(ref_ordinal), content,
+                (sid, work_id, scope, ref_id, int(ref_ordinal), content,
                  ref_hash, model, _now()),
             )
+            # 正文一改摘要就重算，倒排必须先删旧再写新，否则 S5 拿回来的还是上一版记忆
+            await self._write_summary_fts_locked(sid, work_id, content)
             await self._db.commit()
 
     # 这一句在两个查询里重复用：节摘要拿节点当下的 content_hash 比，
@@ -3508,10 +3720,80 @@ class StudioStore:
     async def delete_summary(self, scope: str, ref_id: str) -> None:
         assert self._db is not None
         async with self._lock:
+            cur = await self._db.execute(
+                "SELECT id FROM summaries WHERE scope = ? AND ref_id = ?", (scope, ref_id))
+            rows = await cur.fetchall()
+            for r in rows:
+                await self._db.execute(
+                    "DELETE FROM summaries_fts WHERE summary_id = ?", (r["id"],))
             await self._db.execute(
                 "DELETE FROM summaries WHERE scope = ? AND ref_id = ?", (scope, ref_id)
             )
             await self._db.commit()
+
+    async def search_summaries(
+        self, work_id: str, match_expr: str, *, limit: int = 20,
+        max_ordinal: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """摘要路召回：只出 `scope='node'` 且未过期的行。
+
+        `max_ordinal` 把「最近几节」挡在外面：那几条摘要 S4 已经整块注入，
+        再从检索里回来一遍只是重复占预算。过期的不出——旧摘要会把已经改掉的
+        情节当成既定事实。与 `search_chunks` 同一套两步查（FTS 只给 id）。
+        """
+        assert self._db is not None
+        if not match_expr:
+            return []
+        cap = max(1, min(limit, 100))
+        async with self._lock:
+            cur = await self._db.execute(
+                "SELECT summary_id, bm25(summaries_fts) AS rank FROM summaries_fts "
+                "WHERE summaries_fts MATCH ? AND work_id = ? ORDER BY rank LIMIT ?",
+                # 窗口与 search_chunks 同一口径（cap*4）：下面还有 fresh 与
+                # 最近 N 节两道 Python 过滤，只取 cap*2 会在过滤后剩不下几条
+                (match_expr, work_id, cap * 4),
+            )
+            hits = await cur.fetchall()
+            if not hits:
+                return []
+            order = {r["summary_id"]: float(r["rank"] or 0.0) for r in hits}
+            marks = ",".join("?" for _ in hits)
+            cur = await self._db.execute(
+                self._SUMMARY_FRESH_SQL + f"WHERE s.id IN ({marks}) AND s.scope = 'node'",
+                [*order.keys()],
+            )
+            rows = await cur.fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            # fresh 是 SELECT 里的计算列，SQLite 不认它在 WHERE 里，只能在 Python 过一遍
+            if not d.get("fresh"):
+                continue
+            if max_ordinal is not None and int(d.get("ref_ordinal") or 0) >= max_ordinal:
+                continue
+            d["score"] = -order.get(d["id"], 0.0)
+            out.append(d)
+        out.sort(key=lambda d: d["score"], reverse=True)
+        return out[:cap]
+
+    async def rebuild_summaries_fts(self, work_id: str) -> int:
+        """给一本书的摘要重建倒排（老库补票 / 手动修复）。返回写入行数。
+
+        幂等：先按 work_id 清一遍再全量写。几千条摘要走一遍只要几十毫秒，
+        不值得再维护一张指纹台账。`indexer.reindex_work` 每次顺带跑一次。
+        """
+        assert self._db is not None
+        async with self._lock:
+            await self._db.execute("DELETE FROM summaries_fts WHERE work_id = ?", (work_id,))
+            cur = await self._db.execute(
+                "SELECT id, content FROM summaries WHERE work_id = ?", (work_id,))
+            rows = await cur.fetchall()
+            written = 0
+            for r in rows:
+                if await self._write_summary_fts_locked(r["id"], work_id, r["content"] or ""):
+                    written += 1
+            await self._db.commit()
+        return written
 
     async def stale_summaries(self, work_id: str) -> list[dict[str, Any]]:
         """过期的那几份摘要（只返回非空的行，调用方拿 len 就是「待重算 N 节」）。"""
@@ -3684,19 +3966,29 @@ class StudioStore:
             row = await cur.fetchone()
         return dict(row) if row else {}
 
-    async def claim_job(self) -> Optional[dict[str, Any]]:
+    async def claim_job(self, *, task_type: str = "", min_priority: int = 0) -> Optional[dict[str, Any]]:
         """领取一个可执行任务：优先级高的先跑，同优先级按创建时间。
 
         先用 UPDATE ... WHERE status='queued' 抢，再用 rowcount 确认；
         单进程里其实不会竞争，但不想依赖“只有一个消费者”这个前提。
+
+        `task_type` / `min_priority` 是并发分道用的：队列要能「只领章级拆解」
+        凑一批并行，而不把有依赖的卷/全书级（priority 更低）一起领进来。
         """
         assert self._db is not None
         now = _now()
+        sql = ("SELECT id FROM jobs WHERE status = 'queued' "
+               "AND (scheduled_at IS NULL OR scheduled_at <= ?)")
+        args: list[Any] = [now]
+        if task_type:
+            sql += " AND task_type = ?"
+            args.append(task_type)
+        if min_priority:
+            sql += " AND priority >= ?"
+            args.append(int(min_priority))
+        sql += " ORDER BY priority DESC, created_at ASC, rowid ASC LIMIT 1"
         async with self._lock:
-            cur = await self._db.execute(
-                "SELECT id FROM jobs WHERE status = 'queued' "
-                "AND (scheduled_at IS NULL OR scheduled_at <= ?) "
-                "ORDER BY priority DESC, created_at ASC, rowid ASC LIMIT 1", (now,))
+            cur = await self._db.execute(sql, args)
             row = await cur.fetchone()
             if not row:
                 return None

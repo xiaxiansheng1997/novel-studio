@@ -21,10 +21,10 @@ class FakeGateway:
     def resolve(self, model: str):
         return ("fake", "")
 
-    async def stream(self, *, model: str, system: str, prompt: str, mode: str = "quick"):
+    async def stream(self, *, model: str, system: str, prompt: str, mode: str = "quick", **_kw):
         yield SimpleNamespace(text="")
 
-    async def complete(self, *, model: str, system: str, prompt: str, mode: str = "quick"):
+    async def complete(self, *, model: str, system: str, prompt: str, mode: str = "quick", **_kw):
         return SimpleNamespace(text="")
 
 

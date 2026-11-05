@@ -142,7 +142,9 @@ async def test_sweep_orphans_removes_node_level_leftovers(store) -> None:
                                content="旧章节摘要", ref_ordinal=99)
 
     before = await store.orphan_counts()
-    assert before == {"index_units": 1, "summaries": 1}
+    # summaries_fts 也在这份名单里：倒排行跟着摘要行同生共死，
+    # 不一起算的话 sweep 删除 summaries 之后它还得多跑一轮才能清掉。
+    assert before == {"index_units": 1, "summaries": 1, "summaries_fts": 1}
     assert await store.sweep_orphans() == before
     assert await store.orphan_counts() == {}
     # 活作品的台账、正文块、摘要一条都不能少

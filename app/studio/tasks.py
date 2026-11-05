@@ -21,7 +21,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from app.core.errors import HumanVerifyRequired, NeedsLogin, ProviderBlocked, W2AError
-from app.studio import consistency, craft, graph, indexer, prompting, scoring, summarizer
+from app.studio import consistency, craft, graph, indexer, prompting, sampling, scoring, summarizer
 from app.studio.assembler import assemble, record_used_sources
 
 # 这些错误说明「人不在」，重试没有意义：必须暂停整条队列
@@ -134,7 +134,8 @@ async def run_beats(ctx: TaskContext) -> dict[str, Any]:
     system, user = prompting.beats_prompt(ctx.work, node, prev_hint=prev,
                                         focus=focus, known_names=known)
     res = await ctx.gateway.complete(
-        model=ctx.model, system=system, prompt=user, mode="quick")
+        model=ctx.model, system=system, prompt=user, mode="quick",
+        **sampling.for_task("beats"))
     beats = prompting.parse_beats(res.text)
     if not beats:
         raise ValueError("节拍卡为空")
@@ -175,7 +176,8 @@ async def run_draft(ctx: TaskContext) -> dict[str, Any]:
     cause: Optional[BaseException] = None
     try:
         async for chunk in ctx.gateway.stream(
-            model=ctx.model, system=result.system, prompt=result.user, mode=ctx.mode
+            model=ctx.model, system=result.system, prompt=result.user, mode=ctx.mode,
+            **sampling.for_task(task_type)
         ):
             if chunk.text:
                 parts.append(chunk.text)
@@ -223,7 +225,8 @@ async def run_polish(ctx: TaskContext) -> dict[str, Any]:
                             template=ctx.template, resolved=ctx.resolved)
     await record_used_sources(store, result)
     res = await ctx.gateway.complete(model=ctx.model, system=result.system,
-                                    prompt=result.user, mode=ctx.mode)
+                                    prompt=result.user, mode=ctx.mode,
+                                    **sampling.for_task("polish"))
     text = (res.text or "").strip()
     if not text:
         raise ValueError("润色结果为空")

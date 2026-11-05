@@ -53,3 +53,26 @@ async def test_business_key_dedup_still_works(store) -> None:
     assert again.get("deduped") is True
     assert again["id"] == first["id"]
     assert len(await store.list_jobs(work_id=work["id"])) == 1
+
+
+async def test_claim_job_can_filter_type_and_priority(store) -> None:
+    """并发批次要能「只领章级拆解」：卷/全书级 priority 更低，不能被顺手领走。
+
+    没有这两个过滤参数，队列就只能要么全串行，要么把有依赖的卷级任务
+    和章级一起凑进同一批并行里——后者会稳定报「本卷还有 N 章未拆解」。
+    """
+    work = await store.create_work(kind="novel", title="过滤")
+    vol = await store.enqueue_job(work_id=work["id"], node_id="v1",
+                                  task_type="craft", priority=5)
+    hot = await store.enqueue_job(work_id=work["id"], node_id=None,
+                                  task_type="draft", priority=9)
+    chap = await store.enqueue_job(work_id=work["id"], node_id="c1",
+                                   task_type="craft", priority=6)
+
+    # 不带过滤：priority 最高的先走
+    assert (await store.claim_job())["id"] == hot["id"]
+    got = await store.claim_job(task_type="craft", min_priority=6)
+    assert got["id"] == chap["id"], "只领章级，不能把卷级捞进并发批次"
+    assert await store.claim_job(task_type="craft", min_priority=6) is None
+    # 卷级还在排队，等章跑完后由串行路径处理
+    assert (await store.claim_job())["id"] == vol["id"]

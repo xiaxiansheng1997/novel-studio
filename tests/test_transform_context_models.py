@@ -64,7 +64,7 @@ class FakeGateway:
         self.calls: list[dict] = []
         self._fail = set(fail_models)
 
-    async def complete(self, *, model, system, prompt, mode):
+    async def complete(self, *, model, system, prompt, mode, **_kw):
         self.calls.append({"model": model, "system": system, "prompt": prompt})
         if model in self._fail:
             raise RuntimeError(f"{model} 挂了")

@@ -63,11 +63,19 @@ class Gateway:
         history_mode: str = "prompt",
         thinking: bool = False,
         search: bool = False,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        json_mode: bool = False,
     ) -> AsyncIterator[GenChunk]:
         """驱动一次生成，逐块产出正文增量。
 
         history_mode 固定 prompt：写作场景每次都要干净上下文，
         站点会话里的历史会和装配好的上下文叠两遍。
+
+        temperature / max_tokens / json_mode 是能力而非要求：只有直连通道用得上，
+        反代适配器不读这几个字段（网页端没有这些开关）。以前这里一个采样参数
+        都没有，等于把「写正文」和「抽 JSON」一起交给上游默认温度——官方 API
+        默认 1.0 会让拆解输出乱飘，本地小模型默认值又常把正文写成流水账。
         """
         adapter = self.reg.route(model)
         messages: list[dict] = []
@@ -83,6 +91,9 @@ class Gateway:
             mode=mode,
             thinking=thinking,
             search=search,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"} if json_mode else None,
         )
         throttle = self.reg.throttle(adapter.key)
         await throttle.wait_turn()

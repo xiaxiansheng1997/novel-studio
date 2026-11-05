@@ -29,6 +29,15 @@ _STOPWORDS = {
     "a", "an", "the", "is", "are", "was", "were", "be", "to", "of", "and", "or",
 }
 
+# 写作指令模板里的套话：每一节的 instruction 都带一遍，df 极高。
+# 它们进 MATCH 只会把取词名额从真正的专名手里挤走（实测一节 123 个词，
+# 前 12 名里一半是「本节」「标题」「篇幅」）。表收窄，只放模板专属词，
+# 不放「细节」「数据」这类正文里也常见的实词——跨作品搜索还要用它们。
+_TEMPLATE_WORDS = frozenset({
+    "本节", "本章", "标题", "要点", "视角", "叙事", "篇幅", "节拍",
+    "正文", "过渡", "附加", "不合格", "视为", "宁可", "收尾", "字数",
+})
+
 # 只保留中文、字母、数字；标点与空白一律丢弃
 _KEEP = re.compile(r"[\w\u4e00-\u9fff]+", re.UNICODE)
 
@@ -121,18 +130,34 @@ def tokenize(text: str) -> str:
     return " ".join(tokens(text))
 
 
-def match_query(query: str, *, max_terms: int = 12) -> str:
+def match_query(
+    query: str, *, max_terms: int = 24, drop_template: bool = False,
+) -> str:
     """把自然语言 query 变成 FTS5 的 MATCH 表达式。
 
     每个词单独加双引号，避免 `-`、`*`、`:` 被当成 FTS 语法；
     词之间用 OR（AND 会过于严格，长 query 常常零命中）。
+
+    `max_terms` 从 12 提到 24：一节的计划里专名（人名/地名/器物）常有十几个，
+    12 个名额不够用。
+
+    `drop_template` 只给「检索取词」那一条路开（`retrieval.retrieve`）：
+    那里的 query 是「本节指令 + 计划」拼出来的，模板套话 df 极高，
+    只会把词额从专名手里挤走。**默认关**——跨作品搜索是用户手敲的词，
+    搜「正文」「标题」就该照着搜，在那儿剔模板词等于把整组结果打成空。
     """
     uniq: list[str] = []
     for tok in tokens(query):
+        if drop_template and tok.lower() in _TEMPLATE_WORDS:
+            continue
         if tok not in uniq:
             uniq.append(tok)
         if len(uniq) >= max_terms:
             break
+    if not uniq and drop_template:
+        # 整句都是模板词（用户直接输「正文」）：退回不过滤的切法，
+        # 宁可能量低一点，不能把查询打成空
+        return match_query(query, max_terms=max_terms)
     if not uniq:
         return ""
     return " OR ".join('"' + t.replace('"', '""') + '"' for t in uniq)

@@ -20,7 +20,7 @@ from typing import Any
 
 from loguru import logger
 
-from app.studio import cost, jsonutil
+from app.studio import cost, jsonutil, sampling
 # 口径必须与 nodes.content_hash 完全一致（同 summarizer：sha1 前 16 位、不 strip），
 # 自己另算一个会让每章都被判过期、每次都重烧一遍调用。
 from app.studio.store import _hash
@@ -193,7 +193,7 @@ async def analyze_chapter(gateway, store, node: dict[str, Any], *,
     res = await gateway.complete(
         model=model, system=CHAPTER_SYSTEM,
         prompt=CHAPTER_USER.format(title=node.get("title") or "", content=snippet),
-        mode="quick")
+        mode="quick", **sampling.for_task("craft"))
     data = jsonutil.parse_json_loose(res.text)
     if not _sane(data):
         raise ValueError("章拆解返回不是有效 JSON")
@@ -235,7 +235,7 @@ async def analyze_volume(gateway, store, work: dict[str, Any], volume: dict[str,
     res = await gateway.complete(
         model=model, system=VOLUME_SYSTEM,
         prompt=VOLUME_USER.format(label=volume.get("title") or "本卷", parts=merged_src),
-        mode="quick")
+        mode="quick", **sampling.for_task("craft"))
     data = jsonutil.parse_json_loose(res.text)
     if not _sane(data):
         raise ValueError("卷拆解返回不是有效 JSON")
@@ -272,7 +272,7 @@ async def analyze_book(gateway, store, work: dict[str, Any], *,
         prompt=BOOK_USER.format(title=work.get("title") or "本书",
                                 premise=work.get("premise") or "（未填）",
                                 parts=parts_src),
-        mode="quick")
+        mode="quick", **sampling.for_task("craft"))
     data = jsonutil.parse_json_loose(res.text)
     if not _sane(data):
         raise ValueError("全书拆解返回不是有效 JSON")

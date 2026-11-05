@@ -27,6 +27,9 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
     stop: Optional[Union[str, list[str]]] = None
+    # JSON 模式：直连通道（OpenAI/Ollama 兼容端点）能让上游保证输出合法 JSON；
+    # 反代网页端没有这个能力，字段照旧接受但被忽略（见 openai_compat 的透传与降级）
+    response_format: Optional[dict[str, Any]] = None
     # 显式声明，避免「传了却静默丢弃」；具体处理见 openai_routes.handlers
     # n>1 直接 400；stop/max_tokens 本地软截断；tools 本轮只告警不执行
     n: Optional[int] = None

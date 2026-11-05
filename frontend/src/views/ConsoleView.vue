@@ -310,11 +310,19 @@
               <span v-if="counts.cancelled" class="q-stat"><b>{{ counts.cancelled }}</b> 已取消</span>
               <span v-if="queue?.eta_sec" class="q-eta">预计还要 {{ etaText }}</span>
             </div>
-            <p v-if="queue?.current" class="q-now">
-              <span class="spinner" aria-hidden="true"></span>
-              正在写：{{ queue.current.title || queue.current.task_type }}
-              <span class="mono q-now-task">{{ queue.current.task_type }}</span>
-            </p>
+            <div v-if="runningJobs.length" class="q-now-list">
+              <p v-for="(j, i) in runningJobs" :key="j.job_id" class="q-now">
+                <span class="spinner" aria-hidden="true"></span>
+                <span class="mono q-now-lane">{{ runningJobs.length > 1 ? `路 ${i + 1}` : '正在跑' }}</span>
+                {{ j.title || j.task_type }}
+                <span class="mono q-now-task">{{ j.task_type }}</span>
+                <span class="mono q-now-ms" :title="'已跑 ' + fmtDur(j.elapsed_ms)">{{ fmtDur(j.elapsed_ms) }}</span>
+              </p>
+              <p v-if="runningJobs.length > 1" class="hint-line">
+                {{ runningJobs.length }} 路并行：只有直连 API 通道的章级拆解会多开，
+                反代通道永远一路（多开一路就是多一个页面同时打字，风控风险成倍）。
+              </p>
+            </div>
             <p v-else-if="queue && !queue.worker" class="hint-line">
               worker 空闲（入队后自动拉起）；关掉写作台不影响队列继续跑。
             </p>
@@ -959,6 +967,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProviderStore } from '../stores/provider'
 import { apiFetch } from '../utils/api'
+import { runningJobs as runningJobsOf } from '../utils/queue'
 import { decodeTemplate, outlineToText, textToOutline } from '../utils/template'
 import AppNav from '../components/AppNav.vue'
 import AppIcon from '../components/AppIcon.vue'
@@ -1310,11 +1319,16 @@ async function reloadConfig() {
 // ==================== 任务 ====================
 
 const counts = computed(() => queue.value?.counts || {})
+// running 是并发批次的全貌，current 只是其中最早开跑的那一路；
+// 只读 current 会把三路显示成一路，用户会以为另两路没干活。
+const runningJobs = computed(() => runningJobsOf(queue.value))
 const queueSub = computed(() => {
   const q = queue.value
   if (!q) return '读取中…'
   if (q.paused) return '已暂停'
-  if (q.current) return '正在写'
+  const n = runningJobsOf(q).length
+  if (n > 1) return `并行 ${n} 路`
+  if (n === 1) return '正在跑'
   return q.worker ? '空闲' : 'worker 未启动'
 })
 const etaText = computed(() => {
@@ -2519,6 +2533,25 @@ function alignClass(p) {
   margin: 12px 0 0;
   font-size: 12.5px;
   color: var(--text-muted);
+}
+/* 并行批次一路一行：共用 .q-now 的行样式，这里只负责把它们堆起来 */
+.q-now-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.q-now-list .q-now {
+  margin: 6px 0 0;
+}
+.q-now-lane {
+  flex: none;
+  font-size: 11px;
+  color: var(--run);
+}
+.q-now-ms {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
 }
 .q-now-task {
   font-size: 11px;

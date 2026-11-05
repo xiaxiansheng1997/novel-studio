@@ -31,7 +31,7 @@ class FakeGateway:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def complete(self, *, model: str, system: str, prompt: str, mode: str = "quick"):
+    async def complete(self, *, model: str, system: str, prompt: str, mode: str = "quick", **_kw):
         self.calls.append(prompt)
         return SimpleNamespace(text=f"记忆卡 #{len(self.calls)}")
 

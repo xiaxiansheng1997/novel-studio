@@ -473,7 +473,7 @@
             <section v-if="showQueue" class="pipe queue">
               <header class="pipe-head">
                 <span class="pipe-title">
-                  <span v-if="store.queue?.current" class="spinner" aria-hidden="true"></span>
+                  <span v-if="queueRunning" class="spinner" aria-hidden="true"></span>
                   {{ queueTitle }}
                 </span>
                 <span class="pipe-meta">
@@ -487,7 +487,7 @@
                   去控制台
                 </button>
               </header>
-              <div v-if="store.queue?.current" class="bar">
+              <div v-if="queueRunning" class="bar">
                 <div class="bar-fill indeterminate"></div>
               </div>
               <p v-if="store.queue?.paused" class="pipe-err">
@@ -607,6 +607,7 @@ import { marked } from 'marked'
 import { useStudioStore } from '../stores/studio'
 import { apiFetch } from '../utils/api'
 import { collectHits, stepIndex } from '../utils/find'
+import { laneCount, queueRunningTitle } from '../utils/queue'
 import { splitWithOffsets } from '../utils/paras'
 import {
   FONT_PRESETS,
@@ -771,7 +772,10 @@ const importKind = computed(
 )
 
 async function onImported(res) {
-  showNotice(`已导入 ${res.created} 节`)
+  // 分层导入要说出卷数：只报「导入了 120 节」会让人以为树上多了两卷这件事白做了
+  showNotice(res.volumes
+    ? `已导入 ${res.volumes} 卷 · ${res.created} 节`
+    : `已导入 ${res.created} 节`)
   if (res.firstId) await store.selectNode(res.firstId)
 }
 
@@ -782,12 +786,16 @@ const showQueue = computed(() => {
   if (!q) return false
   return store.queueActive || (q.counts?.done || 0) + (q.counts?.failed || 0) > 0
 })
+const queueRunning = computed(() => laneCount(store.queue) > 0)
 const queueTitle = computed(() => {
   const q = store.queue
   if (!q) return '队列'
   if (q.triage?.due) return '等待抽检'
   if (q.paused) return '队列已暂停'
-  if (q.current) return `正在写：${q.current.title || q.current.task_type}`
+  // 路数写在标题最前面：并行之后的 ETA 比老口径短一个数量级，
+  // 不解释一句会被当成「队列变快了」的假象（并行只在直连通道发生）
+  const running = queueRunningTitle(q)
+  if (running) return running
   // 完成数在右边 meta 里，标题不再重复一遍
   return '队列已排空'
 })
@@ -1305,7 +1313,10 @@ async function moveNode(node, direction) {
     showNotice(r.reason || '移动失败')
     return
   }
-  showNotice(`已与「${r.swapped_with_title}」交换位置`)
+  // 卷换位换的是整棵子树（卷里所有章一起走），说法不能与「两节互换」混在一起
+  showNotice(r.ordinal == null
+    ? `已把「${node.title}」整卷换到「${r.swapped_with_title}」的位置，全书章号已重排`
+    : `已与「${r.swapped_with_title}」交换位置`)
   await store.runCheck()
   await panelRef.value?.refreshContext()
 }
@@ -1833,8 +1844,10 @@ function startQueuePoll() {
   queueTimer = setInterval(async () => {
     await store.loadQueue()
     if (!store.queueActive) stopQueuePoll()
-    // 单节写完后正文被换掉了，没选中的情况下也刷新一下当前节点
-    if (store.queue?.current == null && store.node) {
+    // 单节写完后正文被换掉了，没选中的情况下也刷新一下当前节点。
+    // 看的是「全部路数都空了」不是 current：并行时 current 只是最早开跑的那一路，
+    // 它还挂在别的节上时，本节的写手可能正在另一路里跑，刷早了会读到旧稿。
+    if (!queueRunning.value && store.node) {
       const r = await fetchNodeQuietly(store.node.id)
       if (r && r.content !== contentDraft.value) applyRemoteContent(r)
     }

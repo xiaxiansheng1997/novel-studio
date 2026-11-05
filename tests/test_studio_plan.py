@@ -30,7 +30,7 @@ class FakeGateway:
     def resolve(self, model: str):
         return ("fake", "")
 
-    async def complete(self, *, model: str, system: str, prompt: str, mode: str = "quick"):
+    async def complete(self, *, model: str, system: str, prompt: str, mode: str = "quick", **_kw):
         self.last_prompt = prompt
         return SimpleNamespace(
             text="出场：林昭、老周\n地点：渡口\n事件：\n- 林昭捡到半块玉佩\n"

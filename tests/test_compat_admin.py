@@ -272,3 +272,141 @@ async def test_test_endpoint_reports_upstream(compat, monkeypatch) -> None:
                         _factory(lambda req: httpx.Response(401, json={"error": {"message": "bad key"}})))
     r = await client.post("/admin/compat/openai/test", json={"api_key": "sk-wrong"})
     assert r.json()["ok"] is False and "401" in r.json()["detail"]
+
+
+# ==================== 上游模型自动发现 ====================
+
+class FakeUpstream:
+    """假上游：把 admin_routes 里造 AsyncClient 的那一处换成带 MockTransport 的（不碰真网）。
+
+    只打一次补丁，之后换应答就行——反过来做会坑：`httpx.AsyncClient` 被换成桩之后，
+    第二次再取「原类」取到的就是桩自己，新 handler 套在旧 handler 外面根本不生效
+    （本文件第一版就栽在这：四条换应答的请求收到的全是第一条）。
+    还顺手记请求：取模型这条链最该钉的是「URL 拼对了没、key 带上了没」，
+    这两条错了就是界面上一句看不懂的 401。
+    """
+
+    def __init__(self, monkeypatch) -> None:  # noqa: ANN001 - 测试内小桩
+        real = httpx.AsyncClient
+        self.requests: list[httpx.Request] = []
+
+        def fallback(request):
+            return httpx.Response(200, json={})
+
+        self._handler = fallback
+
+        def capture(request):
+            self.requests.append(request)
+            return self._handler(request)
+
+        def make(**kwargs):
+            return real(transport=httpx.MockTransport(capture))
+
+        monkeypatch.setattr(admin_routes.httpx, "AsyncClient", make)
+
+    def reply_json(self, payload: object, status: int = 200) -> None:
+        def handler(request):
+            return httpx.Response(status, json=payload)
+        self._handler = handler
+
+    def reply_text(self, body: str, status: int = 200) -> None:
+        def handler(request):
+            return httpx.Response(status, text=body)
+        self._handler = handler
+
+    def refuse(self) -> None:
+        def handler(request):
+            raise httpx.ConnectError("Connection refused", request=request)
+        self._handler = handler
+
+
+def test_upstream_model_ids_flattens_shapes() -> None:
+    """各家 /models 的形状不一样：data/裸数组/models/只有 name，都得摊平并且去重。"""
+    assert admin_routes._upstream_model_ids(  # noqa: SLF001 - 就是测这个口径
+        {"data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]}) == ["gpt-4o", "gpt-4o-mini"]
+    assert admin_routes._upstream_model_ids(["a", "b", "a"]) == ["a", "b"]  # noqa: SLF001
+    assert admin_routes._upstream_model_ids({"models": [{"name": "q2.5"}]}) == ["q2.5"]  # noqa: SLF001
+    # 脏数据（没 id、空串、嵌套不是对象）不能把接口带崩
+    assert admin_routes._upstream_model_ids(  # noqa: SLF001
+        {"data": [{"id": "  "}, {"foo": 1}, None, 3, {"id": "ok"}]}) == ["ok"]
+    assert admin_routes._upstream_model_ids({"error": "x"}) == []  # noqa: SLF001
+    assert admin_routes._upstream_model_ids("字符串") == []  # noqa: SLF001
+
+
+async def test_models_endpoint_uses_stored_config(compat, monkeypatch) -> None:
+    """已有通道：取模型用库里那条 base_url/key，请求打到 base_url/models。"""
+    client, _reg, _tmp = compat
+    await client.put("/admin/compat/openai", json={
+        "base_url": "https://api.test/v1/", "api_key": "sk-list-1", "enabled": True})
+    up = FakeUpstream(monkeypatch)
+    up.reply_json({"data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}, {"id": "text-embedding-3"}]})
+    r = await client.post("/admin/compat/openai/models", json={})
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] is True
+    assert body["models"] == ["gpt-4o", "gpt-4o-mini", "text-embedding-3"]
+    assert body["total"] == 3 and body["truncated"] is False
+    assert str(up.requests[0].url) == "https://api.test/v1/models", "base_url 尾部斜杠要收掉"
+    assert up.requests[0].headers["authorization"] == "Bearer sk-list-1"
+
+
+async def test_models_endpoint_works_before_saving(compat, monkeypatch) -> None:
+    """新建还没落库：库里没这一行也要能取，base_url/key 从 body 走。"""
+    client, _reg, _tmp = compat
+    up = FakeUpstream(monkeypatch)
+    up.reply_json({"data": [{"id": "kimi-k2"}]})
+    r = await client.post("/admin/compat/moonshot-api/models", json={
+        "base_url": "https://api.moonshot.cn/v1", "api_key": "sk-new-0001"})
+    assert r.status_code == 200
+    assert r.json()["models"] == ["kimi-k2"]
+    assert up.requests[0].headers["authorization"] == "Bearer sk-new-0001"
+
+    # 本地 Ollama 这一类无鉴权上游：没 key 就不该发 Authorization 头（发了会被回 400）
+    r = await client.post("/admin/compat/local-api/models",
+                          json={"base_url": "http://localhost:11434/v1"})
+    assert r.status_code == 200
+    assert "authorization" not in up.requests[-1].headers
+
+    # 库里没这行又不给 base_url：只能 400 说「先填」，不能拿空 URL 去打上游
+    r = await client.post("/admin/compat/nope-api/models", json={})
+    assert r.status_code == 400 and "base_url" in r.json()["detail"]
+
+
+async def test_models_endpoint_rejects_bad_input(compat) -> None:
+    """反代站点没有 /models 可问；忘写协议的 base_url 也不能拿去发。"""
+    client, _reg, _tmp = compat
+    r = await client.post("/admin/compat/qwen/models", json={})
+    assert r.status_code == 400 and "反代站点" in r.json()["detail"]
+
+    await client.put("/admin/compat/openai", json={"base_url": "api.openai.com/v1"})
+    r = await client.post("/admin/compat/openai/models", json={})
+    assert r.status_code == 400 and "http" in r.json()["detail"]
+
+
+async def test_models_endpoint_reports_failure_without_500(compat, monkeypatch) -> None:
+    """上游 404 / 清单空 / 不是 JSON / 连不上：都是 ok=false 带回一句话，不是 500。
+
+    本地部署关掉 /models、或者把 base_url 填成了网页地址，都是常见事；
+    弹层要能把原因直接读出来，而不是报「保存失败」了事。
+    """
+    client, _reg, _tmp = compat
+    await client.put("/admin/compat/openai", json={
+        "base_url": "https://api.test/v1", "api_key": "sk-x", "enabled": True})
+    up = FakeUpstream(monkeypatch)
+
+    up.reply_text("not found", status=404)
+    r = await client.post("/admin/compat/openai/models", json={})
+    assert r.status_code == 200 and r.json()["ok"] is False and "404" in r.json()["detail"]
+
+    up.reply_json({"data": []})
+    r = await client.post("/admin/compat/openai/models", json={})
+    body = r.json()
+    assert body["ok"] is False and body["models"] == []
+    assert "手填" in body["detail"]
+
+    up.reply_text("<html>登录页</html>")
+    r = await client.post("/admin/compat/openai/models", json={})
+    assert r.json()["ok"] is False and "不是 JSON" in r.json()["detail"]
+
+    up.refuse()
+    r = await client.post("/admin/compat/openai/models", json={})
+    assert r.json()["ok"] is False and "连不上" in r.json()["detail"]

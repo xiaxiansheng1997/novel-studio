@@ -21,6 +21,7 @@ from typing import Any, Optional
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.studio import sampling
 from app.studio.jsonutil import parse_json_loose
 
 # 类型白名单：不引更多。类型膨胀会让抽取准确率断崖下跌。
@@ -325,11 +326,14 @@ async def extract_node(
     last_err = ""
     started = time.perf_counter()
     repair = "\n\n上一次输出不是合法 JSON。现在只输出一个合法 JSON 对象，字段一个都不能少，不要解释、不要代码块。"
+    # 第二轮带「上次不是合法 JSON」的修复提示：直连开了 json_mode 后基本走不到这里，
+    # 但反代没有 JSON 模式，这条补救是它唯一的兜底，不能删。
     for attempt in (1, 2):
         prompt = user if attempt == 1 else user + repair
         try:
             res = await gateway.complete(
-                model=model, system=EXTRACT_SYSTEM, prompt=prompt, mode=mode)
+                model=model, system=EXTRACT_SYSTEM, prompt=prompt, mode=mode,
+                **sampling.for_task("extract"))
         except Exception as exc:  # noqa: BLE001 - 抽不出来不能拖垮写作
             last_err = str(exc)
             logger.warning(f"[graph] 抽取失败 node={node['id']} attempt={attempt}: {exc}")

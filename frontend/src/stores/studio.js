@@ -1,10 +1,18 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import { laneCount } from '../utils/queue'
 import { decodeTemplate } from '../utils/template'
 
 /** 写作台的模型选择单独存一份 key：和聊天页的 w2a_model 互不干扰 */
 const STUDIO_MODEL_KEY = 'w2a_studio_model'
+
+/**
+ * 导入旧稿一次发多少节给后端。100 是个折中：再小就退化成一节一个请求
+ * （实测 2000 章逐节发要 39 秒），再大就是拿一个请求塞整本书。
+ * 后端那一侧的对应用 `MAX_BATCH_SECTIONS = 200` 兜闸。
+ */
+const IMPORT_CHUNK = 100
 
 /** 后端错误体是 FastAPI 的 `{detail: "..."}`；定稿闸门那种给的是一个对象，取里面的 message */
 async function errDetail(r, fallback) {
@@ -631,63 +639,190 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   /**
-   * 逐节导入旧稿。
+   * 把一批同级节分块发给 `/nodes/batch`（只发，不收尾）。
    *
-   * 每节都走 createNode 那条接口，但不在循环里 select：八十章会触发八十次
-   * 「选中 + 重拉整棵树」。最后统一重拉一次树、刷一次字数、重建一次索引就够了。
-   * 导入的正文不计入「今天写的字」——create_node 本来就不记，别在别处补。
+   * 为什么不逐节发：逐节是 2000 个请求、39 秒，而且每节都得在服务端重扫一遍
+   * 同级算序号、单独落一次盘。块内一个事务，块与块之间一旦失败就停 —— 半本书
+   * 停在哪儿、为什么停，都进 `reasons` 报给人看，比悄悄少一批强。
+   *
+   * 收尾（重拉树、刷字数、建索引）留给调用方：按卷导入时一卷一次收尾，
+   * 会把索引重建 2000 章那样跑好几趟。
    */
-  async function importNodes(sections, { kind = 'chapter', parentId = null } = {}, onProgress = null) {
-    if (!work.value) return { created: 0, failed: 0, firstId: '' }
-    let created = 0
-    let failed = 0
-    let firstId = ''
-    for (const [i, s] of sections.entries()) {
-      const r = await apiFetch(`/studio/works/${work.value.id}/nodes`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          kind,
-          title: s.title,
-          content: s.content,
-          parent_id: parentId || null,
-        }),
-      })
-      if (r.ok) {
-        const row = await r.json()
-        if (!firstId) firstId = row.id
-        created += 1
-      } else {
-        failed += 1
+  async function postChunks(sections, { kind = 'chapter', parentId = null } = {}, onProgress = null) {
+    const out = { created: 0, failed: 0, firstId: '', reasons: [], stopped: false }
+    if (!work.value || !sections.length) return out
+    const total = sections.length
+    for (let i = 0; i < total; i += IMPORT_CHUNK) {
+      const part = sections.slice(i, i + IMPORT_CHUNK)
+      const done = Math.min(i + part.length, total)
+      let r = null
+      try {
+        r = await apiFetch(`/studio/works/${work.value.id}/nodes/batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            kind,
+            parent_id: parentId || null,
+            sections: part.map((s) => ({ title: s.title, content: s.content })),
+          }),
+        })
+      } catch (e) {
+        // 用户要的是整本：这一块的节加上后面没发的，都算没成功
+        out.failed += total - i
+        out.reasons.push(`第 ${i + 1} 节起没连上服务：${String(e?.message || e)}`)
+        out.stopped = true
+        onProgress?.(done, total)
+        break
       }
-      onProgress?.(i + 1, sections.length)
+      if (!r.ok) {
+        // 后端一块一个事务：这一块的节全没落库，后面再发也没意义，停下
+        out.failed += total - i
+        out.reasons.push(`第 ${i + 1} 节起没导进去：${await errDetail(r, '这一批没导进去')}`)
+        out.stopped = true
+        onProgress?.(done, total)
+        break
+      }
+      const j = await r.json()
+      out.created += j.created || 0
+      if (!out.firstId && j.first_id) out.firstId = j.first_id
+      for (const f of j.failed || []) {
+        out.failed += 1
+        // 后端给不出被跳那节的标题（正因为标题是空的），用全局序号替它报个名
+        out.reasons.push(`${f.title || `第 ${i + Number(f.index ?? 0) + 1} 节`}：${f.reason || '后端没收'}`)
+      }
+      onProgress?.(done, total)
     }
+    return out
+  }
+
+  /** 导入后的收尾：树、字数、索引整批只做一次 */
+  async function afterImport(out) {
+    if (!work.value) return
     tree.value = await (await apiFetch(`/studio/works/${work.value.id}/tree`)).json()
     const st = await apiFetch(`/studio/works/${work.value.id}/stats`)
     if (st.ok) stats.value = await st.json()
     // 导进来的正文还没进 FTS：不建索引，刚导入的章搜不到、生成也用不上
-    if (created) {
+    if (out.created) {
       try {
         await reindex()
       } catch {
         /* 索引失败不该让导入回滚 */
       }
     }
-    return { created, failed, firstId }
   }
 
   /**
-   * 传一份 .docx 给后端解成纯文本：不写库，解出来的文本填进导入弹层继续预览。
-   * 收原始字节（octet-stream），后端不需要 multipart。
+   * 导入旧稿（平铺）：分块发给 `/nodes/batch`，每块 100 节。
+   *
+   * 导入的正文不计入「今天写的字」——后端建节点本来就不记，别在别处补。
    */
-  async function docxToText(file) {
+  async function importNodes(sections, { kind = 'chapter', parentId = null } = {}, onProgress = null) {
+    const out = await postChunks(sections, { kind, parentId }, onProgress)
+    await afterImport(out)
+    return out
+  }
+
+  /**
+   * 按标题层级导入：一级标题建卷，二级标题当章挂在卷下。
+   *
+   * 为什么要这一条：EPUB 里的 h1/h2、docx 里的「第一卷 / 第一章」本来就是
+   * 两层结构，全平铺导进来会得到两百个并列的章，之后想按卷拆解或统计
+   * 只能靠人手工拖。
+   *
+   * 两个顺序不能乱：卷和它的章按阅读顺序建（`ordinal` 是全书递增，建错
+   * 顺序「上一章摘要」就串了），以及索引只在最后建一次。
+   * 一级标题自带正文的（卷首语）由调用方先拆成一节递进来，这里不猜。
+   */
+  async function importOutline(outline, { kind = 'chapter', parentId = null } = {}, onProgress = null) {
+    const out = { created: 0, failed: 0, firstId: '', reasons: [], stopped: false, volumes: 0 }
+    if (!work.value || !outline.length) return out
+    // 一级标题自带正文（卷首语）也算一节：丢正文比多一层结构严重得多
+    const leafOf = (item) => (item.children?.length
+      ? item.children.length + (String(item.content || '').trim() ? 1 : 0)
+      : 1)
+    const total = outline.reduce((n, item) => n + leafOf(item), 0)
+    let done = 0
+    let batch = []
+
+    const merge = (res, n) => {
+      out.created += res.created
+      out.failed += res.failed
+      // firstId 只认章：卷选不中，写作台打开一个空卷什么也不是
+      if (!out.firstId && res.firstId) out.firstId = res.firstId
+      out.reasons.push(...res.reasons)
+      if (res.stopped) out.stopped = true
+      done += n
+    }
+
+    const flush = async () => {
+      if (!batch.length) return
+      const part = batch
+      batch = []
+      const res = await postChunks(
+        part, { kind, parentId }, (d) => onProgress?.(done + d, total))
+      merge(res, part.length)
+    }
+
+    for (const item of outline) {
+      if (out.stopped) break
+      if (!item.children?.length) {
+        batch.push(item)   // 根上的独立章：攒成一批发，保住阅读顺序
+        continue
+      }
+      await flush()
+      if (out.stopped) break
+      const vol = await createVolume(item.title, parentId)
+      if (!vol) {
+        // 只记原因、不动 failed：这一卷的节没进 done，收尾那句 tail 会一并算进没成功
+        out.reasons.push(`${item.title}：这一卷没建起来，它下面的 ${item.children.length} 节没导`)
+        out.stopped = true
+        break
+      }
+      out.volumes += 1
+      // 卷首语：一级标题自己带的那几段话当作这一卷的第一节发下去，
+      // 不写进卷（容器不进正文，写进去就再也搜不到、读不到了）
+      const kids = String(item.content || '').trim()
+        ? [{ title: `${item.title}（卷首）`, content: item.content }, ...item.children]
+        : item.children
+      const res = await postChunks(
+        kids, { kind, parentId: vol.id },
+        (d) => onProgress?.(done + d, total))
+      merge(res, kids.length)
+    }
+    await flush()
+    // 中途停下时，后面没发的节也要算进「没成功」：界面报的数得跟人对得上
+    if (out.stopped) out.failed += total - done
+    await afterImport(out)
+    return out
+  }
+
+  /** 建一个卷（容器）。不走 createNode：那条路每建一节都重拉树并跳选，一卷一次会把界面抖坏 */
+  async function createVolume(title, parentId = null) {
+    const r = await apiFetch(`/studio/works/${work.value.id}/nodes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'volume', title, content: '', parent_id: parentId || null }),
+    })
+    if (!r.ok) return null
+    return await r.json()
+  }
+
+  /**
+   * 把一份稿件文件（.docx / .epub / .txt / .md）交给后端解成纯文本：
+   * 不写库，解出来的文本填进导入弹层继续预览。
+   * 收原始字节（octet-stream），后端不需要 multipart。
+   *
+   * 文本类也走后端而不是 `file.text()`：那一句按 UTF-8 硬读，GBK 的中文
+   * 稿子会变成一路不报错的乱码；后端探完编码还会把 encoding 一并带回来。
+   */
+  async function fileToText(file) {
     try {
-      const r = await apiFetch('/studio/import/docx', {
+      const r = await apiFetch(`/studio/import/doc?name=${encodeURIComponent(file.name)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: file,
       })
-      if (!r.ok) return { ok: false, reason: await errDetail(r, 'docx 解析失败') }
+      if (!r.ok) return { ok: false, reason: await errDetail(r, '文件解析失败') }
       return { ok: true, ...(await r.json()) }
     } catch (e) {
       return { ok: false, reason: `文件没传上去：${String(e?.message || e)}` }
@@ -729,7 +864,10 @@ export const useStudioStore = defineStore('studio', () => {
     const res = await r.json()
     if (res.moved && work.value) {
       tree.value = await (await apiFetch(`/studio/works/${work.value.id}/tree`)).json()
-      if (node.value?.id === id) await selectNode(id)
+      // 换位会按树序重排全书章号：整卷换位时，当前开着的那一节即便不是被移动的那一节，
+      // 章号也变了（摘要、一致性检查、生成全按号走），不重拉就会拿旧号继续写
+      const current = node.value?.id
+      if (current) await selectNode(current)
     }
     return res
   }
@@ -1926,7 +2064,9 @@ export const useStudioStore = defineStore('studio', () => {
     const q = queue.value
     if (!q) return false
     if (q.paused || q.triage?.due) return true
-    return Boolean(q.current) || (q.counts?.queued || 0) > 0
+    // 路数口径与 QueuePanel 保持一份：并行时 current 只是其中一路，
+    // 但万一某一路没写进 current，也不能因此把轮询停了
+    return laneCount(q) > 0 || (q.counts?.queued || 0) > 0
   })
 
   // ==================== 批量前成本预估（迭代 C） ====================
@@ -1978,7 +2118,7 @@ export const useStudioStore = defineStore('studio', () => {
     loadTemplates, fetchWorks, createWork, updateWork, setWorkStatus, globalSearch,
     ideas, dailyWrites, pipelineStats, loadIdeas, addIdea, useIdea, deleteIdea, loadDailyWrites, loadPipeline,
     selectWork, selectNode, deleteWork,
-    saveNode, finalGate, createNode, importNodes, docxToText, deleteNode, moveNode, reparentNode, replaceText,
+    saveNode, finalGate, createNode, importNodes, importOutline, fileToText, deleteNode, moveNode, reparentNode, replaceText,
     // 迭代 B：结构操作与统一收尾（批量操作也走 afterStructureChange 重拉树）
     duplicateNode, splitNode, mergeNodes, afterStructureChange,
     loadSources, addSource, loadSource, searchSources, extractFacts, deleteSource, updateSource,

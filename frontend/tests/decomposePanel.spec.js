@@ -25,6 +25,11 @@ const store = vi.hoisted(() => ({
   ],
   setGenModel: vi.fn(),
   loadSources: vi.fn(async () => {}),
+  // 并行路数只有队列状态接口知道：替身走同一套路由，返回后端那份状态
+  loadQueue: vi.fn(async () => {
+    const r = await apiFetch('/studio/queue/status?work_id=w1')
+    return r.ok ? await r.json() : null
+  }),
 }))
 
 vi.mock('../src/utils/api', () => ({ apiFetch }))
@@ -89,6 +94,7 @@ beforeEach(() => {
   apiFetch.mockReset()
   store.setGenModel.mockClear()
   store.loadSources.mockClear()
+  store.loadQueue.mockClear()
 })
 
 it('挂载即拉：卡片按后端顺序渲染，截断警告与进度数字都在', async () => {
@@ -249,5 +255,46 @@ it('队列有活时按状态摆 pill；没活就不开轮询（组件卸载后�
   expect(w.text()).toContain('排队 3')
   expect(w.text()).toContain('完成 1')
   expect(w.text()).toContain('任务 4 条')
+  w.unmount()
+})
+
+it('并行路数来自队列状态：多路在拆时把「N 路并行」说出来', async () => {
+  const w = await mountPanel({
+    'GET /studio/works/w1/craft': () => okJson(craftFixture({
+      progress: { running: 3, queued: 8 },
+    })),
+    'GET /studio/queue/status?work_id=w1': () => okJson({
+      worker: true,
+      running: [
+        { job_id: 'j1', task_type: 'craft', title: '第1章', elapsed_ms: 5000 },
+        { job_id: 'j2', task_type: 'craft', title: '第2章', elapsed_ms: 4200 },
+        { job_id: 'j3', task_type: 'craft', title: '第3章', elapsed_ms: 3100 },
+      ],
+      current: { job_id: 'j1', task_type: 'craft', title: '第1章', elapsed_ms: 5000 },
+    }),
+  })
+  expect(w.text()).toContain('3 路并行')
+  expect(store.loadQueue).toHaveBeenCalledTimes(1)
+})
+
+it('只有一路在跑就不提并行：反代通道不该被文案骗成多路', async () => {
+  const w = await mountPanel({
+    'GET /studio/works/w1/craft': () => okJson(craftFixture({
+      progress: { running: 1, queued: 8 },
+    })),
+    // 老口径只有 current：当成一路，不能因为读不到 running 就显示空闲
+    'GET /studio/queue/status?work_id=w1': () => okJson({
+      worker: true,
+      current: { job_id: 'j1', task_type: 'craft', title: '第1章', elapsed_ms: 5000 },
+    }),
+  })
+  expect(w.text()).not.toContain('路并行')
+  expect(w.text()).toContain('任务 9 条')
+})
+
+it('空闲时不拉队列状态：路数只在确实有任务在跑时才多打一次', async () => {
+  const w = await mountPanel()
+  expect(store.loadQueue).not.toHaveBeenCalled()
+  expect(apiFetch.mock.calls.some(([u]) => String(u).startsWith('/studio/queue/status'))).toBe(false)
   w.unmount()
 })

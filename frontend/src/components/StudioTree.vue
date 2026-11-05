@@ -405,6 +405,7 @@ const menuItems = computed(() => {
   const n = menu.value.node
   if (!n) return []
   const isLeaf = n.ordinal != null
+  const rank = rankOf(n.id)
   const items = [
     { act: 'create', label: '新建子节点', on: () => emit('create', n) },
   ]
@@ -412,8 +413,25 @@ const menuItems = computed(() => {
     items.push(
       { act: 'insertBefore', label: '在前面插入', on: () => emit('insert', n, 'before') },
       { act: 'insertAfter', label: '在后面插入', on: () => emit('insert', n, 'after') },
-      { act: 'up', label: '上移', disabled: rankOf(n.id).first, on: () => emit('move', n, 'up') },
-      { act: 'down', label: '下移', disabled: rankOf(n.id).last, on: () => emit('move', n, 'down') },
+    )
+  }
+  // 卷也要能换位置：批量导入的几卷顺序常常要挪，换的是整棵子树（后端连 path 一起换）
+  items.push(
+    { act: 'up', label: '上移', disabled: rank.first,
+      hint: isLeaf ? '' : '整卷连同章节一起换', on: () => emit('move', n, 'up') },
+    { act: 'down', label: '下移', disabled: rank.last,
+      hint: isLeaf ? '' : '整卷连同章节一起换', on: () => emit('move', n, 'down') },
+  )
+  if (isLeaf) {
+    if (n.parent_id) {
+      // 从卷里搬回顶层：拖拽没有「空白处」可落，一本书只有卷时更没地方放
+      items.push({
+        act: 'toRoot',
+        label: '移出到顶层',
+        on: () => emit('reparent', n, null, { mode: 'inside' }),
+      })
+    }
+    items.push(
       { act: 'duplicate', label: '复制（连子树）', on: () => emit('duplicate', n) },
       {
         act: 'split',

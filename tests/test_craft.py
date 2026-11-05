@@ -16,7 +16,7 @@ from fastapi import FastAPI
 
 from app.api import studio_routes
 from app.llm.gateway import DEFAULT_MODEL
-from app.studio import craft, tasks
+from app.studio import craft, sampling, tasks
 from app.studio.store import StudioStore, _hash
 
 CHAP_TEXT = "她推门进去，屋里坐着三个人，气氛一下子僵住了。" * 20  # ~500 字，够拆
@@ -47,13 +47,19 @@ def reply_for(system: str) -> str:
 
 
 class FakeGateway:
-    """只记账 + 按 system 认层级返 JSON。resolve 给 provider 名。"""
+    """只记账 + 按 system 认层级返 JSON。resolve 给 provider 名。
+
+    采样参数单独记一份 `kw`：json_mode 有没有发出去是要断言的事，但不能
+    搅乱 `calls` 那套 (system, prompt) 的解包写法——十几处测试都在用它。
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.kw: list[dict] = []
 
-    async def complete(self, *, model: str, system: str, prompt: str, mode: str = "quick"):
+    async def complete(self, *, model: str, system: str, prompt: str, mode: str = "quick", **kw):
         self.calls.append((system, prompt))
+        self.kw.append(kw)
         return SimpleNamespace(text=reply_for(system))
 
     def resolve(self, model: str):
@@ -161,6 +167,25 @@ async def test_short_chapter_not_analysed(store) -> None:
 
     res = await craft.analyze_chapter(gw, store, node, model=DEFAULT_MODEL)
     assert res["status"] == "short" and gw.calls == []
+
+
+async def test_every_level_asks_for_json_mode_and_low_temperature(store) -> None:
+    """三级拆解都要把 json_mode + 低温发出去。
+
+    这一条是直连跑本地模型能不能拆成一本书的分水牌：上游保证合法 JSON
+    比我们在提示词里恳求可靠得多，而卷/全书级一旦解析失败就是整卷重跑。
+    """
+    gw = FakeGateway()
+    work, vol, nodes = await make_book(store, chapters=3)
+    for n in nodes:
+        if len(n["content"]) >= craft.MIN_CHAPTER_CHARS:
+            await craft.analyze_chapter(gw, store, n, model=DEFAULT_MODEL)
+    await craft.analyze_volume(gw, store, work, vol, model=DEFAULT_MODEL)
+    await craft.analyze_book(gw, store, work, model=DEFAULT_MODEL)
+
+    assert len(gw.kw) == len(gw.calls) and gw.kw
+    for kw in gw.kw:
+        assert kw == {"temperature": sampling.TEMP_STRICT, "json_mode": True}
 
 
 # ==================== 执行层：卷与全书 ====================

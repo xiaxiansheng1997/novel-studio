@@ -10,9 +10,10 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
-from app.studio import jsonutil
+from app.studio import jsonutil, tokenize
 
 
 def work_meta(work: dict[str, Any]) -> dict[str, Any]:
@@ -102,6 +103,70 @@ def node_instruction(node: dict[str, Any], meta: dict[str, Any], extra: str = ""
         bits.append(f"附加要求：{extra}")
     bits.append("只输出本节正文，不要重复标题，不要写下一节的过渡句。")
     return "\n".join(bits)
+
+
+# 标题里的卷/章序号不是检索线索：「第一章 夜访」里的「第一章」全库都有。
+# 分词前先在原文里抠一遍：jieba 会把「第一章」切成「第一」「章」，
+# 事后按 token 过滤只能拦住后者。
+_ORDINAL_IN_TEXT = re.compile(r"第\s*[0-9一二三四五六七八九十百千零两]{1,4}\s*[章节卷回部篇讲]")
+_ORDINAL = re.compile(r"^第[0-9一二三四五六七八九十百千零两]{1,4}[章节卷回部篇讲]$")
+
+
+def retrieval_terms(
+    node: dict[str, Any], meta: dict[str, Any], *, extra: str = ""
+) -> list[str]:
+    """本节检索用的关键词，按重要度排序。
+
+    不能把 `node_instruction()` 整段拿去分词：它一半篇幅是模板句
+    （「本节标题」「篇幅：约 1000 字」「只输出本节正文」）。实测一节 123 个词，
+    `match_query` 只取前 12 个，其中一半是套话，而计划里真正的地名/器物
+    （「西市」「暗格」「令底」）全被挡在门外——检索不是没召回，是根本没问出去。
+
+    取词顺序就是重要度：标题 → 地点/时间 → 要点 → 节拍卡 → 附加要求。
+    “地点/时间”排在“要点”前面：它们是作者点名的最硬线索，而要点常是长句。
+    """
+    node = node or {}
+    info = node_outline(node, meta)
+    raw: list[str] = []
+    if node.get("title"):
+        raw.append(_ORDINAL_IN_TEXT.sub(" ", str(node["title"])))
+    for key in ("place", "time"):
+        if info.get(key):
+            raw.append(str(info[key]))
+    if info.get("prompt"):
+        raw.append(str(info["prompt"]))
+    beat = str(node.get("summary") or "").strip()
+    if beat:
+        raw.append(beat)
+    if extra:
+        raw.append(str(extra))
+
+    out: list[str] = []
+    for tok in tokenize.tokens(" ".join(raw)):
+        if tok in out or tok.isdigit() or _ORDINAL.match(tok):
+            continue
+        out.append(tok)
+    return out
+
+
+def retrieval_phrases(node: dict[str, Any], meta: dict[str, Any]) -> list[str]:
+    """检索里当「短语」用的短串：去掉序号后的标题 + 地点。
+
+    长句在 FTS 里不可能连续命中，但「西市仓库」这种 3-4 字的地名一旦在正文里
+    原文出现，就是比散词命中硬得多的证据。`retrieve` 会对候选块做子串匹配并加成。
+    """
+    node = node or {}
+    info = node_outline(node, meta)
+    out: list[str] = []
+    for raw in (
+        _ORDINAL_IN_TEXT.sub(" ", str(node.get("title") or "")),
+        str(info.get("place") or ""),
+    ):
+        p = raw.strip().strip("《》〈〉\"'“” ")
+        # 短于 3 字（「夜访」）太容易误中；带空白说明不是一个连续串
+        if len(p) >= 3 and p not in out and " " not in p:
+            out.append(p)
+    return out
 
 
 def target_words_of(node: dict[str, Any], meta: dict[str, Any], resolved: dict[str, Any]) -> int:

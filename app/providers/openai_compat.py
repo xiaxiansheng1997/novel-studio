@@ -28,6 +28,21 @@ from app.providers._replay import SSEBuffer, is_done
 # 首包可以很慢（Ollama 冷加载模型、官方排队），但字出来之后不该断太久
 _TIMEOUT = httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=15.0)
 
+# 上游不认 JSON 模式时回话里跑不掉的几个词
+_JSON_REJECT_WORDS = ("response_format", "json_mode", "json_object", "json_schema")
+
+
+def _rejects_json_mode(message: str) -> bool:
+    """「4xx 回绝 + 提到 JSON 格式字段」才算不支持 response_format。
+
+    5xx 是服务故障（重试也救不了）、鉴权错是 key 问题，都不能往格式字段上归——
+    归错了会把真实的配置问题藏起来。
+    """
+    low = (message or "").lower()
+    if "上游 http 4" not in low:
+        return False
+    return any(w in low for w in _JSON_REJECT_WORDS)
+
 
 class OpenAICompatAdapter(ProviderAdapter):
     """POST {base_url}/chat/completions（stream）→ DeltaEvent。"""
@@ -106,13 +121,9 @@ class OpenAICompatAdapter(ProviderAdapter):
             return ev
         return None
 
-    async def stream(self, req: ChatCompletionRequest) -> AsyncIterator[DeltaEvent]:
-        base = (self.cfg.base_url or "").rstrip("/")
-        if not base:
-            raise ProviderError(self.key, "没配 base_url（兼容端点根地址，如 …/v1）")
-        if self.cfg.api_key_env and not self._api_key():
-            await self.ensure_session()
-        body = {
+    def _body(self, req: ChatCompletionRequest) -> dict[str, Any]:
+        """请求体：可选字段只在上游给了才塞，有些兼容端点对多余键很敏感。"""
+        body: dict[str, Any] = {
             "model": self.upstream_model(req.model),
             "messages": [m.model_dump(exclude_none=True) for m in req.messages],
             "stream": True,
@@ -121,45 +132,78 @@ class OpenAICompatAdapter(ProviderAdapter):
             body["temperature"] = req.temperature
         if req.max_tokens is not None:
             body["max_tokens"] = req.max_tokens
-        url = f"{base}/chat/completions"
-        async with self._make_client() as client:
-            try:
-                async with client.stream("POST", url, headers=self._headers(), json=body) as resp:
-                    if resp.status_code != 200:
-                        raw = (await resp.aread()).decode("utf-8", "replace")[:300]
-                        raise ProviderError(
-                            self.key, f"上游 HTTP {resp.status_code}：{raw}",
-                            status=502,
-                        )
-                    buf = SSEBuffer()
-                    # 终止权不全交给 [DONE]：上游带着长连接不写它时，
-                    # read=300 会把一次调用整整堵 5 分钟（审查 m7）。
-                    # finish_reason 到手 = 模型已经说完，[DONE] 到手 = 上游说完了，
-                    # 两个都算数。
-                    done = False
-                    async for text in resp.aiter_text():
-                        for payload in buf.feed(text):
-                            if not payload:
-                                continue
-                            if is_done(payload):
-                                done = True
-                                break
-                            ev = self._parse_chunk(payload)
-                            if ev is None:
-                                continue
-                            yield ev
-                            if ev.finish_reason:
-                                done = True
-                                break
-                        if done:
+        if req.stop:
+            # 以前 stop 只在上层做本地软截断：上游照样把整段生成完，白花 token
+            body["stop"] = req.stop
+        if req.response_format:
+            body["response_format"] = req.response_format
+        return body
+
+    async def _stream_once(self, client: httpx.AsyncClient, url: str,
+                           body: dict[str, Any]) -> AsyncIterator[DeltaEvent]:
+        """发一次流式请求并产出 DeltaEvent（降级重试用同一个 client 再调一次）。"""
+        try:
+            async with client.stream("POST", url, headers=self._headers(), json=body) as resp:
+                if resp.status_code != 200:
+                    raw = (await resp.aread()).decode("utf-8", "replace")[:300]
+                    raise ProviderError(
+                        self.key, f"上游 HTTP {resp.status_code}：{raw}",
+                        status=502,
+                    )
+                buf = SSEBuffer()
+                # 终止权不全交给 [DONE]：上游带着长连接不写它时，
+                # read=300 会把一次调用整整堵 5 分钟（审查 m7）。
+                # finish_reason 到手 = 模型已经说完，[DONE] 到手 = 上游说完了，
+                # 两个都算数。
+                done = False
+                async for text in resp.aiter_text():
+                    for payload in buf.feed(text):
+                        if not payload:
+                            continue
+                        if is_done(payload):
+                            done = True
                             break
-                    if not done:
-                        # 流自然断开且没见终止信号：把最后没成行的一段补发掉
-                        for payload in buf.flush():
-                            if not payload or is_done(payload):
-                                continue
-                            ev = self._parse_chunk(payload)
-                            if ev is not None:
-                                yield ev
-            except httpx.HTTPError as exc:
-                raise ProviderError(self.key, f"连不上 {base}：{exc}") from exc
+                        ev = self._parse_chunk(payload)
+                        if ev is None:
+                            continue
+                        yield ev
+                        if ev.finish_reason:
+                            done = True
+                            break
+                    if done:
+                        break
+                if not done:
+                    # 流自然断开且没见终止信号：把最后没成行的一段补发掉
+                    for payload in buf.flush():
+                        if not payload or is_done(payload):
+                            continue
+                        ev = self._parse_chunk(payload)
+                        if ev is not None:
+                            yield ev
+        except httpx.HTTPError as exc:
+            raise ProviderError(self.key, f"连不上 {self.cfg.base_url}：{exc}") from exc
+
+    async def stream(self, req: ChatCompletionRequest) -> AsyncIterator[DeltaEvent]:
+        base = (self.cfg.base_url or "").rstrip("/")
+        if not base:
+            raise ProviderError(self.key, "没配 base_url（兼容端点根地址，如 …/v1）")
+        if self.cfg.api_key_env and not self._api_key():
+            await self.ensure_session()
+        url = f"{base}/chat/completions"
+        body = self._body(req)
+        async with self._make_client() as client:
+            started = False
+            try:
+                async for ev in self._stream_once(client, url, body):
+                    started = True
+                    yield ev
+            except ProviderError as exc:
+                # 老端点或不支持结构化输出的模型会因为 response_format 直接 400。
+                # 为这一个字段把整章拆解推进失败重试不值得：去掉它再发一次。
+                # 只在首包之前降级——已经开始吐字了重发会把半句话拼成两遍。
+                if (started or "response_format" not in body
+                        or not _rejects_json_mode(str(exc))):
+                    raise
+                body.pop("response_format", None)
+                async for ev in self._stream_once(client, url, body):
+                    yield ev

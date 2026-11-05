@@ -160,6 +160,13 @@ class CompatTest(BaseModel):
     api_key: str = ""
 
 
+class CompatModels(BaseModel):
+    """取模型可以发生在「还没保存」的时候：新建通道那一步库里压根没这行，
+    base_url / api_key 就得随 body 递进来，不然用户只能先存一个错的再改。"""
+    base_url: str = ""
+    api_key: str = ""
+
+
 def _yaml_provider_keys() -> set[str]:
     """config.yaml 里原生存在的 provider key（判断 in_yaml / 能不能删）。"""
     import yaml
@@ -313,6 +320,96 @@ async def test_compat(key: str, request: Request, body: Optional[CompatTest] = N
     except httpx.HTTPError as exc:
         return {"ok": False, "latency_ms": int((time.perf_counter() - started) * 1000),
                 "detail": f"连不上 {base}：{exc}"}
+
+
+# 上游清单上限：OpenAI 这类一次报 200+ 个，再多多半是镜像了别人家整个目录
+MAX_UPSTREAM_MODELS = 300
+
+
+def _upstream_model_ids(payload: object) -> list[str]:
+    """把 /models 的响应摊平成 id 清单：各家形状不一样，都得接住。
+
+    OpenAI 标准是 `{"data": [{"id": ...}]}`；也有站点直接回裸数组、回
+    `{"models": ...}`、条目里只有 name 没有 id。去重并保持上游顺序
+    （多数家把新的排在前），前端自己决定怎么摆。
+    """
+    if isinstance(payload, dict):
+        rows = payload.get("data")
+        if rows is None:
+            rows = payload.get("models")
+    else:
+        rows = payload
+    if not isinstance(rows, list):
+        return []
+    out: list[str] = []
+    for row in rows:
+        if isinstance(row, str):
+            mid = row.strip()
+        elif isinstance(row, dict):
+            mid = str(row.get("id") or row.get("name") or "").strip()
+        else:
+            mid = ""
+        if mid and mid not in out:
+            out.append(mid)
+    return out
+
+
+@router.post("/admin/compat/{key}/models", dependencies=[Depends(verify_key)])
+async def discover_compat_models(
+    key: str, request: Request, body: Optional[CompatModels] = None,
+):
+    """问上游 `/models` 要它自己的模型清单（不写库、不走 adapter/限流）。
+
+    模型 id 现在靠人手抄，抄错一个字符就是「选了才炸」；这一条把清单
+    拿回来让界面改成点选。新建还没落库的通道也能取：那一步库里没这行，
+    base_url / api_key 只能随 body 递进来。取不到就当成返回信息报回去
+    （ok=false），不翻成 500——本地部署关掉 /models 很常见，这不是错。
+    """
+    reg = request.app.state.registry
+    pcfg = reg.config.providers.get(key)
+    if pcfg is not None and not getattr(pcfg, "compat", False):
+        raise HTTPException(
+            status_code=400, detail=f"「{key}」是反代站点，不是直连通道，没有 /models 可问")
+    incoming = body or CompatModels()
+    base = (incoming.base_url.strip() or (pcfg.base_url if pcfg else "")).strip().rstrip("/")
+    if not base:
+        raise HTTPException(status_code=400, detail="先填 base_url（兼容端点根地址，如 https://api.deepseek.com/v1）")
+    if not base.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="base_url 要带 http:// 或 https://")
+    raw_key = incoming.api_key.strip()
+    if not raw_key and pcfg is not None:
+        raw_key = pcfg.api_key or os.environ.get(pcfg.api_key_env or "", "").strip()
+
+    headers = {"Accept": "application/json"}
+    if raw_key:
+        headers["Authorization"] = f"Bearer {raw_key}"
+    url = f"{base}/models"
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
+        ) as client:
+            resp = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        return {"ok": False, "models": [], "detail": f"连不上 {url}：{exc}"}
+    if resp.status_code != 200:
+        return {"ok": False, "models": [],
+                "detail": f"上游 HTTP {resp.status_code}：{(resp.text or '')[:200]}"}
+    try:
+        payload = resp.json()
+    except ValueError:
+        return {"ok": False, "models": [], "detail": "上游回了 200 但不是 JSON（这个地址多半不是 OpenAI 兼容端点）"}
+    models = _upstream_model_ids(payload)
+    if not models:
+        return {"ok": False, "models": [],
+                "detail": "上游的清单是空的（有些站点不开放 /models，模型 id 得手填）"}
+    total = len(models)
+    return {
+        "ok": True,
+        "models": models[:MAX_UPSTREAM_MODELS],
+        "total": total,
+        "truncated": total > MAX_UPSTREAM_MODELS,
+        "detail": f"上游报了 {total} 个模型",
+    }
 
 
 def _apply_runtime_config(request: Request) -> dict:

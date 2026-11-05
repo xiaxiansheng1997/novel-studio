@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from loguru import logger
 
-from app.studio import content_types, graph, retrieval
+from app.studio import content_types, graph, prompting, retrieval
 
 # 按形态给总预算（字符）——仅作为 YAML 缺失时的兜底
 BUDGET = {"article": 18000, "novel": 28000}
@@ -192,9 +192,12 @@ async def _source_evidence(
         return "", [], [], ""
 
     used: list[dict[str, Any]] = []
-    query = retrieval.build_query(
-        (node or {}).get("title"), instruction, work.get("premise")
+    # 用节点计划里的关键词检索，而不是整段 instruction：模板句会把
+    # 真正的资料名挤出去（见 prompting.retrieval_terms）。
+    terms = prompting.retrieval_terms(
+        node or {}, prompting.work_meta(work), extra=instruction
     )
+    query = retrieval.build_query(*terms, work.get("premise"))
     if query and await store.count_chunks(work_id, "source"):
         hits = await retrieval.retrieve(
             store,
@@ -468,8 +471,14 @@ async def assemble(
             buckets.pop("S6", None)
         else:
             current_ordinal = int((node or {}).get("ordinal") or 0)
-            probe = " ".join(x for x in (
-                (node or {}).get("title"), instruction, work.get("premise")) if x)
+            # 探针与 S5 同一套取词：都只靠「标题 + 地点 + 要点」，
+            # 不再把整段指令模板拼进去——那会把图谱里的专名淹掉。
+            # 主旨另拼：那不是「本节计划」，但整本的世界观都压在它身上
+            probe = " ".join([
+                *prompting.retrieval_terms(
+                    node or {}, prompting.work_meta(work), extra=instruction),
+                work.get("premise") or "",
+            ]).strip()
             sg = await graph.subgraph(
                 store, work["id"], text=probe, hops=2, limit=40)
             text = graph.format_subgraph(
@@ -528,7 +537,12 @@ async def assemble(
     if "S5" in buckets and node:
         used = sum(b.chars for bid, b in buckets.items() if bid != "S5")
         room = max(1200, min(buckets["S5"].budget, total_budget - used))
-        query = retrieval.build_query(node.get("title"), instruction, work.get("premise"))
+        query = retrieval.build_query(
+            *prompting.retrieval_terms(node, prompting.work_meta(work), extra=instruction),
+            work.get("premise"),
+        )
+        # 地点/标题整串命中比散词命中硬：传下去做短语加成（见 retrieval.PHRASE_BONUS）
+        phrases = prompting.retrieval_phrases(node, prompting.work_meta(work))
         hits = await retrieval.retrieve(
             store,
             work["id"],
@@ -538,6 +552,7 @@ async def assemble(
             top_k=8,
             budget_chars=room,
             exclude_node_ids={node["id"]},
+            phrases=phrases,
         )
         if hits:
             buckets["S5"].budget = room

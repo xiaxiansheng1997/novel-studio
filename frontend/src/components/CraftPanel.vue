@@ -93,6 +93,11 @@
       <p class="hint">
         已拆 {{ data.analysed_chapters }}/{{ data.total_chapters }} 章
         <template v-if="progressTotal"> · 任务 {{ progressTotal }} 条</template>
+        <template v-if="laneN > 1"> · {{ laneN }} 路并行</template>
+      </p>
+      <p v-if="laneN > 1" class="hint">
+        {{ laneN }} 路同时在拆：只有直连 API 通道会多开（路数取自该通道的
+        max_concurrency），走反代仍是一路。
       </p>
       <div v-if="progressTotal" class="progress-row">
         <span v-for="(n, k) in data.progress" :key="k" class="pill" :class="pillOf(k)">
@@ -180,6 +185,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { apiFetch } from '../utils/api'
+import { laneCount } from '../utils/queue'
 import { useStudioStore } from '../stores/studio'
 
 const store = useStudioStore()
@@ -220,6 +226,10 @@ const tplBusy = ref(false)
 const tplNote = ref('')
 
 const busy = computed(() => (data.value.progress?.running || 0) > 0)
+// 并行路数：craft 接口只有计数，“现在几路在跑”只有队列状态知道。
+// 存成本地 ref 而不是去读 store.queue：这个面板自己拉、自己摆，轮时序
+// 不用跟着别人的轮询转（没在跑时归 0，宁可不算并行也不拿过期数据接着吹）。
+const laneN = ref(0)
 // 可选范围只有容器（卷）；单层书没有卷时下拉里只剩「整本书」一个选项
 const scopeOptions = computed(() =>
   (store.tree || []).filter((n) => n.ordinal == null))
@@ -300,6 +310,16 @@ async function refresh() {
     // 卡片换了新列表，勾选里可能留着已不存在的 id：清掉，否则「拷到书（3）」实际只发得出 2 条
     const ids = new Set(data.value.analyses.map((c) => c.id))
     picked.value = picked.value.filter((id) => ids.has(id))
+    // 只在确实有任务在跑时多打一次：空闲不白增请求；路数拉不到就当串行显示
+    if ((data.value.progress?.running || 0) > 0) {
+      try {
+        laneN.value = laneCount(await store.loadQueue())
+      } catch {
+        laneN.value = 0
+      }
+    } else {
+      laneN.value = 0
+    }
   } finally {
     loading.value = false
   }

@@ -227,6 +227,100 @@ def test_ready_checks_config_not_liveness():
         os.environ.pop("W2A_TEST_ABSENT_KEY", None)
 
 
+# ---------- 采样参数透传与 JSON 模式降级 ----------
+
+
+@pytest.mark.asyncio
+async def test_body_carries_sampling_stop_and_json_mode():
+    """P0 的接线：上层给了就要发出去，尤其是 stop——以前只在上层做本地
+    软截断，上游照样把整段生成完，白花 token。"""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, content=sse_body(chunk('{"a":1}', finish="stop")))
+
+    adapter = make_adapter(make_cfg())
+    patch_client(adapter, handler)
+    req = ChatCompletionRequest(
+        model="ollama-qwen2.5:14b",
+        messages=[{"role": "user", "content": "拆一下"}],
+        stream=True, temperature=0.2, max_tokens=800, stop=["END"],
+        response_format={"type": "json_object"},
+    )
+    await drain(adapter.stream(req))
+
+    body = seen["body"]
+    assert (body["temperature"], body["max_tokens"]) == (0.2, 800)
+    assert body["stop"] == ["END"]
+    assert body["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_body_stays_minimal_when_no_sampling_given():
+    """没给的字段不塞：有些兼容端点对多余键很敏感，不能为了「完整」把请求体撑肥。"""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, content=sse_body(chunk("ok", finish="stop")))
+
+    adapter = make_adapter(make_cfg())
+    patch_client(adapter, handler)
+    req = ChatCompletionRequest(
+        model="ollama-qwen2.5:14b", messages=[{"role": "user", "content": "hi"}], stream=True)
+    await drain(adapter.stream(req))
+    assert set(seen["body"]) == {"model", "messages", "stream"}
+
+
+@pytest.mark.asyncio
+async def test_json_mode_falls_back_when_upstream_rejects_it():
+    """老端点会因为 response_format 直接 400：去掉它再发一次，而不是让整章
+    拆解吃一次失败重试（那要等 30s 退避，还要把重试次数烧光）。"""
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        if "response_format" in body:
+            err = json.dumps({"error": {"message": "Unsupported parameter: 'response_format'"}})
+            return httpx.Response(400, content=err.encode("utf-8"))
+        return httpx.Response(200, content=sse_body(chunk('{"a":1}', finish="stop")))
+
+    adapter = make_adapter(make_cfg())
+    patch_client(adapter, handler)
+    req = ChatCompletionRequest(
+        model="ollama-qwen2.5:14b", messages=[{"role": "user", "content": "拆"}],
+        stream=True, response_format={"type": "json_object"})
+    evs = await drain(adapter.stream(req))
+
+    assert len(calls) == 2
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert "response_format" not in calls[1]
+    assert "".join(ev.content or "" for ev in evs) == '{"a":1}'
+
+
+@pytest.mark.asyncio
+async def test_other_4xx_is_not_mistaken_for_json_mode_reject():
+    """模型名写错也会 400：这种错不能被「去掉格式字段再试」掩盖，
+    否则用户永远看不到「模型不存在」这句真话。"""
+    hits: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hits.append(1)
+        err = json.dumps({"error": {"message": "The model `ollama-ghost` does not exist"}})
+        return httpx.Response(400, content=err.encode("utf-8"))
+
+    adapter = make_adapter(make_cfg())
+    patch_client(adapter, handler)
+    req = ChatCompletionRequest(
+        model="ollama-qwen2.5:14b", messages=[{"role": "user", "content": "hi"}],
+        stream=True, response_format={"type": "json_object"})
+    with pytest.raises(ProviderError, match="HTTP 400"):
+        await drain(adapter.stream(req))
+    assert len(hits) == 1, "不是格式问题就不该重发"
+
+
 # ---------- registry 登记与路由 ----------
 
 

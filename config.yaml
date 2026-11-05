@@ -110,6 +110,9 @@ providers:
     models:
       - {id: gpt-4o-mini}
       - {id: gpt-4o}
+    # 并发路数：队列的章级拆解会按这个值凑批并行（见 app.studio.jobs 的 PARALLEL_TASKS）。
+    # 官方 API 的 RPM 限额比这宽得多，想再快就往上调；显存/套餐不够时调回 1
+    max_concurrency: 3
     # 每千 token 单价（美元）：批量前的成本预估用；改价这里改一处即可
     price_in_per_1k_tokens: 0.00015
     price_out_per_1k_tokens: 0.0006
@@ -126,5 +129,7 @@ providers:
     models:
       - {id: "ollama-qwen2.5:14b"}
       - {id: "ollama-deepseek-r1:14b"}
+    # 本地服务也按这个值并发。14B 单卡开三路会互抢 KV/显存，实测变慢就调回 1-2
+    max_concurrency: 3
     price_in_per_1k_tokens: 0.0   # 自家显卡不计钱
     price_out_per_1k_tokens: 0.0
